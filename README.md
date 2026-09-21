@@ -4,7 +4,8 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **48 tools and 5 resources**.
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **51 tools, 6 resources and 4 prompts** —
+grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
 It is not an editor and not a plugin. It reads and writes the same files NetRadiant does, so you can
@@ -39,9 +40,17 @@ No GPU, no display, no game install, no editor.
 
 **Needed only to compile, package or read BSPs**
 
-- `q3map2` — from a NetRadiant-custom install, or built from source with `mise run vendor:build`.
+- `q3map2` — from a NetRadiant-custom install, or built from source with `mise run vendor:build`
+  (`vendor:build-tools` skips the Qt5 editor and builds only the compilers, which is what CI
+  and this project need).
 - A game installation, for `-fs_basepath`. For Urban Terror that is the directory containing
   `q3ut4/`.
+
+Upstream does not build unmodified on Apple Silicon; two portability patches live in
+[`contrib/patches/`](contrib/patches/README.md) and are applied automatically by the vendor
+build. `mise run vendor:check` syntax-checks all 116 translation units in a few seconds
+without linking, which is the quick way to find out whether a new platform needs a third.
+On macOS the build also wants `brew install pkg-config glib libpng jpeg-turbo assimp minizip`.
 
 **Optional**
 
@@ -281,7 +290,15 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-48 tools. `mise run mcp:tools` prints this list live.
+51 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+every tool that changes something — that listing is generated from the running server, so it
+cannot drift from what the server actually serves.
+
+Read and write are always separate tools. `solid_param_preview` reports what a parameter change
+would do and `solid_edit_param` records it; `model_place_plan` builds the entity and
+`model_place` adds it; `upstream_diff` reads the local baseline and `upstream_fetch` goes to the
+network. A tool that is safe or unsafe depending on one of its arguments cannot be annotated
+honestly, and a client deciding whether to ask permission reads that annotation.
 
 **The map**
 
@@ -314,7 +331,8 @@ structural brushes generate portals, and most brushes do not need to be structur
 | `solid_preview` | Compile and render, without committing. |
 | `solid_commit` | Compile and add the brushes to the open map. |
 | `solid_inspect` · `solid_list` | Structure of a recorded shape; everything recorded. |
-| `solid_edit_param` | Change one parameter and rebuild. |
+| `solid_param_preview` | Show what changing one parameter would produce. |
+| `solid_edit_param` | Change one parameter and record the edited tree. |
 
 **Meshes** — the Blender handoff
 
@@ -323,7 +341,8 @@ structural brushes generate portals, and most brushes do not need to be structur
 | `asset_plan` | Brush, patch or mesh? Decides, and says why. |
 | `blender_brief` | A numerically complete brief plus a ready-to-send prompt. |
 | `model_import` | Validate an exported mesh against the brief that asked for it. |
-| `model_place` | Build the entity that puts it in the world. |
+| `model_place_plan` | Build the entity that *would* put it in the world. |
+| `model_place` | Add that entity to the open map. |
 | `model_make_clip` | Fit a convex collision hull, returned as geometry you can commit. |
 
 **Compiling and optimizing**
@@ -364,7 +383,8 @@ structural brushes generate portals, and most brushes do not need to be structur
 | `task_list` · `task_run` | Every capability, discovered from mise; run one. |
 | `bench_run` | The fitness suite. |
 | `selfdev_protected` | The paths self-modification may never touch, and their hash pins. |
-| `upstream_diff` · `pr_plan_status` | Upstream drift; the contribution plan. |
+| `upstream_diff` · `upstream_fetch` | Upstream drift, against the local baseline or a fresh fetch. |
+| `pr_plan_status` | The contribution plan. |
 
 ## Resources
 
@@ -374,7 +394,39 @@ structural brushes generate portals, and most brushes do not need to be structur
 | `nrc://profile/{id}` | A game profile as YAML. `nrc://profile/urt43` ships. |
 | `nrc://conventions` | Representation tiers, caulk, grid discipline, authoring order. |
 | `nrc://corrections` | Claims from the design document that did not survive verification. |
+| `nrc://solid-ir` | The Solid IR operator reference, without spending a tool call. |
 | `map://current/summary` | The open map. |
+
+## Prompts
+
+Four workflows, in the order that works. Each is a sequence you could assemble from the tool list
+and would probably assemble slightly wrong — "preview before you commit", "measure the win rather
+than assuming it", "read the profile before sizing anything" are all learned.
+
+| Prompt | For |
+| --- | --- |
+| `asset_pipeline` | The brush/patch/mesh decision and the Blender round trip. |
+| `optimize_pass` | Find vis cost, then *confirm* it with a measured A/B. |
+| `new_map_bootstrap` | Start from nothing and keep it sealed and measurable. |
+| `gametype_retrofit` | Add a gametype's spawns and objectives to an existing map. |
+
+## Narrowing the surface
+
+51 tools is about 23,000 characters of description in every session. Most sessions need a
+fraction of it, so the server can be told which groups to expose:
+
+```bash
+NRC_MCP_GROUPS=map,render,sculpt   # a level-design session: 20 tools, 9k chars
+NRC_MCP_READ_ONLY=1                # a review session: every writer dropped
+```
+
+Groups are `map`, `render`, `sculpt`, `assets`, `compiling`, `gameplay`, `shipping`, `project`
+and `maintenance`. The default is everything. An unknown group name or a selection that would
+leave no tools at all stops the server with an error rather than quietly serving the wrong
+surface — a zero-tool server is indistinguishable from a broken one.
+
+It is an environment variable and not a flag because the server is launched through
+`mise run mcp:serve`, and a task's signature is a public interface here (§1.4).
 
 **Read `nrc://corrections` before trusting a rule.** The design document was written partly from
 recollection; several of its claims were wrong, including three it listed as verified.

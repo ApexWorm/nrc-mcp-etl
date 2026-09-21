@@ -8,7 +8,7 @@ license = { text = "GPL-2.0-or-later" }
 
 dependencies = [
     # The MCP surface. FastMCP is the reference Python implementation.
-    "mcp>=1.2",
+    "mcp>=2.0",
     # Profile data (profiles/*.yaml) is the §7.4 seam — YAML is the interchange format.
     "pyyaml>=6",
 ]

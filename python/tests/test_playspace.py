@@ -221,12 +221,27 @@ def test_a_skybox_does_not_make_every_rooftop_an_interior():
     )
 
 
+def _try_save(**kwargs) -> dict:
+    """`map_save`, with a refusal rendered as data so a test can assert on it.
+
+    A refused write raises `ToolError` — it is an anticipated failure, not a result. That
+    is the right shape for a caller and an awkward one for a test that wants to check both
+    branches, so the conversion happens here, once, rather than in every test.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    try:
+        return srv.map_save(**kwargs)
+    except ToolError as e:
+        return {"written": False, "reason": str(e)}
+
+
 def _clip_case(map_path: Path, ir: dict, profile: str) -> tuple[dict, dict]:
     srv.map_open(str(map_path))
     srv.solid_commit(
         ir=ir, label="clip", textures={"default": playspace.player_clip_shaders(profile)[0]}
     )
-    saved = srv.map_save()
+    saved = _try_save()
     report = playspace.diff(PLAZA, (str(map_path), srv.SESSION.map), profile_id=profile)
     return saved, report
 
@@ -299,9 +314,11 @@ def test_a_map_that_did_not_round_trip_when_opened_is_still_refused(room: Path, 
     """The original guard has to survive the fix."""
     srv.map_open(str(room))
     srv.SESSION.opened_round_trip = {"identical": False, "first_difference": {"line": 1}}
-    out = srv.map_save()
+    out = _try_save()
     assert out["written"] is False
     assert "byte-for-byte" in out["reason"]
+    # The refusal has to name where the file diverged, or the caller cannot act on it.
+    assert "line" in out["reason"]
 
 
 def test_the_save_gate_blocks_a_clip_regression_and_can_be_acknowledged(room: Path):
@@ -310,12 +327,12 @@ def test_the_save_gate_blocks_a_clip_regression_and_can_be_acknowledged(room: Pa
         ir=CLIP_LID, label="lid", textures={"default": playspace.player_clip_shaders(_profile())[0]}
     )
 
-    blocked = srv.map_save()
+    blocked = _try_save()
     assert blocked["written"] is False
-    assert any(
-        f["code"] == "PLAYSPACE_INTERIOR_SEALED_BY_CLIP"
-        for f in blocked["playable_space"]["findings"]
-    )
+    # The findings travel in the refusal itself: a ToolError carries no structured payload,
+    # so a message that only said "refused" would strand the caller.
+    assert "PLAYSPACE_INTERIOR_SEALED_BY_CLIP" in blocked["reason"]
+    assert "acknowledge_regression=true" in blocked["reason"]
 
     forced = srv.map_save(acknowledge_regression=True)
     assert forced["written"] is True
@@ -413,6 +430,7 @@ def test_every_tier2_scenario_is_well_formed():
     root = Path(__file__).resolve().parents[2]
     scenarios = sorted((root / "bench" / "scenarios").glob("*.json"))
     assert scenarios, "expected Tier 2 scenarios in bench/scenarios"
+    missing: list[str] = []
     for path in scenarios:
         s = json.loads(path.read_text())
         assert s.get("note"), f"{path.name} has no note"
@@ -423,8 +441,20 @@ def test_every_tier2_scenario_is_well_formed():
             assert spec["name"] in playspace.available(), (
                 f"{path.name}: unknown invariant {spec['name']!r}"
             )
+        # The fixture may legitimately be absent: the real Urban Terror maps are a game
+        # install and are not redistributable, so CI and most machines do not have them.
+        # What must always hold is that the scenario *names* one — a scenario with no
+        # fixture grades nothing, wherever it runs.
+        assert s["fixture"], f"{path.name} names no fixture"
         fixture = root / s["fixture"]
-        assert fixture.is_file(), f"{path.name}: missing fixture {s['fixture']}"
+        if not fixture.is_file():
+            missing.append(f"{path.name} -> {s['fixture']}")
+
+    if missing:
+        pytest.skip(
+            "scenario fixtures not available on this machine (a non-redistributable game "
+            f"install): {', '.join(missing)}"
+        )
 
 
 def test_the_terse_and_careful_scenarios_differ_only_in_wording():
@@ -441,9 +471,17 @@ def test_the_regression_tape_expects_a_refusal():
     """The negative control has to keep being negative.
 
     If someone relaxes the save gate, this is the assertion that notices — but only while
-    the tape still demands `written: false`, so that demand is itself pinned here.
+    the tape still demands a refusal, so that demand is itself pinned here.
+
+    A refused save raises rather than returning `{"written": false}`, so the tape pins the
+    refusal *message*. Naming the two findings keeps it tied to the reason: a tape that
+    only demanded "some error" would still pass if the gate started failing for an
+    unrelated cause, which is the negative control quietly going positive.
     """
     tape = json.loads((_tape_dir() / "catches-interior-clip.json").read_text())
     save = next(s for s in tape["steps"] if s["as"] == "blocked_save")
-    assert save["expect"]["written"] is False
-    assert save["expect"]["playable_space.findings.0.code"] == "PLAYSPACE_INTERIOR_SEALED_BY_CLIP"
+    assert "expect" not in save, "a refused save returns nothing to match against"
+    expected = save["expect_error"]
+    assert "PLAYSPACE_INTERIOR_SEALED_BY_CLIP" in expected
+    assert "PLAYSPACE_CLIP_SURFACE_WALKABLE" in expected
+    assert any("refusing to write" in frag for frag in expected)

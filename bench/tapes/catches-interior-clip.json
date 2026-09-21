@@ -44,17 +44,12 @@
       "tool": "map_save",
       "as": "blocked_save",
       "args": {},
-      "expect": {
-        "written": false,
-        "playable_space.findings.0.code": "PLAYSPACE_INTERIOR_SEALED_BY_CLIP",
-        "playable_space.findings.0.severity": "error",
-        "playable_space.interior_sealed_by_clip_cells": {
-          "$gte": 100
-        },
-        "playable_space.walkable_on_clip_cells": {
-          "$gte": 100
-        }
-      }
+      "expect_error": [
+        "refusing to write",
+        "PLAYSPACE_INTERIOR_SEALED_BY_CLIP",
+        "PLAYSPACE_CLIP_SURFACE_WALKABLE",
+        "acknowledge_regression=true"
+      ]
     },
     {
       "tool": "map_save",
@@ -74,9 +69,9 @@
     {
       "name": "tool_result",
       "args": {
-        "step": "blocked_save",
+        "step": "acknowledged_save",
         "path": "written",
-        "equals": false
+        "equals": true
       }
     }
   ]

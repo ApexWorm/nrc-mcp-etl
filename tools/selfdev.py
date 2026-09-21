@@ -39,8 +39,23 @@ from pathlib import Path
 from typing import Any
 
 #: The only paths a self-dev attempt may modify. §11.3's "start with prompts, not code".
+#:
+#: **Files, not the `surface/` directory.** The tool surface was split out of `server.py`
+#: into `python/src/nrc_mcp/surface/*.py`, and the obvious edit here — pointing this at the
+#: directory — would have been wrong twice over. `path_allowed` prefix-matches any entry
+#: ending in `/`, so a directory entry grants write access to `surface/mapfile.py` and
+#: `surface/sculpt.py`, which is to say to `map_save`, `solid_commit` and `pack_pk3`. §11.4
+#: requires human review indefinitely for anything that writes user `.map` files, and
+#: nothing would have caught the widening: `bench/protected.json` pins no path under
+#: `python/src`, and this file is not pinned either.
+#:
+#: So the listing stays file-by-file, and the files listed are the ones whose *descriptions*
+#: drive tool choice without their code touching a user's map. `server.py` carries the
+#: prompts and the instructions; the read-only analysis surfaces carry the descriptions.
 ALLOWED_PATHS = (
-    "python/src/nrc_mcp/server.py",  # tool descriptions, which drive tool choice at all
+    "python/src/nrc_mcp/server.py",  # prompts, instructions, the derived inventory
+    "python/src/nrc_mcp/surface/gameplay.py",  # descriptions only; every tool read-only
+    "python/src/nrc_mcp/surface/render.py",  # descriptions only; every tool read-only
     "docs/conventions.md",
     "profiles/",  # unverified rules only; the verified ones are hash-pinned
 )

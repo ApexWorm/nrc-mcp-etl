@@ -219,3 +219,36 @@ def describe(ir: dict, depth: int = 0) -> list[str]:
                 lines.append(f"{'  ' * (depth + 1)}{key}[{i}]:")
                 lines += describe(v, depth + 2)
     return lines
+
+
+#: The Solid IR reference, served both as `solid_help` and as `nrc://solid-ir`.
+#:
+#: It lives here rather than in the tool module because two different layers serve it, and
+#: a resource reaching into the tool package to read a string is how an import cycle starts.
+IR_HELP = """\
+Solid IR: a tree of shape operators that always compiles to valid convex brushes.
+
+Primitives — box, wedge, prism (a "cylinder"; the engine has no curves), cone, pyramid,
+stair, pipe, arch. Operators — union, intersect, subtract, hollow, carve_opening, translate,
+mirror, array.
+
+    {"op": "box", "min": [0,0,0], "max": [512,512,256]}
+    {"op": "hollow", "solid": {...}, "thickness": 16, "open_faces": [5]}
+    {"op": "carve_opening", "wall": {...}, "min": [224,-8,0], "max": [288,24,112]}
+    {"op": "subtract", "from": {...}, "cut": [{...}]}
+    {"op": "union", "parts": [{...}, {...}]}
+    {"op": "stair", "origin": [0,0,0], "width": 128, "steps": 8, "rise": 16, "run": 32,
+     "along": "x", "up": "z"}
+    {"op": "prism", "min": [...], "max": [...], "axis": "z", "sides": 8, "start_deg": 22.5}
+    {"op": "arch", "centre": [...], "outer_radius": 128, "thickness": 32, "depth": 64,
+     "segments": 8, "axis": "z"}
+    {"op": "array", "node": {...}, "count": 4, "offset": [64,0,0]}
+
+All coordinates are whole numbers. A room with a door is `hollow` then `carve_opening`; that
+composition yields exactly the brushes a mapper would draw by hand — three for a doorway.
+
+One honest limit: plane-defining points are always integers, but a brush's *vertices* are
+wherever three planes meet, and for angled shapes (prisms, cones, arches) those miss the grid.
+That is a property of the format, not of this tool — Radiant's cylinders are off-grid too. The
+count comes back as `off_grid_vertices`, and `validate` flags them. Stick to boxes, wedges and
+stairs if you need strictly on-grid geometry."""

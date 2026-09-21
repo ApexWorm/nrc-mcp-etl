@@ -81,6 +81,17 @@ jobs:
         # pretending to pass. The syntactic half is the strong check and runs in full.
         run: mise run test:diff
 
+      - name: Validator precision/recall
+        run: mise run test:validators
+
+      - name: Scenario tapes
+        # End-to-end over the MCP surface, no model and no tokens. This is what catches a
+        # tool whose behaviour changed without its unit test noticing — it was in the
+        # `test` task all along but never in CI, so it only ever ran on a developer's
+        # machine. The three tapes built on the real UrT maps report as skipped here,
+        # because that corpus is a game install and is not redistributable.
+        run: mise run test:tapes
+
       - name: Portability seam lint
         run: mise run test:seam
 

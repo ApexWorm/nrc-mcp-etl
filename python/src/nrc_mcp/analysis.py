@@ -1189,6 +1189,106 @@ class NavGrid:
         }
 
 
+#: Grids keyed by the file they were built from, newest last. Two entries, because the
+#: comparison that needs more than one — before against after — never comes through here.
+_GRID_CACHE: dict[tuple, NavGrid] = {}
+_GRID_CACHE_MAX = 2
+#: Hits and misses, so a test can prove the cache works without timing anything.
+_GRID_CACHE_STATS = {"hits": 0, "misses": 0, "bypassed": 0}
+
+
+def navgrid_cache_stats() -> dict[str, int]:
+    """Hits, misses and bypasses since the last clear. For tests and diagnostics."""
+    return dict(_GRID_CACHE_STATS)
+
+
+def clear_navgrid_cache() -> None:
+    _GRID_CACHE.clear()
+    for k in _GRID_CACHE_STATS:
+        _GRID_CACHE_STATS[k] = 0
+
+
+def cached_navgrid(
+    map_path: str | Path,
+    cell: float = DEFAULT_CELL,
+    profile_id: str | None = None,
+    **kwargs: Any,
+) -> NavGrid:
+    """`build_navgrid`, reused across calls when it is provably the same grid.
+
+    Voxelizing is the expensive step, and the five gameplay reports each want the same grid
+    for the same map. Building it five times is five times the cost for one answer.
+
+    **An in-memory map is never cached.** `game_map=` means "voxelize this parsed map, not
+    the file at `map_path`" — which is how `playspace.diff` measures an unsaved edit against
+    the file it is about to replace. Both sides of that comparison carry the *same* path and
+    the *same* mtime, so any key built from the file would serve the baseline grid for the
+    edited map, and `map_save`'s playable-space gate would compare a map against itself and
+    pass unconditionally. A gate that always passes is worse than no gate, because it is
+    believed. So that call bypasses the cache entirely rather than being keyed around.
+
+    Everything the grid depends on is in the key: the file's identity and mtime, and every
+    parameter that changes the result.
+    """
+    if kwargs.get("game_map") is not None:
+        _GRID_CACHE_STATS["bypassed"] += 1
+        return build_navgrid(map_path, cell=cell, profile_id=profile_id, **kwargs)
+
+    path = Path(map_path).resolve()
+    try:
+        stat = path.stat()
+        stamp: tuple = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        # Unreadable here means build_navgrid will raise a better error than we could.
+        return build_navgrid(map_path, cell=cell, profile_id=profile_id, **kwargs)
+
+    key = (
+        str(path),
+        stamp,
+        cell,
+        profile_id,
+        kwargs.get("max_cells", MAX_CELLS),
+        kwargs.get("max_hull_vertices", MAX_HULL_VERTICES),
+        kwargs.get("bucket", DEFAULT_BUCKET),
+    )
+    hit = _GRID_CACHE.get(key)
+    if hit is not None:
+        _GRID_CACHE_STATS["hits"] += 1
+        return hit
+
+    _GRID_CACHE_STATS["misses"] += 1
+    grid = build_navgrid(map_path, cell=cell, profile_id=profile_id, **kwargs)
+    _GRID_CACHE[key] = grid
+    while len(_GRID_CACHE) > _GRID_CACHE_MAX:
+        _GRID_CACHE.pop(next(iter(_GRID_CACHE)))
+    return grid
+
+
+def navgrid_summary(grid: NavGrid) -> dict[str, Any]:
+    """The grid's own report, plus how much of it is one connected space.
+
+    `as_dict()` answers "how big is this grid"; the connectivity numbers answer the question
+    a designer actually has, which is whether the walkable space is *one* space. A map whose
+    standable cells fall into six islands is not a map with six rooms — it is a map five of
+    whose rooms cannot be reached, and every distance measured across it is meaningless.
+
+    `reachable_share` is therefore the number to read first. Anything below 1.0 means some
+    walkable floor is unreachable from the largest region, and `balance_report`'s path
+    lengths should be treated with suspicion until that is explained.
+    """
+    data = dict(grid.as_dict())
+    sizes = sorted(grid.component_sizes(), reverse=True)
+    walkable = grid.counts["walkable_cells"]
+    data["components"] = len(sizes)
+    data["component_sizes"] = sizes[:10]
+    data["largest_component_cells"] = sizes[0] if sizes else 0
+    data["reachable_share"] = round(sizes[0] / walkable, 4) if sizes and walkable else 0.0
+    data["walkable_share_of_volume"] = (
+        round(walkable / grid.counts["cells"], 6) if grid.counts["cells"] else 0.0
+    )
+    return data
+
+
 def build_navgrid(
     map_path: str | Path,
     cell: float = DEFAULT_CELL,
@@ -1761,7 +1861,7 @@ def balance_report(
     try:
         # A supplied grid is the source of truth for which profile this report is about: it was
         # built against one, and resolving again could quietly pick a different one.
-        navgrid = grid or build_navgrid(map_path, cell=cell, profile_id=profile_id)
+        navgrid = grid or cached_navgrid(map_path, cell=cell, profile_id=profile_id)
     except AnalysisError as e:
         return {"error": str(e), "profile": profile_id or ""}
     profile = navgrid.profile
@@ -2079,7 +2179,7 @@ def sightline_report(
     try:
         # A supplied grid is the source of truth for which profile this report is about: it was
         # built against one, and resolving again could quietly pick a different one.
-        navgrid = grid or build_navgrid(map_path, cell=cell, profile_id=profile_id)
+        navgrid = grid or cached_navgrid(map_path, cell=cell, profile_id=profile_id)
     except AnalysisError as e:
         return {"error": str(e), "profile": profile_id or ""}
     profile = navgrid.profile
@@ -2294,7 +2394,7 @@ def movement_check(
     try:
         # A supplied grid is the source of truth for which profile this report is about: it was
         # built against one, and resolving again could quietly pick a different one.
-        navgrid = grid or build_navgrid(map_path, cell=cell, profile_id=profile_id)
+        navgrid = grid or cached_navgrid(map_path, cell=cell, profile_id=profile_id)
     except AnalysisError as e:
         return {"error": str(e), "profile": profile_id or ""}
     profile = navgrid.profile
@@ -2584,7 +2684,7 @@ def spawn_safety(
     try:
         # A supplied grid is the source of truth for which profile this report is about: it was
         # built against one, and resolving again could quietly pick a different one.
-        navgrid = grid or build_navgrid(map_path, cell=cell, profile_id=profile_id)
+        navgrid = grid or cached_navgrid(map_path, cell=cell, profile_id=profile_id)
     except AnalysisError as e:
         return {"error": str(e), "profile": profile_id or ""}
     profile = navgrid.profile

@@ -53,6 +53,7 @@ from .analysis import (
     _finding,
     _summary,
     build_navgrid,
+    cached_navgrid,
     movement_constants,
     resolve_profile,
 )
@@ -277,10 +278,17 @@ class _Lookup:
 
 
 def _grid_for(ref: Any, cell: float, profile_id: str | None) -> NavGrid:
+    """The grid for one side of a comparison: a file, or a parsed map under a file's name.
+
+    Both go through `cached_navgrid`, which reuses a grid only when it is provably the same
+    one. The parsed-map side carries the same path and mtime as the file side and must never
+    be answered from it — `cached_navgrid` bypasses the cache outright when `game_map` is
+    given, which is what keeps this comparison honest.
+    """
     if isinstance(ref, (str, Path)):
-        return build_navgrid(ref, cell=cell, profile_id=profile_id)
+        return cached_navgrid(ref, cell=cell, profile_id=profile_id)
     path, parsed = ref
-    return build_navgrid(path, cell=cell, profile_id=profile_id, game_map=parsed)
+    return cached_navgrid(path, cell=cell, profile_id=profile_id, game_map=parsed)
 
 
 def _round3(p: tuple[float, float, float]) -> list[float]:
@@ -850,3 +858,18 @@ def _matches(value: Any, expected: Any) -> bool:
         if op == "$contains":
             return bool(value) and operand in value
     return value == expected
+
+
+def brief(report: dict) -> dict:
+    """The parts of a playable-space report worth putting in a save's answer."""
+    return {
+        "cell": report["cell"],
+        "walkable_before": report["before"]["walkable_cells"],
+        "walkable_after": report["after"]["walkable_cells"],
+        "lost_cells": report["lost_cells"],
+        "gained_cells": report["gained_cells"],
+        "interior_sealed_by_clip_cells": report["interior_sealed_by_clip_cells"],
+        "walkable_on_clip_cells": report["walkable_on_clip_cells"],
+        "findings": report["findings"],
+        "summary": report["summary"],
+    }

@@ -175,11 +175,29 @@ def test_server_imports_and_describes_itself():
 
 
 def test_tools_refuse_to_run_without_an_open_map():
+    """A missing precondition is a `ToolError`, which is what the client sees as `isError`.
+
+    It used to be a bare `ValueError`, which the SDK wraps as "Error executing tool X: ..."
+    — an internal-fault shape for what is really a usage error with an obvious next step.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
     from nrc_mcp import server
 
     server.SESSION.map = None
-    with pytest.raises(ValueError, match="no map is open"):
+    with pytest.raises(ToolError, match="no map is open"):
         server.SESSION.require()
+    with pytest.raises(ToolError, match="no map is open"):
+        server._require_path()
+
+
+def test_a_missing_profile_names_what_there_is_to_choose_from(monkeypatch):
+    """`ToolError` carries only a string, so the recovery path must be inside it."""
+    from mcp.server.mcpserver.exceptions import ToolError
+    from nrc_mcp import server
+
+    monkeypatch.delenv("NRC_PROFILE", raising=False)
+    with pytest.raises(ToolError, match="Available:"):
+        server._require_profile(None)
 
 
 def test_tool_names_match_the_decorated_tools():
@@ -187,16 +205,29 @@ def test_tool_names_match_the_decorated_tools():
     import re
     from pathlib import Path as _P
 
-    from nrc_mcp import server
+    from nrc_mcp import server, surface
 
-    src = _P(server.__file__).read_text()
-    decorated = re.findall(r"@mcp\.tool\(\)\s*\ndef (\w+)", src)
+    # Three *independent* sources, which is the whole value of this test. A registry that
+    # checks itself passes even when `surface/__init__.py` forgets to import a module and
+    # those tools silently never register — so the source scan stays.
+    decorated: list[str] = []
+    for mod in surface.MODULES:
+        src = _P(mod.__file__).read_text()
+        decorated += re.findall(r"@tool\([^)]*\)\s*\ndef (\w+)", src)
+
+    registered = [t.name for t in server.mcp._tool_manager.list_tools()]
+
     assert sorted(decorated) == sorted(server.TOOL_NAMES), (
-        f"registered {sorted(decorated)} but TOOL_NAMES lists {sorted(server.TOOL_NAMES)}"
+        f"decorated {sorted(decorated)} but TOOL_NAMES lists {sorted(server.TOOL_NAMES)}"
+    )
+    assert sorted(registered) == sorted(server.TOOL_NAMES), (
+        f"the server registered {sorted(registered)}, TOOL_NAMES lists "
+        f"{sorted(server.TOOL_NAMES)} — a module is probably missing from surface/__init__"
     )
     for name in server.TOOL_NAMES:
         fn = getattr(server, name, None)
-        assert fn is not None, f"{name} is listed but not defined"
+        assert fn is not None, f"{name} is listed but not re-exported from server"
+        assert surface.get(name) is not None, f"{name} is not reachable via surface.get"
         assert (fn.__doc__ or "").strip(), f"{name} has no docstring for the agent to read"
 
 

@@ -1,12 +1,13 @@
-"""The MCP surface (§8).
+"""The MCP surface (§8): resources, prompts, and how the tool surface is assembled.
 
-Read-only analysis, rendering, game-profile validation, the compile driver, BSP
-introspection, packaging and the mise task surface. Sculpting (§4) and the Blender handoff
-(§5) are not here yet, and the tool list deliberately does not pretend otherwise — a tool
-that exists but does nothing is worse than one that is absent, because the agent will plan
-around it.
+The tools themselves live in `nrc_mcp.surface`, one module per group; importing that
+package registers them. This module binds the rest together — the resources, the §8.4
+prompts, the derived inventory, and the scoping that decides which tools a given run
+actually exposes.
 
-Three conventions worth knowing:
+Three conventions worth knowing, which the server also sends to the client at initialize
+(`nrc_mcp.runtime.INSTRUCTIONS`, so they arrive before the first call rather than waiting
+to be discovered):
 
 **One open map.** Tools operate on a session map opened with `map_open`, rather than taking
 a path every time. That keeps a sequence of queries consistent with each other, and makes
@@ -15,7 +16,8 @@ a path every time. That keeps a sequence of queries consistent with each other, 
 **Nothing writes without being asked.** `map_save` is the only tool that touches a `.map`,
 and it verifies the round-trip first: if the kernel cannot reproduce the file it loaded, it
 refuses to write, because a tool that cannot reproduce your file has no business replacing
-it.
+it. Every tool declares whether it writes, and a client reads that before deciding whether
+to ask permission.
 
 **Confidence is enforced, not advertised.** Findings from game rules carry a `confidence`,
 and an unverified rule is downgraded so it can never fail a build. That is not ceremony:
@@ -25,1542 +27,35 @@ have failed correct maps (`nrc://corrections`).
 
 from __future__ import annotations
 
-import contextlib
 import os
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-
-try:
-    # Current SDK layout.
-    from mcp.server.mcpserver import Image as _Image
-    from mcp.server.mcpserver import MCPServer as _Server
-except ImportError:  # pragma: no cover - older SDKs
-    # The class was called FastMCP and lived elsewhere before. The decorator surface we
-    # use (`.tool()`, `.resource()`, `.run()`) is the same, so supporting both costs one
-    # import and avoids pinning users to one SDK generation.
-    from mcp.server.fastmcp import FastMCP as _Server
-    from mcp.server.fastmcp import Image as _Image
-
-from . import analysis as anamod
-from . import blender as blendermod
-from . import bsp as bspmod
-from . import optimize as optmod
-from . import pack as packmod
-from . import playspace as playspacemod
-from . import profiles, rules, solids, tasks
-from .kernel import KernelUnavailable, load_map, repo_root, run_mise_task
-
-mcp = _Server("nrc-mcp")
-
-
-@dataclass
-class Session:
-    """The one open map, plus what we know about it."""
-
-    map: Any = None
-    path: Path | None = None
-    grid: int = 8
-    warnings: list[str] = field(default_factory=list)
-    #: The round-trip result taken at `map_open`, before anything could edit the map.
-    #:
-    #: This, not the live one, is the gate. Once a tool has added a brush the live check
-    #: differs by construction — that is the edit — and reading it as a kernel failure made
-    #: `map_save` refuse every real change and taught callers to pass the override every
-    #: time, which switched the guard off for the case it exists to catch.
-    opened_round_trip: dict | None = None
-
-    def require(self):
-        if self.map is None:
-            raise ValueError(
-                "no map is open — call map_open(path) first. "
-                "Use task_list() to see what else the project can do."
-            )
-        return self.map
-
-
-SESSION = Session()
-
-
-def active_profile() -> str:
-    return os.environ.get("NRC_PROFILE", "")
-
-
-def _kernel():
-    from .kernel import kernel
-
-    return kernel()
-
-
-# ---------------------------------------------------------------------------
-# Session / map
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def map_open(path: str, grid: int = 8) -> dict:
-    """Open a `.map` file for analysis.
-
-    Args:
-        path: path to the `.map`. Relative paths resolve against the repo root.
-        grid: authoring grid that off-grid geometry is measured against.
-
-    Returns a summary plus a round-trip check. If `round_trip.identical` is false, treat
-    every later answer about this map with suspicion and report it — that is the §3.2 gate
-    failing on a real file, which is a kernel bug worth fixing before anything else.
-    """
-    p = Path(path)
-    if not p.is_absolute():
-        p = repo_root() / p
-    m = load_map(p)
-
-    SESSION.map = m
-    SESSION.path = p
-    SESSION.grid = grid
-    SESSION.warnings = []
-
-    rt = m.round_trip()
-    SESSION.opened_round_trip = rt
-    if not rt["identical"]:
-        SESSION.warnings.append(
-            "this map does not round-trip byte-identically; map_save will refuse to write"
-        )
-
-    stats = m.stats(grid=grid)
-    return {
-        "path": str(p),
-        "round_trip": rt,
-        "entities": stats["entities"],
-        "brushes": stats["brushes"],
-        "patches": stats["patches"],
-        "texdef_kinds": stats["texdef_kinds"],
-        "bounds": stats["bounds"],
-        "grid": grid,
-        "warnings": SESSION.warnings,
-    }
-
-
-@mcp.tool()
-def map_stats(grid: int | None = None) -> dict:
-    """Statistics for the open map: counts, bounds, shader histogram, grid alignment.
-
-    `structural_brushes` vs `detail_brushes` is the split that matters most for vis
-    performance (§6.1): structural brushes block visibility and are expensive, detail
-    brushes do not.
-    """
-    m = SESSION.require()
-    return m.stats(grid=grid if grid is not None else SESSION.grid)
-
-
-@mcp.tool()
-def map_save(
-    path: str | None = None,
-    allow_non_identical: bool = False,
-    check_playable_space: bool = True,
-    acknowledge_regression: bool = False,
-) -> dict:
-    """Write the open map back to disk, if it is safe to.
-
-    Two gates, guarding two different things.
-
-    **The file.** If the kernel could not reproduce the bytes it *loaded*, it misunderstands
-    something in this file and writing would silently discard it. That check is taken at
-    `map_open` and it is the one enforced here. A difference introduced since then is your
-    edit, not a kernel failure, and does not block the write.
-
-    **The map.** The write is compared against the file it is about to replace, and refused
-    if it destroys playable space — an interior floor sealed off, or a surface you can now
-    stand on top of a clip volume. Both are silent in every other check: the map still
-    compiles, still seals, still validates, and is unplayable. See `playable_space_diff` for
-    the same report on its own.
-
-    The comparison costs a second or two on a city-sized map. If it cannot be made at all —
-    a map too large to voxelize, or one with no evaluable brush — the write proceeds and
-    says so, because a check that cannot run has not found anything.
-
-    Args:
-        path: destination. Defaults to the file the map was opened from.
-        allow_non_identical: write even though the map did not round-trip when it was opened.
-        check_playable_space: run the before/after comparison. Off skips it entirely.
-        acknowledge_regression: write anyway despite a playable-space error. Use it when you
-            meant to remove that space.
-    """
-    m = SESSION.require()
-    opened = SESSION.opened_round_trip or m.round_trip()
-    current = m.round_trip()
-    edited = not current["identical"] and bool(opened["identical"])
-
-    if not opened["identical"] and not allow_non_identical:
-        return {
-            "written": False,
-            "reason": "the kernel could not reproduce this file byte-for-byte when it was "
-            "opened, so writing it could lose data. Inspect round_trip.first_difference, or "
-            "pass allow_non_identical=true if you accept the risk.",
-            "round_trip": opened,
-        }
-
-    playspace_report: dict | None = None
-    playspace_note: str | None = None
-    baseline = SESSION.path if SESSION.path and SESSION.path.is_file() else None
-    if check_playable_space and edited and baseline is not None:
-        try:
-            playspace_report = playspacemod.diff(baseline, (baseline, m))
-        except (anamod.AnalysisError, playspacemod.PlayspaceError) as e:
-            playspace_note = f"playable space could not be compared, so it was not checked: {e}"
-
-    if playspace_report is not None and playspacemod.has_errors(playspace_report):
-        if not acknowledge_regression:
-            return {
-                "written": False,
-                "reason": "this write would destroy playable space. Read the findings; if "
-                "you meant to remove it, pass acknowledge_regression=true.",
-                "playable_space": _playspace_brief(playspace_report),
-                "round_trip": current,
-            }
-        SESSION.warnings.append(
-            "wrote a map with a playable-space regression, acknowledged by the caller"
-        )
-
-    written = m.save(path)
-    out: dict[str, Any] = {
-        "written": True,
-        "path": written,
-        "round_trip": current,
-        "modified_since_open": edited,
-    }
-    if playspace_report is not None:
-        out["playable_space"] = _playspace_brief(playspace_report)
-    if playspace_note:
-        out["playable_space_note"] = playspace_note
-    return out
-
-
-def _playspace_brief(report: dict) -> dict:
-    """The parts of a playable-space report worth putting in a save's answer."""
-    return {
-        "cell": report["cell"],
-        "walkable_before": report["before"]["walkable_cells"],
-        "walkable_after": report["after"]["walkable_cells"],
-        "lost_cells": report["lost_cells"],
-        "gained_cells": report["gained_cells"],
-        "interior_sealed_by_clip_cells": report["interior_sealed_by_clip_cells"],
-        "walkable_on_clip_cells": report["walkable_on_clip_cells"],
-        "findings": report["findings"],
-        "summary": report["summary"],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Query
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def query_entities(classname: str | None = None, with_keys: bool = True) -> dict:
-    """Entities in the open map, optionally filtered by classname.
-
-    Keys come back as ordered pairs rather than a mapping, because key order is meaningful
-    in a `.map` and duplicate keys occur in real files.
-    """
-    m = SESSION.require()
-    ents = m.entities(classname=classname, with_keys=with_keys)
-    return {"count": len(ents), "filter": classname, "entities": ents}
-
-
-@mcp.tool()
-def brush_geometry(entity: int, primitive: int) -> dict:
-    """Exact vertices and derived properties of one brush.
-
-    Vertices are computed with exact integer arithmetic. When a brush cannot be evaluated
-    exactly — off-grid plane points, too few faces — this reports `usable: false` with a
-    reason rather than returning approximate numbers that look authoritative.
-    """
-    m = SESSION.require()
-    return m.brush_geometry(entity, primitive)
-
-
-@mcp.tool()
-def validate(grid: int | None = None, severity_min: str = "warning") -> dict:
-    """Validate the open map's geometry and file format.
-
-    Every finding carries a `rule_source` and a `confidence`. Only `verified` findings are
-    safe to treat as hard failures.
-
-    Scope note: these are the game-agnostic checks — degenerate brushes, duplicate and
-    mirrored planes, off-grid vertices, thin brushes, patch problems. For the game's own rules
-    (spawn arrangement, objective counts, gametype keys) call `validate_profile`.
-    """
-    m = SESSION.require()
-    return m.validate(
-        grid=grid if grid is not None else SESSION.grid,
-        severity_min=severity_min,
-    )
-
-
-# ---------------------------------------------------------------------------
-# See (§4.2)
-# ---------------------------------------------------------------------------
-
-
-def _image_and_notes(png: bytes, ann: dict, extra: str = "") -> list:
-    """Return an image plus its numbers.
-
-    §4.2 wants renders annotated with what the agent cannot see. The spatial parts are drawn;
-    the counts and dimensions come back as text so they can be read exactly rather than
-    inferred from pixels.
-    """
-    lines = [f"{ann['view']} view, {ann['width']}x{ann['height']}, overlay {ann['overlay']}"]
-    b = ann.get("bounds")
-    if b:
-        lines.append(f"bounds {b['min']} .. {b['max']}  (size {b['size']})")
-    else:
-        lines.append("no geometry was drawn")
-    c = ann["counts"]
-    lines.append(
-        f"structural {c['structural_brushes']}, detail {c['detail_brushes']}, "
-        f"brush entities {c['brush_entities']}, patches {c['patches']}, "
-        f"surfaces drawn {c['facets']} ({c['invisible_facets']} not rendered in game)"
-    )
-    if ann.get("units_per_pixel"):
-        lines.append(f"scale: {ann['units_per_pixel']:.3g} units per pixel")
-    if ann.get("camera_eye"):
-        lines.append(f"camera at {ann['camera_eye']}")
-    if ann["off_grid_vertices"]:
-        lines.append(f"{ann['off_grid_vertices']} vertices off a grid of {ann['grid']}")
-    if ann["skipped_brushes"]:
-        lines.append(
-            f"WARNING: {ann['skipped_brushes']} brush(es) not drawn: "
-            + "; ".join(ann["skipped_examples"])
-        )
-    lines += ann.get("notes", [])
-    if extra:
-        lines.append(extra)
-    return [_Image(data=png, format="png"), "\n".join(lines)]
-
-
-@mcp.tool()
-def render_topdown(
-    overlay: str = "shaded",
-    width: int = 1000,
-    height: int = 800,
-    grid: int | None = None,
-    grid_spacing: float = 64.0,
-    solid: bool = False,
-) -> list:
-    """Render a top-down (XY) view of the open map.
-
-    Orthographic views render as backface-culled wireframe, which gives a readable
-    architectural floor plan. A *solid* top-down of a sealed map shows only the underside of
-    its sky brush — one flat rectangle — so pass `solid=True` only when you know the geometry
-    is open.
-
-    Args:
-        overlay: `shaded`, `structural` (colour by structural/detail/entity/patch),
-            `caulk` (highlight surfaces not drawn in game), or `off_grid` (mark bad vertices).
-        grid: grid that off-grid vertices are measured against. Defaults to the session grid.
-        grid_spacing: world-unit spacing of the drawn grid; 0 disables it.
-        solid: fill faces instead of drawing wireframe.
-    """
-    m = SESSION.require()
-    png, ann = m.render(
-        view="top",
-        overlay=overlay,
-        width=width,
-        height=height,
-        grid=grid if grid is not None else SESSION.grid,
-        grid_spacing=grid_spacing,
-        wireframe=False if solid else None,
-    )
-    return _image_and_notes(png, ann)
-
-
-@mcp.tool()
-def render_camera(
-    eye: list[float] | None = None,
-    target: list[float] | None = None,
-    fov_deg: float = 55.0,
-    overlay: str = "shaded",
-    width: int = 1000,
-    height: int = 800,
-    hide_invisible: bool = True,
-    view: str = "perspective",
-) -> list:
-    """Render a perspective view, or one of the front/side orthographic views.
-
-    Args:
-        eye: camera position. Omit for an automatic three-quarter framing of the whole map.
-        target: what to look at. Defaults to the centre of the geometry.
-        view: `perspective`, `front` or `side`.
-        hide_invisible: skip caulk, nodraw, clip and trigger surfaces. On by default because a
-            sealed map is wrapped in such a shell, and a perspective view of the shell shows
-            nothing useful.
-    """
-    m = SESSION.require()
-    if view not in ("perspective", "front", "side", "top"):
-        raise ValueError(f"view must be perspective, front, side or top — got {view!r}")
-    png, ann = m.render(
-        view=view,
-        overlay=overlay,
-        width=width,
-        height=height,
-        grid=SESSION.grid,
-        grid_spacing=64.0,
-        hide_invisible=hide_invisible,
-        eye=list(eye) if eye else None,
-        target=list(target) if target else None,
-        fov_deg=fov_deg,
-    )
-    return _image_and_notes(png, ann)
-
-
-@mcp.tool()
-def render_contact_sheet(
-    overlay: str = "shaded",
-    width: int = 1200,
-    height: int = 900,
-    hide_invisible: bool = True,
-    grid_spacing: float = 64.0,
-) -> list:
-    """Render three orthographic views plus a perspective view in one image.
-
-    This is the default way to look at geometry: one call, one image, and a shape that three
-    orthographic views plus a perspective view make unambiguous. Panels clockwise from
-    top-left are top (XY), front (XZ), side (YZ), perspective.
-    """
-    m = SESSION.require()
-    png, ann = m.render(
-        view="sheet",
-        overlay=overlay,
-        width=width,
-        height=height,
-        grid=SESSION.grid,
-        grid_spacing=grid_spacing,
-        hide_invisible=hide_invisible,
-    )
-    return _image_and_notes(png, ann)
-
-
-@mcp.tool()
-def render_player_eye(
-    position: list[float],
-    yaw_deg: float = 0.0,
-    fov_deg: float = 90.0,
-    width: int = 900,
-    height: int = 700,
-    eye_height: float | None = None,
-) -> list:
-    """Render the view a standing player would have from a floor position.
-
-    Args:
-        position: floor point to stand on, `[x, y, z]`.
-        yaw_deg: facing, degrees counter-clockwise from +X.
-        eye_height: height above `position`. Omit to read the verified standing height from
-            the active game profile, which is where it belongs — the design document's assumed
-            figure was wrong for this game by 13 units.
-
-    Position `z` should be the floor, not the eye. If the result looks empty, the point is
-    probably inside solid geometry or outside the map.
-    """
-    m = SESSION.require()
-    if eye_height is None:
-        pid = active_profile()
-        eye_height = profiles.standing_height(pid) if pid else None
-        if eye_height is None:
-            raise ValueError(
-                "no eye_height given and the active profile states no verified standing "
-                "height. Pass eye_height explicitly, or check profile_summary(). Guessing a "
-                "player height here would put the camera where a player cannot stand."
-            )
-        source = f"eye height {eye_height} from profile {pid} (verified)"
-    else:
-        source = f"eye height {eye_height} supplied by caller"
-
-    png, ann = m.render(
-        view="player_eye",
-        overlay="shaded",
-        width=width,
-        height=height,
-        grid=SESSION.grid,
-        grid_spacing=0.0,
-        eye=list(position),
-        yaw_deg=yaw_deg,
-        eye_height=eye_height,
-        fov_deg=fov_deg,
-        hide_invisible=True,
-    )
-    return _image_and_notes(png, ann, source)
-
-
-# ---------------------------------------------------------------------------
-# Analyze (profile-driven) and ship (§6.2, §6.4, §7.1)
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def validate_profile(profile_id: str | None = None, severity_min: str = "info") -> dict:
-    """Validate the open map's entities against the active game profile.
-
-    Complements `validate`, which covers game-agnostic geometry. This checks the game's own
-    rules: spawn arrangement, objective counts, gametype keys.
-
-    Every rule is data in the profile, and every finding carries a `confidence`. **An
-    unverified rule can never produce an error** — it is downgraded to `info` — because three
-    of the four spawn rules the design document called verified were wrong, and one would have
-    failed correct maps. `nrc://corrections` has the details.
-    """
-    m = SESSION.require()
-    pid = profile_id or active_profile()
-    if not pid:
-        return {
-            "error": "no profile selected; set NRC_PROFILE or pass profile_id",
-            "available": profiles.available(),
-        }
-    try:
-        ents = m.entities()
-        found = rules.evaluate(pid, ents) + rules.unknown_classnames(pid, ents)
-    except profiles.ProfileError as e:
-        return {"error": str(e), "available": profiles.available()}
-
-    floor = rules.SEVERITIES.index(severity_min) if severity_min in rules.SEVERITIES else 0
-    kept = [f for f in found if rules.SEVERITIES.index(f.severity) >= floor]
-    order = {"error": 0, "warning": 1, "info": 2}
-    kept.sort(key=lambda f: (order[f.severity], f.code))
-    return {
-        "profile": pid,
-        "entities_checked": len(ents),
-        "summary": rules.summarize(found),
-        "findings": [f.as_dict() for f in kept],
-    }
-
-
-@mcp.tool()
-def bsp_report(lumps_path: str, profile_id: str | None = None) -> dict:
-    """Read a compiled BSP's structure from an unpacked `-json` lump directory.
-
-    Produce the directory with `task_run("bsp:json-unpack", [path_to_bsp])`.
-
-    Reports surfaces per shader (which shader is eating draw calls), surface types, lightmap
-    coverage, unreferenced shaders, and headroom. Headroom comes in two parts and the
-    distinction matters: **compiler limits** are read from this fork's source and are real,
-    but most of the classic Quake 3 ceilings were removed upstream, so there is nothing to
-    report for them. **Engine limits** come from the profile and are what decide whether the
-    map loads at all — a map can compile cleanly and still be rejected in game.
-    """
-    p = Path(lumps_path)
-    if not p.is_absolute():
-        p = repo_root() / p
-    try:
-        return bspmod.report(p, profile_id or active_profile() or None)
-    except bspmod.BspError as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def bsp_entity_diff(lumps_path: str, source_map: str | None = None) -> dict:
-    """Compare a compiled BSP's entity lump against the source `.map`.
-
-    Entities can be dropped silently at compile time — the editor's writer discards empty
-    group entities and q3map2 drops what it cannot place — so a count that quietly changed is
-    a real bug this catches.
-    """
-    p = Path(lumps_path)
-    if not p.is_absolute():
-        p = repo_root() / p
-    src = Path(source_map) if source_map else SESSION.path
-    if src is None:
-        return {"error": "no source map given and none is open"}
-    try:
-        return bspmod.entity_diff(p, src)
-    except bspmod.BspError as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def pack_pk3(bsp: str, complevel: int | None = None, png: bool = False) -> dict:
-    """Build a release archive for a compiled BSP with `q3map2 -pk3` (§6.4).
-
-    The packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a
-    resource that is not on disk, so the map would show missing content on a server even
-    though it compiled. That is reported as a failure whatever the exit code.
-    """
-    try:
-        return packmod.pack_pk3(bsp, complevel=complevel, png=png)
-    except packmod.PackError as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def repack_analyze(bsp: str) -> dict:
-    """List every resource a compiled BSP references, via `q3map2 -repack -analyze`.
-
-    Parsed from the compiler's own dump rather than traced independently — the compiler's view
-    of what a BSP needs is the one that decides whether the map works.
-    """
-    try:
-        return packmod.repack_analyze(bsp)
-    except packmod.PackError as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def ship_check(
-    target: str | None = None, profile_id: str | None = None, pk3: str | None = None
-) -> dict:
-    """Run the release checklist: naming, levelshot, arena file, package contents.
-
-    Conventions come from the profile's `packaging` section, and unverified ones produce
-    `info` rather than failures — the levelshot size and arena key list are community practice
-    rather than anything the gamepack documents.
-    """
-    t = target or (str(SESSION.path) if SESSION.path else None)
-    if t is None:
-        return {"error": "no target given and no map is open"}
-    pid = profile_id or active_profile()
-    if not pid:
-        return {"error": "no profile selected", "available": profiles.available()}
-    try:
-        return packmod.ship_check(t, pid, pk3=pk3)
-    except packmod.PackError as e:
-        return {"error": str(e)}
-
-
-# ---------------------------------------------------------------------------
-# Sculpt (§4)
-# ---------------------------------------------------------------------------
-
-_IR_HELP = """\
-Solid IR: a tree of shape operators that always compiles to valid convex brushes.
-
-Primitives — box, wedge, prism (a "cylinder"; the engine has no curves), cone, pyramid,
-stair, pipe, arch. Operators — union, intersect, subtract, hollow, carve_opening, translate,
-mirror, array.
-
-    {"op": "box", "min": [0,0,0], "max": [512,512,256]}
-    {"op": "hollow", "solid": {...}, "thickness": 16, "open_faces": [5]}
-    {"op": "carve_opening", "wall": {...}, "min": [224,-8,0], "max": [288,24,112]}
-    {"op": "subtract", "from": {...}, "cut": [{...}]}
-    {"op": "union", "parts": [{...}, {...}]}
-    {"op": "stair", "origin": [0,0,0], "width": 128, "steps": 8, "rise": 16, "run": 32,
-     "along": "x", "up": "z"}
-    {"op": "prism", "min": [...], "max": [...], "axis": "z", "sides": 8, "start_deg": 22.5}
-    {"op": "arch", "centre": [...], "outer_radius": 128, "thickness": 32, "depth": 64,
-     "segments": 8, "axis": "z"}
-    {"op": "array", "node": {...}, "count": 4, "offset": [64,0,0]}
-
-All coordinates are whole numbers. A room with a door is `hollow` then `carve_opening`; that
-composition yields exactly the brushes a mapper would draw by hand — three for a doorway.
-
-One honest limit: plane-defining points are always integers, but a brush's *vertices* are
-wherever three planes meet, and for angled shapes (prisms, cones, arches) those miss the grid.
-That is a property of the format, not of this tool — Radiant's cylinders are off-grid too. The
-count comes back as `off_grid_vertices`, and `validate` flags them. Stick to boxes, wedges and
-stairs if you need strictly on-grid geometry."""
-
-
-@mcp.tool()
-def solid_help() -> str:
-    """The Solid IR reference: every operator, its fields, and the on-grid caveat.
-
-    Read this before authoring geometry. It is short.
-    """
-    return _IR_HELP
-
-
-@mcp.tool()
-def solid_compile(ir: dict, textures: dict | None = None, grid: int | None = None) -> dict:
-    """Compile a Solid IR tree and report what it would produce, touching nothing.
-
-    Use this first. It returns brush and face counts, bounds, minimum thickness, off-grid
-    vertex count and any warnings, so a shape can be checked before it is drawn or committed.
-
-    Errors name the failing node by path (e.g. `subtract/cut[0]:box`), because a nested tree is
-    otherwise very hard to debug from the outside. Call `solid_help` for the operator list.
-    """
-    k = _kernel()
-    return k.solid_compile(ir, textures, grid if grid is not None else SESSION.grid)
-
-
-@mcp.tool()
-def solid_preview(
-    ir: dict,
-    textures: dict | None = None,
-    grid: int | None = None,
-    view: str = "sheet",
-    width: int = 1100,
-    height: int = 850,
-) -> list:
-    """Compile a Solid IR tree and render it **without committing**.
-
-    The sculpting loop: author IR, preview, adjust, commit. Nothing touches the open map, so
-    this is free to call repeatedly.
-
-    If a map is open the geometry is previewed in place against it, so a new piece can be seen
-    in context rather than floating in isolation.
-    """
-    k = _kernel()
-    g = grid if grid is not None else SESSION.grid
-    # Preview against a *copy*, so an unwanted shape never has to be undone.
-    base = SESSION.map.source() if SESSION.map is not None else '{\n"classname" "worldspawn"\n}\n'
-    scratch = k.Map.parse(base)
-    info = k.solid_commit(scratch, ir, textures, g, "worldspawn", False, "preview")
-    png, ann = scratch.render(
-        view=view,
-        overlay="structural",
-        width=width,
-        height=height,
-        grid=g,
-        grid_spacing=64.0,
-        hide_invisible=False,
-    )
-    extra = (
-        f"preview only — nothing was committed. {info['brushes_created']} brush(es), "
-        f"{info['faces']} faces"
-    )
-    if info["warnings"]:
-        extra += "\nwarnings: " + "; ".join(info["warnings"][:4])
-    return _image_and_notes(png, ann, extra)
-
-
-@mcp.tool()
-def solid_commit(
-    ir: dict,
-    label: str,
-    textures: dict | None = None,
-    grid: int | None = None,
-    target_classname: str = "worldspawn",
-    remember: bool = True,
-) -> dict:
-    """Compile a Solid IR tree and add the brushes to the open map.
-
-    Nothing is written to disk: call `map_save` for that. The brushes are tagged with a comment
-    naming `label`, so a human reading the `.map` can see where they came from and delete them
-    as a unit.
-
-    With `remember`, the IR is recorded in a `<map>.solids.json` sidecar under `label`, so the
-    shape can be re-parameterized later with `solid_edit_param` — "make that corridor 32 units
-    wider" instead of moving faces by hand. The `.map` stays canonical; the sidecar is
-    advisory and re-derivable.
-    """
-    m = SESSION.require()
-    k = _kernel()
-    g = grid if grid is not None else SESSION.grid
-    result = k.solid_commit(m, ir, textures, g, target_classname, False, label)
-
-    if remember and SESSION.path is not None:
-        try:
-            solids.put(SESSION.path, label, ir, brushes=result["brushes_created"])
-            result["sidecar"] = str(solids.sidecar_path(SESSION.path))
-        except solids.SolidStoreError as e:
-            # The brushes are already in the map; failing to record the IR is a lesser problem
-            # and must not be reported as though the commit failed.
-            result["sidecar_error"] = str(e)
-    result["next"] = "call map_save to write the map, or render_contact_sheet to look at it"
-    return result
-
-
-@mcp.tool()
-def solid_inspect(name: str | None = None, ir: dict | None = None) -> dict:
-    """Show a Solid IR tree's structure — either a recorded one by `name`, or one passed in.
-
-    The outline names every operator and its parameters with the paths `solid_edit_param`
-    accepts, which is how you find out what there is to change.
-    """
-    if ir is None:
-        if name is None:
-            return {"error": "pass either a recorded name or an ir tree"}
-        if SESSION.path is None:
-            return {"error": "no map is open, so there is no sidecar to read"}
-        try:
-            entry = solids.get(SESSION.path, name)
-        except solids.SolidStoreError as e:
-            return {"error": str(e)}
-        ir = entry["ir"]
-        meta = {k: v for k, v in entry.items() if k != "ir"}
-    else:
-        meta = {}
-    return {"name": name, "outline": solids.describe(ir), "ir": ir, "recorded": meta}
-
-
-@mcp.tool()
-def solid_list() -> dict:
-    """Solid IR trees recorded for the open map, with their brush counts."""
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    try:
-        store = solids.load(SESSION.path)
-    except solids.SolidStoreError as e:
-        return {"error": str(e)}
-    return {
-        "sidecar": str(solids.sidecar_path(SESSION.path)),
-        "solids": {
-            n: {k: v for k, v in e.items() if k not in ("ir", "superseded")}
-            for n, e in sorted(store["solids"].items())
-        },
-    }
-
-
-@mcp.tool()
-def solid_edit_param(
-    name: str,
-    path: str,
-    value: Any,
-    preview_only: bool = True,
-) -> dict:
-    """Change one parameter of a recorded solid and recompile it.
-
-    This is the point of keeping the IR: `solid_edit_param("corridor", "max[1]", 192)` widens a
-    corridor, where editing brushes by hand would mean moving several faces consistently.
-
-    `path` is dotted with bracket indices — `from.solid.max[0]`, `cut[0].min`. Run
-    `solid_inspect` to see what paths exist.
-
-    Defaults to `preview_only`: it reports what the change would produce without touching the
-    map. The old brushes are **not** removed automatically — that would mean guessing which
-    brushes came from this solid, and guessing wrong would delete a mapper's work. Delete them
-    yourself, then commit the edited IR.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open, so there is no sidecar to read"}
-    try:
-        entry = solids.get(SESSION.path, name)
-        edited = solids.edit_param(entry["ir"], path, value)
-    except solids.SolidStoreError as e:
-        return {"error": str(e)}
-
-    k = _kernel()
-    try:
-        before = k.solid_compile(entry["ir"], None, SESSION.grid)
-        after = k.solid_compile(edited, None, SESSION.grid)
-    except ValueError as e:
-        return {
-            "error": f"the edited tree does not compile: {e}",
-            "hint": "the parameter was accepted but produces invalid geometry; try another value",
-            "ir": edited,
-        }
-
-    out = {
-        "name": name,
-        "path": path,
-        "value": value,
-        "before": {kk: before[kk] for kk in ("brushes", "faces", "bounds", "volume")},
-        "after": {kk: after[kk] for kk in ("brushes", "faces", "bounds", "volume")},
-        "ir": edited,
-        "preview_only": preview_only,
-    }
-    if not preview_only:
-        solids.put(SESSION.path, name, edited, brushes=after["brushes"], notes=f"edited {path}")
-        out["recorded"] = True
-        out["next"] = (
-            "the sidecar now holds the edited tree; delete the old brushes, then call "
-            "solid_commit to draw the new ones"
-        )
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Assets — the Blender handoff (§5)
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def asset_plan(
-    blocks_movement: bool,
-    blocks_visibility: bool,
-    is_axis_aligned: bool,
-    is_curved: bool,
-    needs_clean_collision: bool = False,
-    is_organic: bool = False,
-) -> dict:
-    """Decide whether a feature should be a brush, a patch or a mesh.
-
-    The decision rule, in order: *does it block movement, block vis, or need cheap clean
-    collision?* → brush. *Is it axis-aligned architecture?* → brush. *Is it curved but simple?*
-    → patch. *Everything else* → Blender.
-
-    That ordering is not arbitrary. Brushes are the only representation that seals a map and
-    blocks visibility, patches are never structural, and meshes are always non-structural — so
-    anything load-bearing has to be a brush regardless of how it looks.
-    """
-    if blocks_visibility:
-        return _tier(
-            1,
-            "brush, structural, caulked",
-            "it blocks visibility, and only a structural brush can do that",
-            grid=16,
-        )
-    if blocks_movement or needs_clean_collision:
-        return _tier(
-            2,
-            "brush, detail",
-            "it blocks movement or needs cheap predictable collision, which a brush "
-            "gives and a mesh does not",
-            grid=8,
-        )
-    if is_axis_aligned and not is_curved:
-        return _tier(
-            2, "brush, detail", "axis-aligned architecture is cheaper and tidier as a brush", grid=8
-        )
-    if is_curved and not is_organic:
-        return _tier(3, "patch", "curved but simple, so a patch — and a patch is never structural")
-    # The model entity's classname is game-specific, so it comes from the profile. The seam lint
-    # caught this line naming it directly, which is exactly the drift §7.4 predicts.
-    entity = "a model entity"
-    pid = active_profile()
-    if pid:
-        with contextlib.suppress(profiles.ProfileError):
-            entity = str((profiles.load(pid).get("assets") or {}).get("model_entity") or entity)
-    return _tier(
-        4,
-        f"mesh, placed with {entity}",
-        "ornament, clutter or organic geometry, which is what Blender is for; always "
-        "non-structural, so pair it with an explicit collision decision",
-    )
-
-
-def _tier(tier: int, representation: str, why: str, grid: int | None = None) -> dict:
-    out = {
-        "tier": tier,
-        "representation": representation,
-        "why": why,
-        "next": {
-            1: "author it with solid_commit; texture hidden faces with the caulk shader",
-            2: "author it with solid_commit and set detail=true in textures",
-            3: "patches are not yet authorable by this tool — build it in the editor for now",
-            4: "call blender_brief, send the prompt to Blender, then model_import",
-        }[tier],
-    }
-    if grid:
-        out["minimum_grid"] = grid
-    return out
-
-
-@mcp.tool()
-def blender_brief(
-    asset_id: str,
-    purpose: str,
-    bounds: dict,
-    collision: str = "brush_hull",
-    materials: list[dict] | None = None,
-    triangles: int | None = None,
-    silhouette_notes: str = "",
-    profile_id: str | None = None,
-) -> dict:
-    """Emit a numerically complete asset brief plus a ready-to-send Blender prompt.
-
-    `bounds` is `{"x": [lo, hi], "y": [...], "z": [...]}` in world units — normally the brush
-    volume the asset replaces.
-
-    The point is that the returned `prompt` leaves nothing to infer: dimensions, origin, budget,
-    material names, UV density, export axes and the collision decision are all decided here. A
-    brief that says "make it crate-sized" gets a crate of the wrong size.
-
-    The unit scale comes from the profile, not from this code — §7.4 names that constant
-    specifically as a place game specifics leak in.
-    """
-    pid = profile_id or active_profile()
-    if not pid:
-        return {"error": "no profile selected", "available": profiles.available()}
-    try:
-        return blendermod.blender_brief(
-            pid,
-            asset_id,
-            purpose,
-            bounds,
-            collision=collision,
-            materials=materials,
-            triangles=triangles,
-            silhouette_notes=silhouette_notes,
-        )
-    except (blendermod.AssetError, profiles.ProfileError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def model_import(path: str, brief: dict, profile_id: str | None = None) -> dict:
-    """Validate an exported mesh against the brief that asked for it.
-
-    Checks scale, fit, origin, triangle budget, material names, UVs and structure. The scale
-    check comes first and names the likely cause: a mesh 1/39.37 of the requested size is the
-    metres-exported-as-units mistake, and saying so is far more useful than reporting the raw
-    numbers.
-    """
-    p = Path(path)
-    if not p.is_absolute():
-        p = repo_root() / p
-    try:
-        return blendermod.model_import(p, brief, profile_id or active_profile() or None)
-    except blendermod.AssetError as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def model_place(
-    model_path: str,
-    origin: list[float],
-    angles: list[float] | None = None,
-    scale: float | None = None,
-    lightmap_scale: float | None = None,
-    remap: dict | None = None,
-    profile_id: str | None = None,
-    commit: bool = False,
-) -> dict:
-    """Build the entity that places a model in the world.
-
-    Defaults to returning the key/value pairs without touching the map, so the placement can be
-    checked first. Pass `commit=True` to add the entity to the open map.
-
-    Every key name comes from the profile: the model entity's classname, the scale keys, the
-    remap prefix. Negative scale is supported by this compiler and is the cheapest way to mirror
-    a prop.
-    """
-    pid = profile_id or active_profile()
-    if not pid:
-        return {"error": "no profile selected", "available": profiles.available()}
-    try:
-        keys = blendermod.model_place_keys(
-            pid,
-            model_path,
-            origin,
-            angles=angles,
-            scale=scale,
-            lightmap_scale=lightmap_scale,
-            remap=remap,
-        )
-    except (blendermod.AssetError, profiles.ProfileError) as e:
-        return {"error": str(e)}
-
-    out = {"keys": keys, "committed": False}
-    if commit:
-        m = SESSION.require()
-        src = m.source()
-        entity = "{\n" + "".join(f'"{k}" "{v}"\n' for k, v in keys) + "}\n"
-        k = _kernel()
-        merged = k.Map.parse(src + entity)
-        SESSION.map = merged
-        out["committed"] = True
-        out["entities_now"] = merged.entity_count
-        out["next"] = "call map_save to write it, and model_make_clip if it needs collision"
-    return out
-
-
-@mcp.tool()
-def model_make_clip(
-    path: str,
-    origin: list[float] | None = None,
-    scale: float = 1.0,
-    k: int = 14,
-    grid: int = 1,
-    kind: str = "player",
-    profile_id: str | None = None,
-) -> dict:
-    """Fit a convex collision hull to a mesh, returned as Solid IR.
-
-    The hull is a k-DOP: the tightest intersection of half-spaces with `k` fixed normals that
-    contains every vertex, pushed outward to the grid so it never cuts into the visual. That is a
-    deliberate choice, not a shortcut — §5.4 argues that for a competitive shooter snappy,
-    predictable collision beats accurate collision, and a 14-plane hull is something a player can
-    read while sliding along it.
-
-    `kind` selects the clip shader from the profile: `player` for movement only, `weapon` to stop
-    bullets where the visual has gaps, `both` for solid.
-
-    Returns IR rather than brushes, so preview it with `solid_preview` and look at it against the
-    model before committing. A hull noticeably larger than the visual is what players report as
-    an invisible wall.
-    """
-    pid = profile_id or active_profile()
-    if not pid:
-        return {"error": "no profile selected", "available": profiles.available()}
-    p = Path(path)
-    if not p.is_absolute():
-        p = repo_root() / p
-    try:
-        return blendermod.model_make_clip(
-            p, pid, origin=origin, scale=scale, k=k, grid=grid, kind=kind
-        )
-    except (blendermod.AssetError, profiles.ProfileError) as e:
-        return {"error": str(e)}
-
-
-# ---------------------------------------------------------------------------
-# Optimize (§6.1, §6.3)
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def structural_audit(grid: int | None = None, limit: int = 50) -> dict:
-    """Find brushes marked structural that need not be — the biggest lever on vis cost.
-
-    A structural brush blocks visibility and costs portals; a detail brush does not. Anything not
-    sealing the map or acting as a major visual blocker should be detail, and converting it is
-    usually the cheapest large win available on a Q3-engine map.
-
-    The estimated benefit per brush is a **heuristic, not a measurement**. The real number needs a
-    `-vis` compile before and after, which `compile_ab` can do. Treat the list as candidates to
-    look at, not as a to-do list to apply blindly.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    try:
-        return optmod.structural_audit(
-            SESSION.path, grid if grid is not None else SESSION.grid, limit=limit
-        )
-    except (OSError, ValueError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def hint_suggest(prt_path: str, limit: int = 10) -> dict:
-    """Propose hint brush planes from a compiled portal file.
-
-    Needs a `.prt`, which `-vis -saveprt` writes: compile with the `final` preset, or run
-    `task_run("compile:final", [map])`.
-
-    §6.1 calls this "tedious, high-skill, high-payoff work that almost nobody does properly by
-    hand". Each suggestion names the leaf, its portal count and a proposed splitting plane, with a
-    predicted before/after — predicted, because confirming it needs another `-vis` run.
-    """
-    p = Path(prt_path)
-    if not p.is_absolute():
-        p = repo_root() / p
-    try:
-        return optmod.hint_suggest(p, limit=limit)
-    except (OSError, ValueError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def leak_trace(lin_path: str | None = None) -> dict:
-    """Read a leak pointfile and report the path out of the map.
-
-    q3map2 writes a `.lin` beside the map when the world is not sealed. The path runs from the
-    entity that leaked to the void, so the first point is inside the map and the last is outside;
-    the gap is somewhere along it.
-
-    Defaults to the `.lin` beside the open map.
-    """
-    if lin_path:
-        p = Path(lin_path)
-        if not p.is_absolute():
-            p = repo_root() / p
-    elif SESSION.path is not None:
-        p = SESSION.path.with_suffix(".lin")
-    else:
-        return {"error": "no pointfile given and no map is open"}
-    if not p.is_file():
-        return {
-            "error": f"{p} does not exist",
-            "hint": "a pointfile only exists when the last compile leaked; a sealed map has none",
-        }
-    try:
-        return optmod.leak_trace(p, SESSION.path)
-    except (OSError, ValueError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def shader_audit(shader_dirs: list[str] | None = None, profile_id: str | None = None) -> dict:
-    """Audit shader references against the shader scripts on disk.
-
-    Reports shaders the map references but nothing defines, shaders defined but never used,
-    shaders shadowing a base-game path — a classic cause of "works for me, broken on the server" —
-    and the watercaulk trap, where a visible surface's shader draws nothing.
-
-    `shader_dirs` defaults to the game's script directory from the environment.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    dirs: list[str] = list(shader_dirs or [])
-    if not dirs:
-        base = os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH")
-        game = os.environ.get("NRC_FS_GAME")
-        if base and game:
-            dirs = [str(Path(base) / game / "scripts")]
-    if not dirs:
-        return {
-            "error": "no shader directories given and none could be inferred",
-            "hint": "pass shader_dirs, or set the game path in mise.local.toml",
-        }
-    try:
-        return optmod.shader_audit(SESSION.path, dirs, profile_id or active_profile() or None)
-    except (OSError, ValueError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def compile_ab(map_a: str, map_b: str, preset: str = "draft") -> dict:
-    """Compile two variants and diff the numbers that matter.
-
-    Reports per-stage wall time, draw surface count, leaf count, brush count and BSP size for each,
-    and appends a row to `bench/ab-history.jsonl` so regressions stay visible over the life of a
-    project rather than being rediscovered.
-
-    This is how a structural_audit suggestion gets *confirmed* rather than assumed: apply it to a
-    copy, compile both, and read the portal delta.
-    """
-    a, b = Path(map_a), Path(map_b)
-    if not a.is_absolute():
-        a = repo_root() / a
-    if not b.is_absolute():
-        b = repo_root() / b
-    try:
-        return optmod.compile_ab(a, b, preset=preset)
-    except (OSError, ValueError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def ab_history() -> dict:
-    """Every recorded A/B comparison, oldest first."""
-    try:
-        return {"rows": optmod.ab_history()}
-    except (OSError, ValueError) as e:
-        return {"error": str(e)}
-
-
-# ---------------------------------------------------------------------------
-# Analyze gameplay (§7.3)
-# ---------------------------------------------------------------------------
-
-
-def _profile_or_error(profile_id: str | None) -> tuple[str, dict | None]:
-    pid = profile_id or active_profile()
-    if not pid:
-        return "", {
-            "error": "no profile selected; the movement constants live there",
-            "available": profiles.available(),
-        }
-    return pid, None
-
-
-@mcp.tool()
-def navgrid_stats(cell: float = 16, profile_id: str | None = None) -> dict:
-    """Build the walkable grid and report its size and coverage.
-
-    A cell is walkable when it is empty, the cell below is solid, and there is at least the
-    profile's standing height of clear space above it — so the grid is the space a player could
-    actually occupy, not merely the empty space.
-
-    This is a **voxel approximation, not compiled AAS**. It is good enough for distances and
-    reachability and will disagree with the engine at the margins. Everything else here is built on
-    it, so run this first to see whether the map is tractable at the cell size you want.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    pid, err = _profile_or_error(profile_id)
-    if err:
-        return err
-    try:
-        g = anamod.build_navgrid(SESSION.path, cell=cell, profile_id=pid)
-        return (
-            anamod.navgrid_summary(g)
-            if hasattr(anamod, "navgrid_summary")
-            else {
-                "cell": cell,
-                "walkable_cells": len(getattr(g, "walkable", []) or []),
-                "note": "grid built; see balance_report or sightline_report to use it",
-            }
-        )
-    except (OSError, ValueError, MemoryError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def balance_report(cell: float = 16, profile_id: str | None = None) -> dict:
-    """Per-team traversal distance from each spawn group to each objective.
-
-    Reports path lengths over the walkable grid, the asymmetry between teams, and whether the map
-    is mirror-symmetric about its centre. Which classnames count as spawns and objectives comes
-    from the profile, so this works for any game with a profile.
-
-    Distances are walked, not straight-line — a 500-unit gap with a wall in it is not 500 units.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    pid, err = _profile_or_error(profile_id)
-    if err:
-        return err
-    try:
-        return anamod.balance_report(SESSION.path, pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def sightline_report(samples: int = 200, cell: float = 16, profile_id: str | None = None) -> dict:
-    """Sightline length distribution and power positions.
-
-    Samples walkable positions, casts rays between them at the profile's eye height, and reports how
-    far a player can see. Long uncontested lanes are the finding that matters in a sniper-sensitive
-    game; "power positions" are the points that see the most of the map.
-
-    Sampled, so the numbers move a little between runs. Read the distribution, not any single value.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    pid, err = _profile_or_error(profile_id)
-    if err:
-        return err
-    try:
-        return anamod.sightline_report(SESSION.path, samples=samples, profile_id=pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def movement_check(cell: float = 16, profile_id: str | None = None) -> dict:
-    """Check clearances against the profile's movement constants.
-
-    Standing headroom, crouch headroom, step height, doorway widths. Every finding names the
-    constant it used and that constant's confidence, and **anything derived from an unverified
-    constant is reported as info, never an error**.
-
-    That clamp is not ceremony. The design document's own standing height was wrong by 13 units, and
-    a corridor sized from it would pass every geometric check while being unusable.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    pid, err = _profile_or_error(profile_id)
-    if err:
-        return err
-    try:
-        return anamod.movement_check(SESSION.path, pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def spawn_safety(cell: float = 16, profile_id: str | None = None) -> dict:
-    """Exits per spawn and distance to the nearest enemy spawn.
-
-    A spawn with one exit is a spawn that can be held; a spawn close to an enemy spawn is a spawn
-    that gets contested immediately. Both are design smells worth seeing before playtesting finds
-    them.
-    """
-    if SESSION.path is None:
-        return {"error": "no map is open"}
-    pid, err = _profile_or_error(profile_id)
-    if err:
-        return err
-    try:
-        return anamod.spawn_safety(SESSION.path, pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
-        return {"error": str(e)}
-
-
-# ---------------------------------------------------------------------------
-# Project / meta
-# ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-def playable_space_diff(
-    before: str,
-    after: str | None = None,
-    cell: float = playspacemod.DEFAULT_DIFF_CELL,
-    profile_id: str | None = None,
-) -> dict:
-    """Compare the space a player can stand in, between two versions of a map.
-
-    This is the check that no amount of validating, compiling or leak-testing performs: all
-    of those pass on a map whose streets have been filled with clip. Only a before/after
-    comparison sees it.
-
-    Two findings are errors rather than observations, because neither has a legitimate form:
-
-    - `PLAYSPACE_INTERIOR_SEALED` — floor that had a ceiling over it is no longer standable.
-      A roof is sky-exposed by definition, so this is the inside of the map being closed off.
-    - `PLAYSPACE_CLIP_SURFACE_WALKABLE` — you can now stand on top of a clip volume. Clip
-      stops the player, so capping something with clip does not remove the surface, it
-      raises it.
-
-    Args:
-        before: the earlier map.
-        after: the later map. Defaults to the map open in this session, including edits that
-            have not been written yet — which is how you check a change before committing it.
-        cell: voxel size. Coarser is faster and still comparable; both sides use the same one.
-        profile_id: game profile supplying the movement constants and clip shader names.
-    """
-    later: Any
-    if after is None:
-        m = SESSION.require()
-        if SESSION.path is None:
-            return {"error": "the open map has no path to compare against"}
-        later = (str(SESSION.path), m)
-    else:
-        later = after
-    try:
-        return playspacemod.diff(before, later, cell=cell, profile_id=profile_id)
-    except (anamod.AnalysisError, playspacemod.PlayspaceError) as e:
-        return {"error": str(e)}
-
-
-@mcp.tool()
-def bench_run() -> dict:
-    """Run the fitness suite and return the scores.
-
-    F1 (kernel correctness) is a **gate**, not a score: a run with it red has no score to compare,
-    whatever the other signals say. F4 skips without a compiler and F5 is a declarative proxy for
-    the natural-language-brief version; both say so in their output rather than reporting a number
-    they cannot justify.
-
-    Also reports whether the protected paths are unchanged. If they are not, treat every score as
-    meaningless — §11.4 names editing the ruler as the most likely failure mode of any
-    optimization loop.
-    """
-    r = run_mise_task("bench")
-    root = repo_root()
-    results = sorted((root / "bench" / "results").glob("*.json"), key=lambda p: p.stat().st_mtime)
-    if not results:
-        return {"error": "bench produced no result file", "output": r["stdout"][-1500:]}
-    import json as _json
-
-    data = _json.loads(results[-1].read_text())
-    return {
-        "sha": data["sha"],
-        "dirty": data["dirty"],
-        "gate_passed": data["gate_passed"],
-        "protected_paths_ok": data["protected_paths_ok"],
-        "protected_problems": data["protected_problems"],
-        "signals": [{k: v for k, v in s.items() if k not in ("cases",)} for s in data["signals"]],
-        "result_file": str(results[-1].relative_to(root)),
-    }
-
-
-@mcp.tool()
-def upstream_diff(fetch: bool = False) -> dict:
-    """Report upstream drift that would break the editor bridge.
-
-    Hashes the individual declarations in `include/` the plugin binds to, rather than whole files,
-    so it fires when something the plugin calls has actually moved instead of on every comment
-    change. Also reports new or removed compiler flags, because each new flag is a potential
-    optimizer capability (§6) — that feed pays for itself even if the pull request never happens.
-    """
-    args = ["--fetch"] if fetch else []
-    r = run_mise_task("pr:watch" if fetch else "pr:baseline", args)
-    return {
-        "ok": r["ok"],
-        "output": r["stdout"] or r["stderr"],
-        "note": (
-            "a breaking change deliberately does not advance the baseline, so it keeps being "
-            "reported until it is dealt with"
-        ),
-    }
-
-
-@mcp.tool()
-def pr_plan_status() -> dict:
-    """Regenerate and summarize the upstream contribution plan.
-
-    Every number is measured, not asserted. The three criteria that cannot be met from here — never
-    compiled, no usage telemetry, no maintainer asked — are reported as unmet rather than glossed,
-    and the telemetry one matters most: §10.1's rule is that any RPC method with zero real-session
-    usage is cut before submission, so inventing those numbers would defeat the feed's purpose.
-    """
-    r = run_mise_task("pr:report")
-    plan = repo_root() / "docs" / "pr-plan.md"
-    return {
-        "ok": r["ok"],
-        "plan": str(plan),
-        "summary": r["stdout"].strip(),
-        "content": plan.read_text() if plan.is_file() else None,
-    }
-
-
-@mcp.tool()
-def selfdev_protected() -> dict:
-    """List the paths self-modification may never touch, and verify their hash pins.
-
-    Read-only, and available whether or not self-dev is enabled: knowing what is frozen is useful
-    on its own. §11.4 calls this mechanism "the only thing standing between self-improving and
-    self-congratulating".
-    """
-    r = run_mise_task("selfdev:status")
-    return {"ok": r["ok"], "status": r["stdout"] or r["stderr"]}
-
-
-@mcp.tool()
-def task_list() -> dict:
-    """Everything this project can do, discovered from mise.
-
-    This is the action surface (§1.2). Prefer a task over improvising a shell command: the
-    task is reproducible by a human and recorded as a name plus arguments. Tasks flagged
-    `mutates_user_data` need explicit intent before running.
-    """
-    return {"tasks": tasks.list_tasks()}
-
-
-@mcp.tool()
-def task_run(name: str, args: list[str] | None = None, acknowledge_mutation: bool = False) -> dict:
-    """Run a mise task by name.
-
-    Args:
-        name: exact task name from `task_list`.
-        args: arguments passed after `--`.
-        acknowledge_mutation: required for tasks that mutate user data.
-    """
-    known = tasks.task_names()
-    if name not in known:
-        close = sorted(n for n in known if name.split(":")[0] in n)[:8]
-        return {
-            "ok": False,
-            "error": f"no task named {name!r}",
-            "did_you_mean": close,
-            "hint": "call task_list() for the full surface",
-        }
-    info = next(t for t in tasks.list_tasks() if t["name"] == name)
-    if info["mutates_user_data"] and not acknowledge_mutation:
-        return {
-            "ok": False,
-            "error": f"{name} mutates user data; re-call with acknowledge_mutation=true",
-            "description": info["description"],
-        }
-    return run_mise_task(name, args)
-
-
-@mcp.tool()
-def compile_map(preset: str = "draft", path: str | None = None) -> dict:
-    """Compile a map with q3map2.
-
-    Presets (§6.1): `draft` geometry-only seconds-long check, `iterate` playable test build,
-    `quality` review build, `final` release build.
-
-    On a WSL host where q3map2 is a Windows binary, the wrapper stages the map onto the
-    Windows filesystem and copies artefacts back to `out/` — paths are handled for you.
-    """
-    if preset not in ("draft", "iterate", "quality", "final"):
-        return {"ok": False, "error": f"unknown preset {preset!r}"}
-    target = path
-    if target is None:
-        if SESSION.path is None:
-            return {"ok": False, "error": "no map open and no path given"}
-        target = str(SESSION.path)
-    return run_mise_task(f"compile:{preset}", [target])
-
-
-@mcp.tool()
-def profile_summary(profile_id: str | None = None) -> dict:
-    """What the active game profile knows, and how much of it is verified.
-
-    The profile is the only game-specific layer (§7.4). Anything marked `unverified` came
-    from documentation rather than a shipped gamepack and must not be treated as a hard
-    rule.
-    """
-    pid = profile_id or active_profile()
-    if not pid:
-        return {
-            "error": "no profile selected; set NRC_PROFILE or pass profile_id",
-            "available": profiles.available(),
-        }
-    try:
-        return profiles.summary(pid)
-    except profiles.ProfileError as e:
-        return {"error": str(e), "available": profiles.available()}
-
-
-# ---------------------------------------------------------------------------
-# Resources
-# ---------------------------------------------------------------------------
+import sys
+
+from . import profiles, solids, surface, tasks
+from .kernel import KernelUnavailable, repo_root
+from .runtime import (  # noqa: F401
+    INSTRUCTIONS,
+    SESSION,
+    Session,
+    _kernel,
+    _profile_error_text,
+    _require_path,
+    _require_profile,
+    active_profile,
+    mcp,
+    tool,
+)
+from .surface import get as get_tool  # noqa: F401
+
+# Every tool is re-exported here, so `from nrc_mcp import server; server.map_open(...)`
+# keeps working for the scenario tapes and the tests that call the functions directly.
+#
+# Driven by the *registered* names rather than by whatever each module happens to expose,
+# so the re-export cannot drag an imported `Path` or `ToolError` into this namespace and
+# shadow something. If a name is not a registered tool, it does not appear here.
+for _tool in mcp._tool_manager.list_tools():
+    _fn = surface.get(_tool.name)
+    if _fn is not None:
+        globals()[_tool.name] = _fn
 
 
 @mcp.resource("nrc://tasks")
@@ -1605,6 +100,91 @@ def resource_corrections() -> str:
     return p.read_text() if p.is_file() else "docs/spec-corrections.md is missing"
 
 
+@mcp.resource("nrc://solid-ir", mime_type="text/markdown")
+def resource_solid_ir() -> str:
+    """Every Solid IR operator, its fields, and the on-grid caveat.
+
+    Served as a resource as well as through `solid_help`, because a client that lists
+    resources should not have to spend a tool call to read a static reference.
+    """
+    return solids.IR_HELP
+
+
+@mcp.prompt(title="Mesh asset pipeline")
+def asset_pipeline(feature: str) -> str:
+    """The brush/patch/mesh decision and the Blender round trip, in order (§5.5)."""
+    return f"""\
+Add this to the open map: {feature}
+
+Work in this order, and do not skip the decision step.
+
+1. `asset_plan` — decide brush, patch or mesh. The ordering in `nrc://conventions` is the
+   substance: a decorative-looking pillar that seals a room is still structural.
+2. Brush parts: author Solid IR, `solid_compile`, `solid_preview`, then `solid_commit`.
+3. Mesh parts: `blender_brief` → build it in Blender → export → `model_import` to validate
+   against the brief that asked for it. Iterate on failures; do not place a failing mesh.
+4. `model_place_plan` to check the keys, then `model_place`, then `model_make_clip` if it
+   needs collision, then `render_camera` to look at it.
+5. `validate`, then `compile_map` with the draft preset, then `map_save`.
+
+Patches cannot be authored here. If the feature needs one, say so and stop.
+"""
+
+
+@mcp.prompt(title="Optimization pass")
+def optimize_pass(target: str = "the open map") -> str:
+    """Find vis cost, confirm it with a measured A/B rather than assuming it (§6.1)."""
+    return f"""\
+Reduce the compile and runtime cost of {target}, without changing how it plays.
+
+1. `map_stats` — read the structural/detail split first; it is the dominant cost.
+2. `structural_audit` — candidates, not a to-do list. Its benefit estimate is a heuristic.
+3. Apply a change to a **copy**, then `compile_ab` against the original. This is the step
+   that separates a real win from a plausible one; `ab_history` keeps the record.
+4. `leak_trace` if it will not seal, `hint_suggest` on the `.prt` once it does.
+5. `shader_audit` for the "works for me, broken on the server" class of problem.
+6. Re-run `playable_space_diff` before saving. Optimization that removes playable space is
+   not optimization.
+"""
+
+
+@mcp.prompt(title="Start a new map")
+def new_map_bootstrap(concept: str, gametype: str = "") -> str:
+    """Open a map from nothing, in an order that keeps it sealed and measurable."""
+    gt = f" for {gametype}" if gametype else ""
+    return f"""\
+Start a new map{gt}: {concept}
+
+1. `profile_summary` first. Size everything from the profile's verified constants — the
+   design document's own standing height was wrong for this game by 13 units, so a corridor
+   sized from memory will pass every check and be unusable.
+2. `solid_help`, then block the space out as Solid IR: `hollow` for rooms, `carve_opening`
+   for doorways. Preview before committing.
+3. Keep it sealed as you go; `compile_map` draft and `leak_trace` catch a leak while it is
+   still one room, not twenty.
+4. `navgrid_stats` once there is floor — check `reachable_share` is 1.0.
+5. Add spawns and objectives, then `validate_profile`.
+"""
+
+
+@mcp.prompt(title="Retrofit a gametype")
+def gametype_retrofit(gametype: str) -> str:
+    """Add a gametype's spawns and objectives to a map that does not have them (§8.4)."""
+    return f"""\
+Add {gametype} support to the open map.
+
+1. `profile_summary` — the classnames, keys and counts are all profile data, never guessed.
+2. `query_entities` — see what is already there before adding anything.
+3. Place spawns and objectives, then `validate_profile` to check arrangement and counts.
+4. `spawn_safety` and `balance_report` — a spawn with one exit can be held, and an
+   asymmetric walk to the objective is a design problem the geometry will not reveal.
+5. `playable_space_diff` before `map_save`.
+
+Treat any finding marked `unverified` as advice. An unverified rule is never a failure —
+see `nrc://corrections` for why that clamp exists.
+"""
+
+
 @mcp.resource("map://current/summary")
 def resource_current_map() -> str:
     """A summary of the open map, or an explanation of why there isn't one."""
@@ -1630,11 +210,6 @@ def resource_current_map() -> str:
     return "\n".join(lines)
 
 
-#: Every tool this server exposes, in listing order.
-#:
-#: Kept as an explicit list so the inventory reads in a sensible order rather than
-#: alphabetically. `test_tool_names_match_the_decorated_tools` fails if it drifts from the
-#: `@mcp.tool()` decorators, so it cannot silently fall out of date.
 TOOL_NAMES = (
     "map_open",
     "map_stats",
@@ -1658,10 +233,12 @@ TOOL_NAMES = (
     "solid_commit",
     "solid_inspect",
     "solid_list",
+    "solid_param_preview",
     "solid_edit_param",
     "asset_plan",
     "blender_brief",
     "model_import",
+    "model_place_plan",
     "model_place",
     "model_make_clip",
     "structural_audit",
@@ -1678,6 +255,7 @@ TOOL_NAMES = (
     "playable_space_diff",
     "bench_run",
     "upstream_diff",
+    "upstream_fetch",
     "pr_plan_status",
     "selfdev_protected",
     "task_list",
@@ -1688,19 +266,42 @@ TOOL_NAMES = (
 
 
 def describe_surface() -> str:
-    """Human-readable inventory, for `mise run mcp:tools`."""
-    lines = ["nrc-mcp surface", "", "TOOLS"]
-    for name in TOOL_NAMES:
-        fn = globals().get(name)
-        doc = (fn.__doc__ or "").strip().splitlines()[0] if fn else "(missing)"
-        lines.append(f"  {name:<22} {doc}")
+    """Human-readable inventory, for `mise run mcp:tools`.
+
+    Read from the SDK's own tool list rather than a table kept beside it, so it cannot
+    describe a surface the server does not actually serve. Grouped, and marked `write` where
+    a tool changes something — the two facts a reader most wants and the listing never had.
+    """
+    registered = mcp._tool_manager.list_tools()
+    by_group: dict[str, list] = {}
+    for t in registered:
+        by_group.setdefault((t.meta or {}).get("group") or "(ungrouped)", []).append(t)
+
+    writers = sum(1 for t in registered if t.annotations and not t.annotations.read_only_hint)
+    lines = [
+        "nrc-mcp surface",
+        "",
+        f"{len(registered)} tools in {len(by_group)} groups; {writers} of them write.",
+        "Narrow it with NRC_MCP_GROUPS=<group,...> or NRC_MCP_READ_ONLY=1.",
+        "",
+        "TOOLS",
+    ]
+    for group in by_group:
+        lines.append(f"  [{group}]")
+        for t in by_group[group]:
+            mark = " " if t.annotations and t.annotations.read_only_hint else "*"
+            first = (t.description or "").strip().splitlines()[0] if t.description else ""
+            lines.append(f"  {mark} {t.name:<22} {first}")
     lines += [
+        "",
+        "  * = changes something (readOnlyHint false)",
         "",
         "RESOURCES",
         "  nrc://tasks                the live mise task list",
         "  nrc://profile/{id}         a game profile as YAML",
         "  nrc://conventions          design tiers, caulk, authoring order, what is not built",
         "  nrc://corrections          verified corrections to the design document",
+        "  nrc://solid-ir             the Solid IR operator reference",
         "  map://current/summary      the open map",
         "",
         f"active profile: {active_profile() or '(none)'}",
@@ -1729,6 +330,61 @@ def describe_surface() -> str:
     return "\n".join(lines)
 
 
+class SurfaceError(RuntimeError):
+    """The requested surface does not exist, so the server must not start pretending it does."""
+
+
+def all_groups() -> list[str]:
+    """Every group currently registered, in listing order, without duplicates."""
+    seen: dict[str, None] = {}
+    for t in mcp._tool_manager.list_tools():
+        seen.setdefault((t.meta or {}).get("group") or "", None)
+    return [g for g in seen if g]
+
+
+def select_surface(groups: str | None = None, read_only: bool = False) -> dict:
+    """Narrow the registered tools to the requested groups, and report what happened.
+
+    Unknown group names and an empty selection are both errors. Silently serving zero tools
+    would look exactly like a broken server to the client, and silently ignoring a typo
+    would serve a surface nobody asked for — both are worse than refusing to start.
+    """
+    available = all_groups()
+    wanted = [g.strip() for g in (groups or "").split(",") if g.strip()]
+
+    if groups is not None and groups.strip() and not wanted:
+        raise SurfaceError(f"NRC_MCP_GROUPS={groups!r} names no groups")
+    if wanted:
+        unknown = [g for g in wanted if g not in available]
+        if unknown:
+            raise SurfaceError(
+                f"unknown tool group(s): {', '.join(unknown)}. Available: {', '.join(available)}"
+            )
+
+    dropped: list[str] = []
+    for t in list(mcp._tool_manager.list_tools()):
+        group = (t.meta or {}).get("group")
+        writes = t.annotations is not None and t.annotations.read_only_hint is False
+        if (wanted and group not in wanted) or (read_only and writes):
+            mcp.remove_tool(t.name)
+            dropped.append(t.name)
+
+    kept = [t.name for t in mcp._tool_manager.list_tools()]
+    if not kept:
+        raise SurfaceError(
+            "that selection leaves no tools at all. "
+            f"Groups requested: {', '.join(wanted) or '(all)'}; read_only={read_only}"
+        )
+    return {"kept": kept, "dropped": sorted(dropped), "groups": wanted or available}
+
+
+def _selection_from_env() -> dict:
+    return select_surface(
+        groups=os.environ.get("NRC_MCP_GROUPS"),
+        read_only=os.environ.get("NRC_MCP_READ_ONLY") == "1",
+    )
+
+
 def main() -> int:
     try:
         from .kernel import kernel
@@ -1736,6 +392,12 @@ def main() -> int:
         kernel()
     except KernelUnavailable as e:
         print(f"nrc-mcp: {e}")
+        return 2
+    try:
+        _selection_from_env()
+    except SurfaceError as e:
+        # stderr, not stdout: stdout carries protocol and nothing else.
+        print(f"nrc-mcp: {e}", file=sys.stderr)
         return 2
     mcp.run()
     return 0

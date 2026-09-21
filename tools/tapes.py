@@ -12,11 +12,13 @@ the functions the MCP server exposes, and then checks the artefacts. What it doe
 is whether a model would choose those calls. `bench/tapes/README.md` says so plainly, and
 Tier 2 — a model in the loop, graded by these same invariants — is the thing that closes it.
 
-Two ways a tape comes into being:
+Tapes are written by hand, to pin a workflow that must keep working.
 
-- written by hand, to pin a workflow that must keep working;
-- recorded from a session, by pointing `NRC_MCP_TAPE` at a file, which turns an afternoon of
-  real work into a regression test at no cost.
+(There is no session recorder. This docstring used to describe one, driven by an
+`NRC_MCP_TAPE` environment variable, which was never implemented — a documented feature
+that does not exist costs more than a missing one, because it gets planned around. The
+seam for it, if it is ever wanted, is the SDK's `Extension.intercept_tool_call`, which sits
+on the real `tools/call` boundary rather than on the Python functions this runner uses.)
 
 Run them::
 
@@ -47,7 +49,7 @@ def repo_root() -> Path:
 
 sys.path.insert(0, str(repo_root() / "python" / "src"))
 
-from nrc_mcp import playspace  # noqa: E402
+from nrc_mcp import playspace, surface  # noqa: E402
 from nrc_mcp import server as srv  # noqa: E402
 
 TAPE_DIR = repo_root() / "bench" / "tapes"
@@ -118,7 +120,13 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
         if not src.is_absolute():
             src = repo_root() / src
         if not src.is_file():
-            return _fail(name, started, f"fixture not found: {src}")
+            # A missing fixture is an absent input, not a failing tape. The real Urban
+            # Terror maps are a game install and are not redistributable, so they are
+            # absent in CI and on most machines — reporting those tapes as failures
+            # trained everyone to ignore a red tape run, which costs more than the three
+            # tapes are worth. Same convention as the differential harness, which reports
+            # "semantic: skipped" rather than passing when q3map2 is missing.
+            return _skip(name, started, f"fixture not available: {src}")
         shutil.copyfile(src, workspace / WORK_NAME)
         # A pristine copy, so the invariants can see what the map looked like before the
         # tape touched it even after the tape has overwritten the working file.
@@ -134,17 +142,54 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
         tool = step.get("tool")
         label = step.get("as") or f"{i}:{tool}"
         args = _expand(step.get("args") or {}, subs)
-        fn = getattr(srv, tool, None)
+        # Resolved through the surface package rather than off the server module, so a
+        # tape reaches the tool where it is defined instead of depending on a re-export.
+        fn = surface.get(tool)
         if not callable(fn) or tool not in srv.TOOL_NAMES:
             steps.append({"step": label, "ok": False, "error": f"no such tool: {tool!r}"})
             ok = False
             break
+        # A step may *expect* to be refused. Guarding behaviour — a save that must not go
+        # through, a task that must demand acknowledgement — is only pinned if the refusal
+        # itself can be asserted on, and a refusal is raised, not returned. `expect_error`
+        # is a list of substrings that must all appear in the message, which keeps the tape
+        # pinned to the reason rather than merely to the fact that something went wrong.
+        expect_error = step.get("expect_error")
+
         try:
             result = fn(**args)
         except Exception as e:  # noqa: BLE001 — a tool raising is a tape failure, not a crash
+            if expect_error:
+                text = str(e)
+                missing = [frag for frag in expect_error if frag not in text]
+                steps.append(
+                    {
+                        "step": label,
+                        "ok": not missing,
+                        "refused": text,
+                        "mismatches": [f"refusal does not mention {m!r}" for m in missing],
+                    }
+                )
+                if missing:
+                    ok = False
+                    break
+                continue
             steps.append({"step": label, "ok": False, "error": f"{type(e).__name__}: {e}"})
             ok = False
             break
+
+        if expect_error:
+            steps.append(
+                {
+                    "step": label,
+                    "ok": False,
+                    "error": f"expected a refusal mentioning {expect_error}, but the call "
+                    "succeeded",
+                }
+            )
+            ok = False
+            break
+
         results[label] = result
 
         # `expect` is a map of dotted paths to expected values. A value may be a comparison
@@ -201,6 +246,23 @@ def _fail(name: str, started: float, message: str) -> dict:
     }
 
 
+def _skip(name: str, started: float, message: str) -> dict:
+    """A tape that could not run for want of an input, as distinct from one that failed.
+
+    `ok` stays true so the run's exit code is not affected, and `skipped` carries the
+    reason so the summary can say plainly what was not checked. A skip that reads like a
+    pass is the thing to avoid here — hence it is counted and named separately.
+    """
+    return {
+        "tape": name,
+        "ok": True,
+        "skipped": message,
+        "seconds": round(time.time() - started, 2),
+        "steps": [],
+        "invariants": [],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Discovery and reporting
 # ---------------------------------------------------------------------------
@@ -221,6 +283,11 @@ def load_tapes(only: str | None = None) -> list[dict]:
 
 def report(results: list[dict], *, verbose: bool) -> None:
     for r in results:
+        if r.get("skipped"):
+            # Named, never silent: a skipped tape checked nothing, and a run that hides
+            # that reads as broader coverage than it has.
+            print(f"  SKIP {r['tape']:<28} {r['skipped']}")
+            continue
         mark = "ok  " if r["ok"] else "FAIL"
         print(f"  {mark} {r['tape']:<28} {r['seconds']:>6.2f}s")
         for step in r["steps"]:
@@ -242,10 +309,15 @@ def report(results: list[dict], *, verbose: bool) -> None:
             symbol = "." if inv["ok"] else "!"
             print(f"         {symbol} {inv['name']}: {inv['detail']}")
 
-    passed = sum(1 for r in results if r["ok"])
+    ran = [r for r in results if not r.get("skipped")]
+    skipped_tapes = [r for r in results if r.get("skipped")]
+    passed = sum(1 for r in ran if r["ok"])
     skipped = sum(1 for r in results for i in r["invariants"] if i["skipped"])
     print()
-    print(f"  tapes: {passed}/{len(results)} passed, {skipped} invariant(s) skipped")
+    line = f"  tapes: {passed}/{len(ran)} passed, {skipped} invariant(s) skipped"
+    if skipped_tapes:
+        line += f", {len(skipped_tapes)} tape(s) skipped for want of a fixture"
+    print(line)
 
 
 def main() -> int:
