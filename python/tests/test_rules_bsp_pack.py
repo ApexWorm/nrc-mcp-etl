@@ -538,3 +538,73 @@ def test_resource_regex_picks_out_referenced_files():
     text = "reading textures/urt/wall_01.tga\nloading models/props/box.md3\nnoise here"
     hits = {m.group(1) for m in pack._RESOURCE_RE.finditer(text)}
     assert hits == {"textures/urt/wall_01.tga", "models/props/box.md3"}
+
+
+# ---------------------------------------------------------------------------
+# Finding the archive the packer wrote
+# ---------------------------------------------------------------------------
+
+
+def test_the_packers_own_report_locates_the_archive(tmp_path):
+    """q3map2 does not put the pk3 where you would guess, so it has to be asked.
+
+    It resolves the output path through its VFS against the engine base — not the cwd and
+    not the BSP's directory. A map compiled outside a game tree gets its archive written
+    somewhere a glob will not find, and `pack_pk3` then reported a perfectly good pack as a
+    failure: `ok: False`, no packages, no failures, empty hint. The archive existed the
+    whole time.
+    """
+    import json
+
+    from nrc_mcp import pack
+
+    archive = tmp_path / "elsewhere" / "mymap_autopacked.pk3"
+    archive.parent.mkdir()
+    archive.write_bytes(b"PK\x03\x04")
+    bsp = tmp_path / "mymap.bsp"
+    bsp.write_bytes(b"IBSP")
+
+    # The wrapper reports JSON, and keeps the compiler's console output in stage tails.
+    run = {
+        "stdout": json.dumps(
+            {
+                "ok": True,
+                "stages": [{"flags": ["-pk3"], "tail": ["  Sounds....", f"Saved to {archive}"]}],
+            }
+        ),
+        "stderr": "",
+    }
+
+    found = pack._find_packages(bsp, pack._packer_text(run))
+    assert archive in found, f"the packer said where it put it; got {found}"
+
+
+def test_a_json_envelope_does_not_hide_the_archive(tmp_path):
+    """The specific reason the glob-only version failed, pinned on its own.
+
+    Inside JSON the line breaks are escaped, so scanning the envelope as raw text matches
+    nothing line by line — and the failure is silent, which is what made it survive.
+    """
+    import json
+
+    from nrc_mcp import pack
+
+    archive = tmp_path / "x_autopacked.pk3"
+    archive.write_bytes(b"PK\x03\x04")
+    envelope = json.dumps({"stages": [{"tail": ["noise", f"Saved to {archive}"]}]})
+
+    assert "Saved to" in envelope
+    assert not pack._SAVED_TO.search(envelope), (
+        "the envelope must still be unmatchable raw — otherwise this test proves nothing"
+    )
+    assert pack._SAVED_TO.search(pack._packer_text({"stdout": envelope, "stderr": ""}))
+
+
+def test_packer_text_survives_output_that_is_not_json():
+    """A raw-console q3map2, or a wrapper that failed before it could report."""
+    from nrc_mcp import pack
+
+    assert "Saved to /tmp/a.pk3" in pack._packer_text(
+        {"stdout": "Saved to /tmp/a.pk3\n", "stderr": ""}
+    )
+    assert pack._packer_text({"stdout": "", "stderr": ""}) == ""

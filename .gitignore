@@ -43,3 +43,9 @@ __pycache__/
 *.pk3
 *.bak
 /**/*.pk3dir/
+
+# macOS Finder metadata.
+.DS_Store
+
+# mbspc writes its log into the working directory.
+bspc.log

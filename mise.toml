@@ -84,20 +84,59 @@ else
 fi
 """
 
+[tasks."vendor:patch"]
+description = "Apply contrib/patches/*.patch to the vendored tree (portability fixes)"
+depends     = ["vendor:clone"]
+dir         = "{{env.NRC_SRC}}"
+# Idempotent, and it has to be: `vendor:clone` does `git reset --hard`, so a patch applied
+# by hand is erased by the next fetch. Keeping the fixes in `contrib/patches/` and
+# re-applying them here is what makes the vendored build reproducible rather than a
+# state someone's machine happens to be in.
+run = """
+for p in "$NRC_ROOT"/contrib/patches/*.patch; do
+  [ -e "$p" ] || continue
+  if git apply --reverse --check "$p" 2>/dev/null; then
+    echo "already applied: $(basename "$p")"
+  elif git apply "$p"; then
+    echo "applied: $(basename "$p")"
+  else
+    echo "FAILED to apply $(basename "$p") — upstream has probably moved; re-cut the patch" >&2
+    exit 1
+  fi
+done
+"""
+
+[tasks."vendor:check"]
+description = "Syntax-check the vendored q3map2 sources without building or linking them"
+depends     = ["vendor:patch"]
+# No `usage` block: mise forwards whatever follows `--`, so `-- --all` reaches the script
+# without the flags being restated here and drifting apart.
+run         = "uv run python tools/vendor_check.py"
+
 [tasks."vendor:build"]
 description = "Build netradiant-custom (Qt5 editor + q3map2 + mbspc)"
-depends     = ["vendor:clone"]
+depends     = ["vendor:patch"]
 dir         = "{{env.NRC_SRC}}"
 sources     = ["{{env.NRC_SRC}}/tools/**/*.c*", "{{env.NRC_SRC}}/libs/**/*.c*", "{{env.NRC_SRC}}/Makefile*"]
 outputs     = ["{{env.Q3MAP2}}"]
-run         = "make -j$(nproc) BUILD=release && make install"
+run         = "make -j$(getconf _NPROCESSORS_ONLN) BUILD=release && make install"
 
 [tasks."vendor:build-tools"]
 description = "Build only q3map2 + mbspc (skips the Qt5 editor — what CI needs)"
-depends     = ["vendor:clone"]
+depends     = ["vendor:patch"]
 dir         = "{{env.NRC_SRC}}"
 outputs     = ["{{env.Q3MAP2}}"]
-run         = "make -j$(nproc) BUILD=release DEPENDENCIES_CHECK=off binaries-q3map2 binaries-mbspc"
+# jpeg-turbo has no pkg-config entry the Makefile looks for, and Homebrew keeps it
+# keg-only, so its headers are off the default include path on macOS. Everything else
+# (glib, libpng, assimp) is found through pkg-config. Empty on Linux, where the system
+# jpeg headers are already where the compiler looks.
+run = """
+if [ "$(uname -s)" = "Darwin" ] && [ -d /opt/homebrew/opt/jpeg-turbo/include ]; then
+  export CPPFLAGS="-I/opt/homebrew/opt/jpeg-turbo/include $CPPFLAGS"
+  export LDFLAGS="-L/opt/homebrew/opt/jpeg-turbo/lib $LDFLAGS"
+fi
+make -j$(getconf _NPROCESSORS_ONLN) BUILD=release DEPENDENCIES_CHECK=off binaries-q3map2 binaries-mbspc
+"""
 
 # ---------------------------------------------------------------------------
 # kernel:* — the Rust geometry kernel
@@ -107,11 +146,21 @@ run         = "make -j$(nproc) BUILD=release DEPENDENCIES_CHECK=off binaries-q3m
 description = "Build the Rust geometry kernel and install the Python extension"
 sources     = ["crates/**/*.rs", "Cargo.toml", "Cargo.lock"]
 outputs     = ["python/src/nrc_py.so", "target/release/nrc"]
-# The cdylib is named libnrc_py.so by cargo, but Python will only import it as nrc_py.so.
-# Copying rather than symlinking keeps the tree usable when target/ is cleaned.
+# Cargo names the cdylib libnrc_py.so on Linux and libnrc_py.dylib on macOS; Python
+# imports it as nrc_py.so on both. Copying rather than symlinking keeps the tree usable
+# when target/ is cleaned.
 run = [
   "cargo build --release",
-  "cp target/release/libnrc_py.so python/src/nrc_py.so",
+  """
+  for ext in so dylib; do
+    if [ -f "target/release/libnrc_py.$ext" ]; then
+      cp "target/release/libnrc_py.$ext" python/src/nrc_py.so
+      exit 0
+    fi
+  done
+  echo "kernel:build: cargo produced no libnrc_py.{so,dylib} in target/release" >&2
+  exit 1
+  """,
 ]
 
 [tasks."kernel:check"]

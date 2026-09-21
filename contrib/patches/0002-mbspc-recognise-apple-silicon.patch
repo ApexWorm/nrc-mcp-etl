@@ -1,0 +1,20 @@
+diff --git a/tools/mbspc/qcommon/q_platform.h b/tools/mbspc/qcommon/q_platform.h
+index 4df1436..2084a6c 100644
+--- a/tools/mbspc/qcommon/q_platform.h
++++ b/tools/mbspc/qcommon/q_platform.h
+@@ -156,6 +156,15 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ #define idx64 1
+ #define ARCH_STRING "x86_64"
+ #define Q3_LITTLE_ENDIAN
++#elif defined __arm64__ || defined __aarch64__
++// Apple Silicon. Without this the block falls through with ARCH_STRING and the endianness
++// undefined, and the guards below fire as "Architecture not supported" — which is what
++// every mbspc translation unit did on an arm64 Mac. 64-bit and little-endian, like the
++// x86_64 case directly above; AArch64 can be run big-endian, but Apple never does.
++#undef idx64
++#define idx64 1
++#define ARCH_STRING "arm64"
++#define Q3_LITTLE_ENDIAN
+ #endif
+ 
+ #define DLL_EXT ".dylib"

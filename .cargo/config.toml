@@ -1,0 +1,11 @@
+# macOS links shared libraries strictly: an undefined symbol is an error, where ELF
+# resolves it at load time. pyo3's `extension-module` feature deliberately leaves the
+# CPython symbols out of the link line, so on Darwin the cdylib fails to link with
+# hundreds of missing `_Py*` symbols unless the linker is told to defer them.
+#
+# Linux needs nothing here, which is why this only surfaced off CI.
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

@@ -21,6 +21,7 @@ levelshot sizes and reserved shader prefixes are properties of a game, not of th
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -82,8 +83,8 @@ def pack_pk3(bsp: str | Path, complevel: int | None = None, png: bool = False) -
 
     run = _q3map2(flags, target)
 
-    # The packer writes beside the engine path, and our wrapper copies artefacts to out/.
-    produced = _find_packages(target)
+    # The packer reports where it wrote the archive; that report is authoritative.
+    produced = _find_packages(target, _packer_text(run))
     failed = [p for p in produced if p.name.endswith(FAILURE_SUFFIX)]
     good = [p for p in produced if p.name.endswith(SUCCESS_SUFFIX)]
 
@@ -103,10 +104,53 @@ def pack_pk3(bsp: str | Path, complevel: int | None = None, png: bool = False) -
     }
 
 
-def _find_packages(bsp: Path) -> list[Path]:
-    """Look for packages the packer may have written, in every plausible place."""
+#: q3map2's own report of where it put the archive, e.g. `Saved to /path/to/x_autopacked.pk3`.
+#: Verified against `tools/quake3/q3map2/autopk3.cpp`.
+_SAVED_TO = re.compile(r"^\s*Saved to (.+\.pk3)\s*$", re.MULTILINE)
+
+
+def _packer_text(run: dict[str, Any]) -> str:
+    """The compiler's own console output, out of the wrapper's JSON envelope.
+
+    `tools/q3map2.py` reports structured JSON on stdout and keeps q3map2's console output in
+    each stage's `tail`. Scanning the envelope as raw text does not work — inside JSON the
+    line breaks are escaped, so anything matching line by line silently finds nothing. That
+    is how a successful pack came back reported as a failure.
+    """
+    text = (run.get("stdout") or "") + (run.get("stderr") or "")
+    try:
+        envelope = json.loads(run.get("stdout") or "")
+    except (ValueError, TypeError):
+        return text
+    parts: list[str] = []
+    for stage in envelope.get("stages", []):
+        if not isinstance(stage, dict):
+            continue
+        # `tail` is a list of lines, but has been a string; accept either rather than
+        # depend on which, since this is a seam between two of our own tools.
+        tail = stage.get("tail") or ""
+        parts.append("\n".join(tail) if isinstance(tail, list) else str(tail))
+    parts.append(text)
+    return "\n".join(p for p in parts if p)
+
+
+def _find_packages(bsp: Path, output: str = "") -> list[Path]:
+    """Look for packages the packer may have written.
+
+    **The packer's own report comes first.** q3map2 resolves the output path through its VFS
+    against the engine base, not against the cwd and not against the BSP — so a map compiled
+    outside a game tree gets its pk3 written somewhere neither the caller nor this module
+    would think to look. Globbing alone reported a perfectly good pack as a failure, which is
+    the worst of both answers: the archive exists and the tool says it does not.
+
+    The glob stays as a fallback, for a q3map2 whose output was truncated or reworded.
+    """
     stem = bsp.stem
     candidates: list[Path] = []
+    for m in _SAVED_TO.finditer(output or ""):
+        p = Path(m.group(1).strip())
+        if p.is_file():
+            candidates.append(p)
     roots = [bsp.parent, repo_root() / "out" / stem, repo_root() / "out"]
     for root in roots:
         if root.is_dir():
@@ -235,6 +279,8 @@ def ship_check(
             )
 
     # --- the packer's own oracle ---------------------------------------------
+    # No packer output to read here: ship_check inspects what a previous `pack_pk3` left
+    # behind rather than running one, so the glob is all there is.
     failed = [p for p in _find_packages(target) if p.name.endswith(FAILURE_SUFFIX)]
     if failed:
         findings.append(

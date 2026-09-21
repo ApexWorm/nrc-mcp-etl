@@ -1,0 +1,21 @@
+diff --git a/tools/quake3/q3map2/convert_bsp.cpp b/tools/quake3/q3map2/convert_bsp.cpp
+index bf7819b..81fca78 100644
+--- a/tools/quake3/q3map2/convert_bsp.cpp
++++ b/tools/quake3/q3map2/convert_bsp.cpp
+@@ -807,7 +807,15 @@ int MergeBSPMain( Args& args ){
+ 	}
+ 
+ 	{
+-		entities.insert( entities.cend(), bsp.entities.cbegin() + 1, bsp.entities.cend() ); // minus world
++		// Moved, not copied: entity_t holds a forward_list<parseMesh_t>, and parseMesh_t
++		// owns a mesh_t whose copy assignment is deleted on purpose (it owns its verts).
++		// Copying here asks vector::insert for the copy-assignment path, which libstdc++
++		// never instantiates and libc++ does — so this built on Linux and failed on macOS.
++		// `bsp` is a local holding moved-from globals and bsp.entities is dead after this
++		// line, so moving is also what was meant: it skips a deep copy of every patch mesh.
++		entities.insert( entities.cend(),
++		                 std::make_move_iterator( bsp.entities.begin() + 1 ),
++		                 std::make_move_iterator( bsp.entities.end() ) ); // minus world
+ 		numBSPEntities = entities.size();
+ 		bspModels.insert( bspModels.cend(), bsp.bspModels.cbegin() + 1, bsp.bspModels.cend() ); // minus world
+ 		bspShaders.insert( bspShaders.cend(), bsp.bspShaders.cbegin(), bsp.bspShaders.cend() );
