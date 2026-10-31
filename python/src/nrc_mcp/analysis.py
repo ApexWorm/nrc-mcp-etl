@@ -2382,7 +2382,8 @@ def sightline_report(
                 f"{[round(v) for v in points[longest[1]]]} to "
                 f"{[round(v) for v in points[longest[2]]]}. Long uncontested lanes favour the "
                 "player who holds one and are hard to approach.",
-                confidence,
+                # The threshold is a heuristic, so this never warns, whatever the eye height.
+                "unverified",
                 f"profile {profile}: eye height {eye.key} = {eye.value:g} "
                 f"({eye.confidence}); the 50%-of-map-extent lane threshold is a heuristic",
                 "break the lane with cover, or give the far end a flanking approach",
