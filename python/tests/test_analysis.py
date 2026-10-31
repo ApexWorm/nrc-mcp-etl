@@ -278,7 +278,8 @@ def test_headroom_is_the_profile_height_rounded_up_to_whole_cells(simple_room, c
     assert grid.headroom_cells == 5
     assert grid.as_dict()["effective_headroom_units"] == 80.0
     assert grid.step_up_cells == 1, "18 units of step is one 16-unit cell"
-    assert grid.fall_cells == 12, "200.125 units of free fall is twelve 16-unit cells"
+    # 200.125 units of free fall is twelve 16-unit cells; a partial cell is not a safe drop.
+    assert grid.fall_cells == math.floor(constants.fall_no_damage.value / 16)
 
 
 def test_a_room_too_low_to_stand_in_is_not_walkable(tmp_path, kern, pid):
@@ -515,7 +516,7 @@ def test_movement_check_reports_a_crouch_height_ceiling_exactly(tmp_path, kern, 
 
     finding = next(f for f in report["findings"] if f["code"] == "MOVE_CROUCH_ONLY_SPACE")
     assert finding["severity"] == "warning", "exact measurement against a verified constant"
-    assert "69.375" in finding["rule_source"]
+    assert f"{constants.headroom_stand.value:g}" in finding["rule_source"]
     assert finding["confidence"] == "verified"
 
 
@@ -540,7 +541,7 @@ def test_movement_check_finds_a_gap_the_player_does_not_fit_through(tmp_path, ke
         f for f in report["findings"] if f["code"] == "MOVE_PASSAGE_NARROWER_THAN_PLAYER"
     )
     assert finding["severity"] == "warning"
-    assert "30.25" in finding["rule_source"]
+    assert f"{constants.player_width.value:g}" in finding["rule_source"]
 
 
 def test_movement_check_says_what_the_profile_cannot_support(tmp_path, kern, pid):
@@ -554,7 +555,7 @@ def test_movement_check_says_what_the_profile_cannot_support(tmp_path, kern, pid
         assert row["reason"], row["check"]
 
 
-def test_every_check_names_the_constant_it_used(tmp_path, kern, pid):
+def test_every_check_names_the_constant_it_used(tmp_path, kern, pid, constants):
     brushes = [
         box((0, 0, -16), (512, 512, 0)),
         box((256, 0, 0), (512, 512, 32)),
@@ -569,7 +570,7 @@ def test_every_check_names_the_constant_it_used(tmp_path, kern, pid):
     step = next(c for c in report["checks"] if c["check"] == "step_height")
     assert step["steps_needing_a_jump"] > 0, "a 32-unit rise is above the 18-unit step limit"
     assert step["steps_needing_a_ledge_grab"] == 0
-    assert step["jump_constant"]["value"] == pytest.approx(66.5)
+    assert step["jump_constant"]["value"] == pytest.approx(constants.jump_up_max.value)
 
 
 def test_a_rise_between_the_jump_and_grab_limits_is_classified_as_a_ledge(
@@ -580,6 +581,8 @@ def test_a_rise_between_the_jump_and_grab_limits_is_classified_as_a_ledge(
     Three profile constants deciding one classification, which is the point: the ladder of
     limits is data, so the report can say "ledge grab" instead of "too high".
     """
+    if constants.ledge_grab_max is None:
+        pytest.skip("this profile states no ledge grab")
     assert constants.jump_up_max.value < 96 < constants.ledge_grab_max.value
     brushes = [
         box((0, 0, -16), (512, 512, 0)),
@@ -617,6 +620,8 @@ def test_sightlines_are_clear_down_an_empty_hall_and_broken_by_a_pillar(tmp_path
 def test_sightline_report_uses_the_profile_eye_height_and_flags_it_as_inferred(
     tmp_path, kern, pid, constants
 ):
+    if not constants.eye_height_is_inferred:
+        pytest.skip("this profile states its eye height")
     path = write_map(tmp_path, room(0, 0, 512, 512))
     report = analysis.sightline_report(path, samples=16, profile_id=pid, cell=16)
     assert report["eye_height"]["value"] == pytest.approx(constants.headroom_stand.value)
@@ -837,6 +842,42 @@ def test_the_etl_profile_groups_spawns_by_marker_and_owns_objectives_by_flag():
     assert r.group_nearest == "team_WOLF_objective"
     assert r.team_of("team_CTF_bluespawn", {}) == "blue"
     assert r.team_of("trigger_objective_info", {"spawnflags": "1"}) == "red"
+
+
+def test_etl_reports_group_spawns_by_marker_and_centre_a_brush_objective(tmp_path, kern):
+    """The same grouping through the real kernel, which the fake map above only imitates."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    entities = [
+        point_entity("team_WOLF_objective", (128, 128, 8), description="West", spawnflags="1"),
+        point_entity("team_WOLF_objective", (1920, 128, 8), spawnflags="2"),
+    ]
+    for classname, x in (("team_CTF_redspawn", 96), ("team_CTF_bluespawn", 1952)):
+        entities += [point_entity(classname, (x, 64 + i * 32, 8)) for i in range(4)]
+    # A brush entity with no origin key: its position is its brushes' centre.
+    entities.append(
+        '{\n"classname" "trigger_objective_info"\n"spawnflags" "1"\n'
+        + box((992, 96, 0), (1056, 160, 64), "common/trigger")
+        + "}\n"
+    )
+    path = write_map(tmp_path, room(0, 0, 2048, 256), entities, name="et_groups.map")
+
+    report = analysis.balance_report(path, profile_id="etl", cell=16)
+    assert "error" not in report
+    assert report["spawn_count"] == 8
+    assert report["markers_without_origin"] == 0
+    groups = {(g["team"], g["group"]): g["spawns"] for g in report["spawn_groups"]}
+    assert groups == {("red", "West (entity 1)"): 4, ("blue", "entity 2"): 4}
+    (objective,) = report["objectives"]
+    assert objective["origin"] == [1024.0, 128.0, 32.0]
+    assert objective["team"] == "red"
+
+    safety = analysis.spawn_safety(path, profile_id="etl", cell=16)
+    assert safety["spawns_without_origin"] == 0
+    row = next(r for r in safety["spawns"] if r["team"] == "red")
+    assert row["group"] == "West (entity 1)"
+    assert row["nearest_enemy_spawn"]["team"] == "blue"
+    assert row["nearest_enemy_spawn"]["walked_between_teams"]["reachable"] is True
 
 
 def test_symmetry_detection_distinguishes_a_mirror_from_a_rotation():

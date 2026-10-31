@@ -298,7 +298,7 @@ def test_the_hull_contains_the_mesh_and_is_valid_ir(tmp_path: Path, pid):
     obj = write_obj(tmp_path / "a.obj", (96, 64, 72))
     r = blender.model_make_clip(obj, pid, k=14, grid=8)
     assert r["planes"] == 14
-    assert r["shader"].endswith("playerclip")
+    assert r["shader"].endswith(profiles.load(pid)["assets"]["clip_shaders"]["player"])
 
     # It must compile, and it must contain the mesh rather than cutting into it.
     info = k.solid_compile(r["ir"], {"default": r["shader"]}, 8)
