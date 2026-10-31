@@ -200,7 +200,7 @@
     "signature": "(grid: 'int | None' = None, severity_min: 'str' = 'warning') -> 'dict'"
   },
   "validate_profile": {
-    "doc": "Validate the open map's entities against the active game profile.\n\nComplements `validate`, which covers game-agnostic geometry. This checks the game's own\nrules: spawn arrangement, objective counts, gametype keys.\n\nEvery rule is data in the profile, and every finding carries a `confidence`. **An\nunverified rule can never produce an error** \u2014 it is downgraded to `info` \u2014 because three\nof the four spawn rules the design document called verified were wrong, and one would have\nfailed correct maps. `nrc://corrections` has the details.",
+    "doc": "Validate the open map's entities against the active game profile.\n\nComplements `validate`, which covers game-agnostic geometry. This checks the game's own\nrules: spawn arrangement, objective counts, gametype keys \u2014 and, for a game whose maps\ncarry a script, that script against the map's entities.\n\nEvery rule is data in the profile, and every finding carries a `confidence`. **An\nunverified rule can never produce an error** \u2014 it is downgraded to `info` \u2014 because three\nof the four spawn rules the design document called verified were wrong, and one would have\nfailed correct maps. `nrc://corrections` has the details.",
     "signature": "(profile_id: 'str | None' = None, severity_min: 'str' = 'info') -> 'dict'"
   }
 }

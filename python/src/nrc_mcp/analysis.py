@@ -53,7 +53,7 @@ from typing import Any
 
 from . import profiles
 from .kernel import load_map, repo_root
-from .rules import Finding
+from .rules import Finding, parse_spawnflags
 
 # ---------------------------------------------------------------------------
 # Caps and tunables
@@ -350,17 +350,30 @@ class Roles:
     group_key: str
     team_labels: tuple[str, ...]
     category_of: dict[str, str]
+    # (flag value, team label) pairs per classname, from `teams.spawnflags`.
+    team_flags: dict[str, tuple[tuple[int, str], ...]] = field(default_factory=dict)
+    # Spawns without a group key take the nearest entity of this class as their group.
+    group_nearest: str = ""
+    group_label_key: str = ""
 
     def team_of(self, classname: str, keys: dict[str, str]) -> str:
         """The team an entity belongs to.
 
-        Two sources, because the profile describes both conventions: a team *key* on the
-        entity, and per-team *classnames* for the stock team entities. The labels come from the
-        profile, so matching them inside a classname stays data-driven.
+        Three sources, because profiles describe all three conventions: a team *key* on the
+        entity, a team *spawnflag* on classes the profile lists, and per-team *classnames* for
+        the stock team entities. The labels come from the profile, so matching them inside a
+        classname stays data-driven.
         """
-        value = (keys.get(self.team_key) or "").strip().lower()
+        value = (keys.get(self.team_key) or "").strip().lower() if self.team_key else ""
         if value:
             return value
+        flags = self.team_flags.get(classname)
+        if flags:
+            bits = parse_spawnflags(keys.get("spawnflags"))
+            for flag, label in flags:
+                if bits & flag:
+                    return label
+            return UNASSIGNED_TEAM
         lowered = classname.lower()
         for label in self.team_labels:
             if label and label in lowered:
@@ -375,6 +388,8 @@ class Roles:
             "team_key": self.team_key,
             "group_key": self.group_key,
             "team_labels": list(self.team_labels),
+            "team_spawnflags": {c: [list(p) for p in v] for c, v in self.team_flags.items()},
+            "spawn_groups_by_nearest": self.group_nearest or None,
         }
 
 
@@ -476,6 +491,22 @@ def roles(profile_id: str) -> Roles:
             if team_key:
                 break
 
+    # `roles:` covers what a category cannot say. An objective that is also a trigger volume
+    # must stay categorized `trigger` so its brushes are not collision, yet still count here.
+    extra = data.get("roles") if isinstance(data.get("roles"), dict) else {}
+    objectives |= {str(c) for c in extra.get("objectives_also") or []}
+    grouping = extra.get("spawn_groups") if isinstance(extra.get("spawn_groups"), dict) else {}
+
+    team_flags: dict[str, tuple[tuple[int, str], ...]] = {}
+    teams = data.get("teams") if isinstance(data.get("teams"), dict) else {}
+    for classname, pairs in (teams.get("spawnflags") or {}).items():
+        if isinstance(pairs, list):
+            team_flags[str(classname)] = tuple(
+                (int(p["flag"]), str(p["label"]).lower())
+                for p in pairs
+                if isinstance(p, dict) and "flag" in p and "label" in p
+            )
+
     return Roles(
         profile=profile_id,
         spawns=frozenset(spawns),
@@ -484,6 +515,9 @@ def roles(profile_id: str) -> Roles:
         group_key=group_key,
         team_labels=_team_labels(data, entities, team_key),
         category_of=category_of,
+        team_flags=team_flags,
+        group_nearest=str(grouping.get("nearest") or ""),
+        group_label_key=str(grouping.get("label_key") or ""),
     )
 
 
@@ -1749,29 +1783,74 @@ class Marker:
         }
 
 
+def _brush_centre(game_map: Any, entity: dict) -> tuple[float, float, float] | None:
+    """The centre of a brush entity's brushes, for an entity with no origin key.
+
+    Objectives are often brush entities — a constructible, a trigger volume — and without this
+    they would be counted as markers without a position and dropped from every report.
+    """
+    index = int(entity["index"])
+    lo = [math.inf] * 3
+    hi = [-math.inf] * 3
+    for primitive in range(int(entity.get("brushes") or 0) + int(entity.get("patches") or 0)):
+        try:
+            geometry = game_map.brush_geometry(index, primitive)
+        except ValueError:
+            continue
+        bounds = geometry.get("bounds") if geometry.get("usable") else None
+        if not bounds:
+            continue
+        for axis in range(3):
+            lo[axis] = min(lo[axis], float(bounds[0][axis]))
+            hi[axis] = max(hi[axis], float(bounds[1][axis]))
+    if lo[0] == math.inf:
+        return None
+    return ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+
+
 def _markers(game_map: Any, role_map: Roles) -> tuple[list[Marker], list[Marker], int]:
     spawns: list[Marker] = []
     objectives: list[Marker] = []
+    # (origin, group name) of each entity spawns are grouped around, when the profile says so.
+    anchors: list[tuple[tuple[float, float, float], str]] = []
     without_origin = 0
     for entity in game_map.entities():
         classname = str(entity.get("classname") or "")
         is_spawn = classname in role_map.spawns
         is_objective = classname in role_map.objectives
-        if not (is_spawn or is_objective):
+        is_anchor = bool(role_map.group_nearest) and classname == role_map.group_nearest
+        if not (is_spawn or is_objective or is_anchor):
             continue
         origin = entity.get("origin")
-        if not origin:
-            without_origin += 1
+        if origin:
+            point = (float(origin[0]), float(origin[1]), float(origin[2]))
+        else:
+            point = _brush_centre(game_map, entity) if entity.get("brushes") else None
+        if point is None:
+            without_origin += int(is_spawn or is_objective)
             continue
         keys = _entity_keys(entity)
+        if is_anchor:
+            name = keys.get(role_map.group_label_key, "") if role_map.group_label_key else ""
+            label = f"entity {entity['index']}"
+            anchors.append((point, f"{name} ({label})" if name else label))
+        if not (is_spawn or is_objective):
+            continue
         marker = Marker(
             entity=int(entity["index"]),
             classname=classname,
-            origin=(float(origin[0]), float(origin[1]), float(origin[2])),
+            origin=point,
             team=role_map.team_of(classname, keys),
-            group=str(keys.get(role_map.group_key, "")),
+            group=str(keys.get(role_map.group_key, "")) if role_map.group_key else "",
         )
         (spawns if is_spawn else objectives).append(marker)
+
+    # A profile without a group key groups spawns by the nearest anchor instead, which is how
+    # its engine picks among them. A spawn with a group key keeps it.
+    if anchors:
+        for marker in spawns:
+            if not marker.group:
+                marker.group = min(anchors, key=lambda a: math.dist(a[0], marker.origin))[1]
     return spawns, objectives, without_origin
 
 

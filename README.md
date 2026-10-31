@@ -130,12 +130,16 @@ NRC_Q3MAP2_MODE = "windows"
 `URT_BASEPATH` and `URT_MAPSRC`, the names these had before there was a second profile, are
 still read when the new names are unset.
 
-**What the ET profile does not do yet.** Its entities, movement constants, engine limits and six
-load-stopping rules are in place. Not yet modelled: spawnflag checks (team spawns without
-`STARTACTIVE` are never used), grouping spawns by their nearest `team_WOLF_objective`,
-dynamite objectives (a `func_explosive` that a `trigger_objective_info` targets), the map script
-`maps/<map>.script`, and the companion files `ship_check` should look for. `profiles/etl.yaml`
-lists each one where it would go.
+**What the ET profile checks.** `validate_profile` runs nine rules (spawn markers, active spawns,
+objective triggers, dangling `target` names) and, when `<map>.script` sits beside the `.map`,
+checks the script against the map: syntax the engine refuses, unknown events and actions, blocks
+no entity runs, and `trigger` / `alertentity` / `setstate` / `setautospawn` arguments that name
+nothing. `balance_report` and `spawn_safety` group ET spawns by their nearest
+`team_WOLF_objective`, read objective ownership from spawnflags, and measure to
+`trigger_objective_info` volumes. `ship_check` looks for the script, objdata, command map,
+tracemap and location file. Run over 47 shipped maps, the checks report one load-time error, a
+misnamed `setautospawn` target in a test build, and otherwise only dead references. Not modelled
+yet: prone clearance, spawn spacing, and the `_lms` script variant.
 
 Check what resolved:
 
@@ -328,7 +332,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `query_entities` | Entities, filterable by classname. |
 | `brush_geometry` | Exact vertices and derived properties of one brush. |
 | `validate` | Geometry and file-format findings. |
-| `validate_profile` | Entities against the game profile's rules. |
+| `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
 **Seeing it**
@@ -390,7 +394,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 
 | Tool | Does |
 | --- | --- |
-| `ship_check` | Naming, levelshot, arena file, package contents. |
+| `ship_check` | Naming, levelshot, arena file, companion files, package contents. |
 | `pack_pk3` | Build the release archive. |
 | `repack_analyze` | Every resource the BSP actually references. |
 

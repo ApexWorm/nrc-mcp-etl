@@ -255,6 +255,114 @@ def test_a_broken_message_template_still_reports_the_facts(monkeypatch):
     assert "facts:" in f[0].message, "a profile typo must not hide the finding"
 
 
+def test_spawnflags_parse_the_way_the_engine_does():
+    """`atoi`: a leading integer, whatever follows, and 0 for nothing at all."""
+    assert rules.parse_spawnflags("6") == 6
+    assert rules.parse_spawnflags(" 14 ") == 14
+    assert rules.parse_spawnflags("3abc") == 3
+    assert rules.parse_spawnflags("") == 0
+    assert rules.parse_spawnflags("x") == 0
+    assert rules.parse_spawnflags(None) == 0
+
+
+def test_key_names_match_without_regard_to_case(monkeypatch):
+    """A shipped map writes `Track`; the engine reads it as `track`, so a rule must too."""
+    rule = {
+        "id": "R",
+        "check": "key_required",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "x",
+        "params": {"classname": "zone", "key": "track"},
+    }
+    assert run(rule, [ent(0, "zone", Track="the gate")], monkeypatch) == []
+    assert run(rule, [ent(0, "zone")], monkeypatch)
+
+
+def test_flag_count_min_needs_enough_entities_with_the_flag(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "flag_count_min",
+        "severity": "warning",
+        "confidence": "verified",
+        "message": "{found} of {of}",
+        "params": {"classname": "spawn", "flag": 2, "count": 1},
+    }
+    assert run(rule, [ent(0, "spawn", spawnflags="3"), ent(1, "spawn")], monkeypatch) == []
+    f = run(rule, [ent(0, "spawn", spawnflags="1"), ent(1, "spawn")], monkeypatch)
+    assert f[0].message == "0 of 2"
+    assert f[0].entities == [0, 1]
+
+
+def test_flag_requires_key_accepts_any_of_several_keys(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "flag_requires_key",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "{found} without {key}",
+        "params": {"classname": "zone", "flag": 4, "keys": ["override", "spawnitem"]},
+    }
+    ok = [
+        ent(0, "zone", spawnflags="14", override="text"),
+        ent(1, "zone", spawnflags="4", spawnitem="text"),
+        ent(2, "zone", spawnflags="3"),  # flag not set: nothing required
+    ]
+    assert run(rule, ok, monkeypatch) == []
+    f = run(rule, [ent(5, "zone", spawnflags="4", override="  ")], monkeypatch)
+    assert f[0].message == "1 without override or spawnitem"
+    assert f[0].entities == [5]
+
+
+def test_targets_resolve_reports_names_that_name_nothing(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "targets_resolve",
+        "severity": "warning",
+        "confidence": "verified",
+        "message": "{found}: {detail}",
+        "params": {
+            "keys": ["target"],
+            "list_keys": ["stages"],
+            "separator": ";",
+            "exclude_classnames": ["label_user"],
+        },
+    }
+    good = [
+        ent(0, "door", targetname="d1"),
+        ent(1, "button", target="d1"),
+        ent(2, "builder", stages="d1;d2;"),
+        ent(3, "door", targetname="d2"),
+        ent(4, "label_user", target="not_an_entity"),
+    ]
+    assert run(rule, good, monkeypatch) == []
+    bad = [
+        ent(0, "door", targetname="d1"),
+        ent(1, "button", target="D1"),
+        ent(2, "b", stages="d1;dx"),
+    ]
+    f = run(rule, bad, monkeypatch)
+    assert "2:" in f[0].message, "names are case-sensitive, and each list entry counts"
+    assert f[0].entities == [1, 2]
+
+
+def test_applies_when_flag_present_needs_one_entity_with_the_flag(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "count_min",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "x",
+        "applies_when": {
+            "flag_present": [{"classname": "red", "flag": 2}, {"classname": "blue", "flag": 2}]
+        },
+        "params": {"classname": "marker", "count": 1},
+    }
+    assert run(rule, [ent(0, "red"), ent(1, "blue", spawnflags="1")], monkeypatch) == []
+    assert run(rule, [ent(0, "red"), ent(1, "blue", spawnflags="3")], monkeypatch)
+    assert run(rule, [ent(0, "red", spawnflags="2"), ent(1, "marker")], monkeypatch) == []
+
+
 # ---------------------------------------------------------------------------
 # The shipped profile's rules, against real maps
 # ---------------------------------------------------------------------------
@@ -526,6 +634,41 @@ def test_ship_check_findings_are_ordered_worst_first(tmp_path: Path, pid):
     sev = [f["severity"] for f in r["findings"]]
     order = {"error": 0, "warning": 1, "info": 2}
     assert sev == sorted(sev, key=lambda s: order[s])
+
+
+def test_ship_check_reports_missing_companion_files(tmp_path: Path, monkeypatch):
+    """A required companion missing warns; an optional one is noted; images match any format."""
+    monkeypatch.setattr(
+        profiles,
+        "load",
+        lambda _pid: {
+            "packaging": {
+                "companions": [
+                    {"path": "maps/{map}.script", "required": True, "confidence": "verified"},
+                    {"path": "maps/{map}.objdata", "required": False, "confidence": "verified"},
+                    {
+                        "path": "levelshots/{map}_cc.tga",
+                        "any_extension": ["jpg", "png"],
+                        "confidence": "verified",
+                    },
+                ]
+            }
+        },
+    )
+    pk3 = make_pk3(tmp_path / "m.pk3", ["maps/m.bsp", "levelshots/m_cc.jpg"])
+    found = {
+        f["message"].split()[1]: f["severity"]
+        for f in pack.ship_check(tmp_path / "m.bsp", "test", pk3=pk3)["findings"]
+        if f["code"] == "SHIP_NO_COMPANION"
+    }
+    assert found == {"maps/m.script": "warning", "maps/m.objdata": "info"}
+
+    full = make_pk3(
+        tmp_path / "m2.pk3",
+        ["maps/m2.bsp", "maps/m2.script", "maps/m2.objdata", "levelshots/m2_cc.tga"],
+    )
+    r = pack.ship_check(tmp_path / "m2.bsp", "test", pk3=full)
+    assert not [f for f in r["findings"] if f["code"] == "SHIP_NO_COMPANION"]
 
 
 def test_pack_pk3_refuses_a_missing_bsp(tmp_path: Path):

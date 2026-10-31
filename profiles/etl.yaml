@@ -258,13 +258,35 @@ teams:
     - {label: blue, name: Allies}
   note: >-
     No ET spawn carries a team key. The team is in the classname for spawns, and in
-    spawnflags for team_WOLF_objective, trigger_objective_info, func_constructible,
-    team_WOLF_checkpoint and misc_commandmap_marker. The analysis tools read only the first
-    of those today.
+    spawnflags for the classes below. func_constructible (AXIS/ALLIED_CONSTRUCTIBLE, 4/8) and
+    team_WOLF_checkpoint (AXIS/ALLIED_ONLY, 4/8) are left out: their flags say who may build
+    or capture, not who owns the thing.
+  # Team by spawnflag. Read by Roles.team_of; the first flag set wins.
+  spawnflags:
+    team_WOLF_objective:     # DEFAULT_AXIS / DEFAULT_ALLIES, g_team.c:952-958
+      - {flag: 1, label: red}
+      - {flag: 2, label: blue}
+    trigger_objective_info:  # AXIS_OBJECTIVE / ALLIED_OBJECTIVE: who owns it, gamepack
+      - {flag: 1, label: red}
+      - {flag: 2, label: blue}
+    misc_commandmap_marker:  # ONLY_AXIS / ONLY_ALLIED, gamepack
+      - {flag: 1, label: red}
+      - {flag: 2, label: blue}
+
+# What a category cannot say. Read by analysis.roles.
+roles:
+  # An objective volume. Categorized `trigger` so its brushes are not collision, but it is
+  # where the fighting is, so balance_report measures to it (from its brushes' centre).
+  objectives_also: [trigger_objective_info]
+  # No group key: a team spawns at its active spawns nearest the selected marker
+  # (game/g_team.c:455 onward), so spawns are grouped by their nearest marker.
+  spawn_groups:
+    nearest: team_WOLF_objective
+    label_key: description
 
 # ---------------------------------------------------------------------------
 # ENUMS and ENTITIES
-# Every classname defined in et_entities.ent (120), rendered mechanically, then one class
+# Every classname defined in et_entities.ent (120), rendered mechanically, then the 40 classes
 # the engine spawns that the gamepack omits. `kind`: point = point entity (editor box given);
 # brush = owns brushes. Categories are this profile's taxonomy: `objective` covers only point
 # and solid objectives - trigger_objective_info stays `trigger` so its volume is not mistaken
@@ -1881,6 +1903,359 @@ entities:
     keys: []
     spawnflags: []
 
+  # === Engine-only, from the spawn table (game/g_spawn.c:435-627) ===
+  - classname: info_player_checkpoint
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:440; QUAKED at game/g_client.c:186"
+    keys: []
+    spawnflags: []
+  - classname: info_camp
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:446; QUAKED at game/g_misc.c:48"
+    keys: []
+    spawnflags: []
+  - classname: func_button
+    kind: brush
+    category: mover
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:453; QUAKED at game/g_mover.c:2848"
+    keys: []
+    spawnflags: []
+  - classname: func_train
+    kind: brush
+    category: mover
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:461; QUAKED at game/g_mover.c:3280"
+    keys: []
+    spawnflags: []
+  - classname: func_train_rotating
+    kind: brush
+    category: mover
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:464; QUAKED at game/g_mover.c:3536"
+    keys: []
+    spawnflags: []
+  - classname: func_secret
+    kind: brush
+    category: mover
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:465; QUAKED at game/g_mover.c:2542"
+    keys: []
+    spawnflags: []
+  - classname: trigger_push
+    kind: brush
+    category: trigger
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:480; QUAKED at game/g_trigger.c:383"
+    keys: []
+    spawnflags: []
+  - classname: trigger_concussive_dust
+    kind: brush
+    category: trigger
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:485; QUAKED at game/g_trigger.c:1931"
+    keys: []
+    spawnflags: []
+  - classname: target_give
+    kind: point
+    category: target
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:497; QUAKED at game/g_target.c:41"
+    keys: []
+    spawnflags: []
+  - classname: target_remove_powerups
+    kind: point
+    category: target
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:498; QUAKED at game/g_target.c:90"
+    keys: []
+    spawnflags: []
+  - classname: target_laser
+    kind: point
+    category: target
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:502; QUAKED at game/g_target.c:548"
+    keys: []
+    spawnflags: []
+  - classname: target_position
+    kind: point
+    category: target
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:506; no QUAKED comment, kind inferred from the name"
+    keys: []
+    spawnflags: []
+  - classname: target_location
+    kind: point
+    category: target
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:507; QUAKED at game/g_target.c:918"
+    keys: []
+    spawnflags: []
+  - classname: target_alarm
+    kind: point
+    category: target
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:512; QUAKED at game/g_target.c:1074"
+    keys: []
+    spawnflags: []
+  - classname: target_counter
+    kind: point
+    category: target
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:513; QUAKED at game/g_target.c:1032"
+    keys: []
+    spawnflags: []
+  - classname: misc_light_surface
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:541; QUAKED at game/g_misc.c:399"
+    keys: []
+    spawnflags: []
+  - classname: misc_aagun
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:544; QUAKED at game/g_misc.c:1388"
+    keys: []
+    spawnflags: []
+  - classname: misc_flak
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:546; QUAKED at game/g_misc.c:2046"
+    keys: []
+    spawnflags: []
+  - classname: props_sparks
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:572; QUAKED at game/g_props.c:319"
+    keys: []
+    spawnflags: []
+  - classname: props_bench
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:575; QUAKED at game/g_props.c:843"
+    keys: []
+    spawnflags: []
+  - classname: props_radio
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:576; QUAKED at game/g_props.c:891"
+    keys: []
+    spawnflags: []
+  - classname: props_damageinflictor
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:582; QUAKED at game/g_props.c:2028"
+    keys: []
+    spawnflags: []
+  - classname: props_locker_tall
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:583; QUAKED at game/g_props.c:1035"
+    keys: []
+    spawnflags: []
+  - classname: props_desklamp
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:584; QUAKED at game/g_props.c:2103"
+    keys: []
+    spawnflags: []
+  - classname: props_flippy_table
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:587; QUAKED at game/g_props.c:2889"
+    keys: []
+    spawnflags: []
+  - classname: props_crate_32x64
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:589; QUAKED at game/g_props.c:2813"
+    keys: []
+    spawnflags: []
+  - classname: props_58x112tablew
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:590; QUAKED at game/g_props.c:3120"
+    keys: []
+    spawnflags: []
+  - classname: props_radioSEVEN
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:591; QUAKED at game/g_props.c:955"
+    keys: []
+    spawnflags: []
+  - classname: props_snowGenerator
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:592; QUAKED at game/g_props.c:3318"
+    keys: []
+    spawnflags: []
+  - classname: props_decoration
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:594; QUAKED at game/g_props.c:3477"
+    keys: []
+    spawnflags: []
+  - classname: props_decorBRUSH
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:595; QUAKED at game/g_props.c:3769"
+    keys: []
+    spawnflags: []
+  - classname: props_statue
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:596; QUAKED at game/g_props.c:3885"
+    keys: []
+    spawnflags: []
+  - classname: props_statueBRUSH
+    kind: brush
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:597; QUAKED at game/g_props.c:4198"
+    keys: []
+    spawnflags: []
+  - classname: props_footlocker
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:599; QUAKED at game/g_props.c:4428"
+    keys: []
+    spawnflags: []
+  - classname: props_flamethrower
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:600; QUAKED at game/g_props.c:4575"
+    keys: []
+    spawnflags: []
+  - classname: props_decoration_scale
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:601; QUAKED at game/g_props.c:3802"
+    keys: []
+    spawnflags: []
+  - classname: trigger_flagonly
+    kind: brush
+    category: trigger
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:607; QUAKED at game/g_trigger.c:1408"
+    keys: []
+    spawnflags: []
+  - classname: script_model_med
+    kind: point
+    category: utility
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:613; QUAKED at game/g_script.c:1315"
+    keys: []
+    spawnflags: []
+  - classname: func_fakebrush
+    kind: brush
+    category: mover
+    confidence: verified
+    source: etlegacy_source
+    description: "Spawned by the engine; not in the gamepack, so no keys are listed."
+    note: "spawned at game/g_spawn.c:624; no QUAKED comment, kind inferred from the name"
+    keys: []
+    spawnflags: []
+
 # ---------------------------------------------------------------------------
 # focus — the entities gameplay checks care about, and what the sources say of each
 # ---------------------------------------------------------------------------
@@ -1922,7 +2297,7 @@ focus:
     present: true
     confidence: verified
     source: gamepack_entities
-    finding: "The objective's area and name. `track` is mandatory - the game stops without it (g_trigger.c:1818-1820). Targets the func_explosive or func_constructible it describes; spawnflags AXIS_OBJECTIVE (1) / ALLIED_OBJECTIVE (2) say who owns it. A brush trigger, so it is categorized trigger (non-solid), not objective."
+    finding: "The objective's area and name. `track` is mandatory - the game stops without it (g_trigger.c:1818-1820). Targets the func_explosive or func_constructible it describes; spawnflags AXIS_OBJECTIVE (1) / ALLIED_OBJECTIVE (2) say who owns it. A brush trigger, so it is categorized trigger (non-solid), and counted as an objective through roles.objectives_also."
   - topic: "objectives"
     classname: "func_constructible"
     present: true
@@ -1934,7 +2309,7 @@ focus:
     present: true
     confidence: verified
     source: gamepack_entities
-    finding: "A breakable. It is a dynamite objective only when a trigger_objective_info targets it, which the role taxonomy cannot express, so it is categorized breakable."
+    finding: "A breakable. It is a dynamite objective only when a trigger_objective_info targets it, so it is categorized breakable and the objective is measured at that trigger instead."
   - topic: "objectives"
     classname: "team_WOLF_checkpoint"
     present: true
@@ -2117,11 +2492,11 @@ unverified:
 counts:
   confidence: verified
   source: [gamepack_entities, gamepack_shaderlist, etlegacy_source]
-  entity_classes_total: 121
+  entity_classes_total: 160
   entity_classes_et_entities_ent: 120
-  entity_classes_engine_only: 1
-  point_classes: 94
-  brush_classes: 27
+  entity_classes_engine_only: 40
+  point_classes: 115
+  brush_classes: 45
   enums: 2
   shaderlist_entries: 105
   by_category:
@@ -2130,13 +2505,13 @@ counts:
     item: 6
     light: 4
     marker: 3
-    mover: 9
+    mover: 14
     objective: 4
     spawn_ffa: 2
     spawn_team: 2
-    target: 14
-    trigger: 10
-    utility: 43
+    target: 21
+    trigger: 13
+    utility: 67
     weapon: 16
     world: 2
 
@@ -2144,20 +2519,15 @@ counts:
 # rules — declarative validation, evaluated by nrc_mcp.rules
 # ---------------------------------------------------------------------------
 #
-# Only checks the rule engine implements today. Rules this game needs and the engine cannot yet
-# express, recorded so they are not lost:
-#   - team spawns with no STARTACTIVE spawnflag (bit 1) are never used (g_team.c:496)
-#   - trigger_objective_info with MESSAGE_OVERRIDE (bit 2) and no override text stops the game
-#   - every trigger_objective_info `target` must name a func_explosive or func_constructible
-#   - every `scriptname` must have a block in maps/<map>.script, and the reverse
-#   - spawn spacing: there is no group key, so spacing has to be grouped by nearest marker
+# The map script is checked separately, from `mapscript:` below. Not expressed yet: spawn
+# spacing, which needs spawns grouped by nearest marker inside the rule engine.
 
 rules:
   - id: ETL_SCRIPT_MULTIPLAYER_EXACTLY_ONE
     check: count_exact
     severity: error
     confidence: verified
-    rule_source: "gamepack et_entities.ent: script_multiplayer notes"
+    rule_source: "gamepack et_entities.ent: script_multiplayer notes; etlegacy game/g_script.c:1406-1409"
     message: >-
       found {found} script_multiplayer entities; the gamepack states a map MUST have exactly
       {expected} for its map script to run
@@ -2166,33 +2536,20 @@ rules:
       classname: script_multiplayer
       count: 1
 
-  - id: ETL_SPAWN_REGION_REQUIRED_AXIS
+  - id: ETL_SPAWN_REGION_REQUIRED
     check: count_min
     severity: error
     confidence: verified
-    rule_source: "etlegacy game/g_team.c:537 (G_Error \"No spawnpoints found\")"
+    rule_source: "etlegacy game/g_team.c:496-537 (G_Error \"No spawnpoints found\" once an active spawn is chosen)"
     message: >-
-      the map has team spawns but {found} team_WOLF_objective spawn markers; the game stops
-      with "No spawnpoints found" the first time a team spawns
+      the map has active team spawns but {found} team_WOLF_objective spawn markers; the game
+      stops with "No spawnpoints found" the first time a team spawns
     fix_hint: "add a team_WOLF_objective near each spawn area, with DEFAULT_AXIS or DEFAULT_ALLIES set"
+    # Only an active spawn reaches the check; with none active the game falls back first.
     applies_when:
-      classname_present: team_CTF_redspawn
-    params:
-      classname: team_WOLF_objective
-      count: 1
-
-  - id: ETL_SPAWN_REGION_REQUIRED_ALLIES
-    check: count_min
-    severity: error
-    confidence: verified
-    rule_source: "etlegacy game/g_team.c:537 (G_Error \"No spawnpoints found\")"
-    message: >-
-      the map has team spawns but {found} team_WOLF_objective spawn markers; the game stops
-      with "No spawnpoints found" the first time a team spawns
-    fix_hint: "add a team_WOLF_objective near each spawn area, with DEFAULT_AXIS or DEFAULT_ALLIES set"
-    applies_when:
-      classname_present: team_CTF_bluespawn
-      classname_absent: team_CTF_redspawn
+      flag_present:
+        - {classname: team_CTF_redspawn, flag: 2}
+        - {classname: team_CTF_bluespawn, flag: 2}
     params:
       classname: team_WOLF_objective
       count: 1
@@ -2235,6 +2592,169 @@ rules:
     params:
       classname: team_WOLF_objective
       key: description
+
+  - id: ETL_TEAM_SPAWN_ACTIVE_AXIS
+    check: flag_count_min
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:496 (skips spawns without STARTACTIVE), :532 (fallback)"
+    message: >-
+      none of the {of} team_CTF_redspawn entities has STARTACTIVE (spawnflag {flag}); until a
+      script or checkpoint enables one, every Axis player spawns at whichever comes first in
+      the map, active or not
+    fix_hint: "set STARTACTIVE on the Axis spawns that should be live at the start"
+    applies_when:
+      classname_present: team_CTF_redspawn
+    params:
+      classname: team_CTF_redspawn
+      flag: 2
+      count: 1
+
+  - id: ETL_TEAM_SPAWN_ACTIVE_ALLIES
+    check: flag_count_min
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:496 (skips spawns without STARTACTIVE), :532 (fallback)"
+    message: >-
+      none of the {of} team_CTF_bluespawn entities has STARTACTIVE (spawnflag {flag}); until a
+      script or checkpoint enables one, every Allied player spawns at whichever comes first in
+      the map, active or not
+    fix_hint: "set STARTACTIVE on the Allied spawns that should be live at the start"
+    applies_when:
+      classname_present: team_CTF_bluespawn
+    params:
+      classname: team_CTF_bluespawn
+      flag: 2
+      count: 1
+
+  - id: ETL_OBJECTIVE_INFO_OVERRIDE_TEXT
+    check: flag_requires_key
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1800, :1823-1828; both keys fill it, game/g_spawn.c:216, :226"
+    message: >-
+      {found} trigger_objective_info entity/entities set MESSAGE_OVERRIDE (spawnflag {flag})
+      without a {key} key; the game stops at load with "has override flag set but no
+      override text"
+    fix_hint: "set override to the override text, or clear spawnflag 4"
+    params:
+      classname: trigger_objective_info
+      flag: 4
+      keys: [override, spawnitem]
+
+  - id: ETL_TARGETS_RESOLVE
+    check: targets_resolve
+    severity: warning
+    confidence: verified
+    rule_source: >-
+      etlegacy game/g_utils.c:594 (G_PickTarget warns "target not found"); construction
+      stages are looked up by targetname at game/g_mover.c:5378 and :5415
+    message: >-
+      {found} name reference(s) name no entity's targetname ({detail}); nothing happens when
+      they fire
+    fix_hint: "fix the spelling, or give the intended entity that targetname"
+    params:
+      keys: [target]
+      list_keys: [constages, desstages]
+      separator: ";"
+      # Its target is a script event label, checked by mapscript.entity_events instead.
+      exclude_classnames: [target_script_trigger]
+
+# ---------------------------------------------------------------------------
+# mapscript — maps/<map>.script, checked against the map by nrc_mcp.mapscript
+# ---------------------------------------------------------------------------
+#
+# Every name below is read out of the engine. validate_profile parses the script found beside
+# the .map and reports syntax the engine refuses, unknown events and actions, blocks no
+# entity runs, and action arguments that name nothing.
+
+mapscript:
+  confidence: verified
+  source: etlegacy_source
+  locus: "game/g_script.c"
+  # Beside the .map; under a game directory both live in maps/ (g_script.c:311-319). The
+  # LMS variant <map>_lms.script is loaded instead in Last Man Standing and is not checked.
+  file: "{map}.script"
+  missing_severity: warning
+  missing_note: "without one the map has no objectives, spawn changes or win conditions"
+  # The entity key naming the block an entity runs (game/g_spawn.c:220, matched without
+  # regard to case at g_script.c:423).
+  block_key: scriptname
+  # The one class the engine names itself: script_multiplayer is always game_manager.
+  implied_names:
+    - {classname: script_multiplayer, name: game_manager, locus: "game/g_script.c:1400"}
+  # Actions whose arguments are a braced list rather than the rest of the line (g_script.c:491).
+  brace_actions: [set, create, delete]
+  # Of those, the one that spawns an entity from its key/value list (g_script_actions.c:5127).
+  spawning_actions: [create]
+  # gScriptEvents, game/g_script.c:160-179. An unknown one stops the game (g_script.c:437).
+  events:
+    [spawn, trigger, pain, death, activate, stopcam, playerstart, built, buildstart, decayed,
+     destroyed, rebirth, failed, dynamited, defused, mg42, message, exploded]
+  # gScriptActions, game/g_script.c:52-150. An unknown one stops the game (g_script.c:483).
+  actions:
+    [gotomarker, playsound, playanim, wait, trigger, alertentity, togglespeaker,
+     disablespeaker, enablespeaker, accum, globalaccum, print, faceangles, resetscript,
+     attachtotag, halt, stopsound, entityscriptname, wm_axis_respawntime,
+     wm_allied_respawntime, wm_number_of_objectives, wm_setwinner, wm_set_defending_team,
+     wm_announce, wm_teamvoiceannounce, wm_addteamvoiceannounce, wm_removeteamvoiceannounce,
+     wm_announce_icon, wm_endround, wm_set_round_timelimit, wm_voiceannounce,
+     wm_objective_status, wm_set_main_objective, remove, setstate, followspline, followpath,
+     abortmove, setspeed, setrotation, stoprotation, startanimation, attatchtotrain,
+     freezeanimation, unfreezeanimation, remapshader, remapshaderflush, changemodel,
+     setchargetimefactor, setdamagable, repairmg42, sethqstatus, printaccum, printglobalaccum,
+     cvar, abortifwarmup, abortifnotsingleplayer, mu_start, mu_play, mu_stop, mu_queue,
+     mu_fade, setdebuglevel, setposition, setautospawn, setmodelfrombrushmodel, fadeallsounds,
+     construct, spawnrubble, setglobalfog, allowtankexit, allowtankenter, settankammo,
+     addtankammo, kill, disablemessage, set, create, delete, constructible_class,
+     constructible_chargebarreq, constructible_constructxpbonus, constructible_destructxpbonus,
+     constructible_health, constructible_weaponclass, constructible_duration]
+  # Entities that call a script event by label rather than naming an entity.
+  entity_events:
+    - classname: target_script_trigger
+      label_key: target
+      block_keys: [ainame, scriptname]
+      event: trigger
+      # It then fires its target as an entity name too (G_UseTargets, g_target.c:1310).
+      also_targets: targetname
+      severity: warning
+      locus: "game/g_target.c:1276-1303 (ainame's block first, then its own scriptname's)"
+  # Action arguments that name something in the map.
+  references:
+    - action: trigger
+      arg: 0
+      resolves: block
+      special: [self, global, player, activator]
+      event: trigger
+      event_label_arg: 1
+      severity: warning
+      describe: "a script block"
+      consequence: "the game prints 'trigger has unknown name' and does nothing"
+      locus: "game/g_script_actions.c:1727-1847"
+    - action: alertentity
+      arg: 0
+      resolves: targetname
+      severity: error
+      describe: "an entity's targetname"
+      consequence: "the game stops with 'alertentity cannot find targetname' when it runs"
+      locus: "game/g_script_actions.c:2250-2262"
+    - action: setstate
+      arg: 0
+      resolves: targetname
+      severity: warning
+      describe: "an entity's targetname"
+      consequence: "nothing happens; the game says so only with g_scriptDebug or developer set"
+      locus: "game/g_script_actions.c:4058-4073"
+    - action: setautospawn
+      arg: 0
+      resolves:
+        - {key: description, classname: team_WOLF_objective}
+        - {key: message}
+      severity: error
+      describe: "a team_WOLF_objective description"
+      case_insensitive: true   # G_Find compares with Q_stricmp, game/g_utils.c:345
+      consequence: "the game stops with 'setautospawn, couldn't find target' when it runs"
+      locus: "game/g_script_actions.c:176-210; description becomes message at game/g_team.c:942-946"
 
 # ---------------------------------------------------------------------------
 # engine_limits — what decides whether the map LOADS, as opposed to compiles
@@ -2296,13 +2816,14 @@ packaging:
     required_keys: [map, longname, type]
     confidence: unverified
     note: "scripts/<map>.arena is read at cgame/cg_missionbriefing.c:476; see unverified.arena_required_keys"
-  # The other files a map is looked up by. Not checked by ship_check yet.
+  # The other files a map is looked up by; ship_check reports any that are missing. An image
+  # may ship under any extension the renderer tries (renderercommon/tr_common.c:45-53).
   companions:
-    - {path: "maps/{map}.script", role: map script, required: true, locus: "game/g_script.c:311-319"}
-    - {path: "maps/{map}.objdata", role: limbo objective descriptions, required: false, locus: "cgame/cg_main.c:532"}
-    - {path: "levelshots/{map}_cc.tga", role: command map, required: false, locus: "cgame/cg_main.c:1087"}
-    - {path: "maps/{map}_tracemap.tga", role: tracemap (written by generatetracemap), required: false, locus: "game/bg_tracemap.c:598"}
-    - {path: "maps/{map}_loc.dat", role: location names, required: false, locus: "cgame/cg_locations.c:526"}
+    - {path: "maps/{map}.script", confidence: verified, role: map script, required: true, locus: "game/g_script.c:311-319"}
+    - {path: "maps/{map}.objdata", confidence: verified, role: limbo objective descriptions, required: false, locus: "cgame/cg_main.c:532"}
+    - {path: "levelshots/{map}_cc.tga", any_extension: [png, tga, jpg, jpeg], confidence: verified, role: command map, required: false, locus: "cgame/cg_main.c:1087"}
+    - {path: "maps/{map}_tracemap.tga", confidence: verified, role: tracemap (written by generatetracemap), required: false, locus: "game/bg_tracemap.c:598"}
+    - {path: "maps/{map}_loc.dat", confidence: verified, role: location names, required: false, locus: "cgame/cg_locations.c:526"}
   reserved_shader_prefixes: [common/, sfx/, gfx/, models/]
   size_budget_bytes: 52428800
   size_budget_confidence: unverified

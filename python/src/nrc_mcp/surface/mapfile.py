@@ -12,8 +12,8 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis as anamod
+from .. import mapscript, profiles, rules
 from .. import playspace as playspacemod
-from .. import profiles, rules
 from ..kernel import load_map, repo_root
 from ..runtime import (
     SESSION,
@@ -216,7 +216,8 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
     """Validate the open map's entities against the active game profile.
 
     Complements `validate`, which covers game-agnostic geometry. This checks the game's own
-    rules: spawn arrangement, objective counts, gametype keys.
+    rules: spawn arrangement, objective counts, gametype keys — and, for a game whose maps
+    carry a script, that script against the map's entities.
 
     Every rule is data in the profile, and every finding carries a `confidence`. **An
     unverified rule can never produce an error** — it is downgraded to `info` — because three
@@ -233,6 +234,8 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
     try:
         ents = m.entities()
         found = rules.evaluate(pid, ents) + rules.unknown_classnames(pid, ents)
+        # A profile with a map script also checks the script beside the .map against it.
+        found += mapscript.check(pid, ents, SESSION.path)
     except profiles.ProfileError as e:
         raise ToolError(_profile_error_text(e)) from e
 

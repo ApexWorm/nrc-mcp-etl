@@ -394,6 +394,30 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
                 )
             )
 
+    # --- other files the game looks a map up by -------------------------------
+    # Each names a path pattern; a required one missing is a warning, an optional one is noted.
+    for comp in pkg.get("companions") or []:
+        if not isinstance(comp, dict) or not comp.get("path"):
+            continue
+        want = str(comp["path"]).format(map=stem).lower()
+        # An image the renderer finds under any of several extensions.
+        base = want.rsplit(".", 1)[0]
+        accepted = {want} | {f"{base}.{x}".lower() for x in comp.get("any_extension") or []}
+        if accepted & set(lower):
+            continue
+        conf = str(comp.get("confidence", "unverified"))
+        required = bool(comp.get("required"))
+        findings.append(
+            _finding(
+                "SHIP_NO_COMPANION",
+                sev("warning", conf) if required else "info",
+                f"no {want} in {archive.name} ({comp.get('role', 'companion file')}"
+                f"{'' if required else ', optional'})",
+                conf,
+                f"add {want}",
+            )
+        )
+
     # --- reserved shader prefixes -------------------------------------------
     reserved = pkg.get("reserved_shader_prefixes")
     if isinstance(reserved, list):

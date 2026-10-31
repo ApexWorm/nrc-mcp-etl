@@ -654,6 +654,7 @@ def test_sightline_sampling_is_deterministic_and_capped(tmp_path, kern, pid):
 
 def _two_team_map(tmp_path, role_map, *, name, objective_offset=0.0):
     """A 2048 x 256 hall with a spawn group at each end and one neutral objective."""
+    _needs_team_key(role_map)
     spawn_class = sorted(role_map.spawns)[0]
     neutral = sorted(role_map.objectives)[0]
     red, blue = role_map.team_labels[0], role_map.team_labels[1]
@@ -704,6 +705,7 @@ def test_balance_report_does_not_flag_a_correct_mirrored_objective_pair(
     tmp_path, kern, pid, role_map
 ):
     """Each team being nearer its own flag is CTF working, not CTF broken."""
+    _needs_team_key(role_map)
     red, blue = role_map.team_labels[0], role_map.team_labels[1]
     per_team = {
         team: next(o for o in sorted(role_map.objectives) if team in o.lower())
@@ -737,6 +739,104 @@ def test_balance_report_does_not_flag_a_correct_mirrored_objective_pair(
     assert report["symmetry"]["symmetric"] is True
     assert report["symmetry"]["best"]["transform"] == "mirror_x"
     assert report["symmetry"]["best"]["fraction"] == 1.0
+
+
+def _needs_team_key(role_map) -> None:
+    if not role_map.team_key:
+        pytest.skip("these maps set teams by key; this profile's spawns carry none")
+
+
+class _FakeMap:
+    """Just enough of the kernel's map for `_markers`: entities, and brush bounds."""
+
+    def __init__(self, entities, bounds=None):
+        self._entities = entities
+        self._bounds = bounds or {}
+
+    def entities(self):
+        return self._entities
+
+    def brush_geometry(self, index, primitive):
+        try:
+            lo, hi = self._bounds[index][primitive]
+        except (KeyError, IndexError):
+            raise ValueError(f"entity {index} has no primitive {primitive}") from None
+        return {"usable": True, "bounds": (lo, hi)}
+
+
+def _point(index, classname, origin=None, brushes=0, **keys):
+    return {
+        "index": index,
+        "classname": classname,
+        "origin": list(origin) if origin else None,
+        "brushes": brushes,
+        "patches": 0,
+        "keys": [("classname", classname), *keys.items()],
+    }
+
+
+def test_team_of_reads_spawnflags_for_the_classes_a_profile_lists():
+    r = analysis.Roles(
+        profile="test",
+        spawns=frozenset({"red_spawn"}),
+        objectives=frozenset({"zone"}),
+        team_key="",
+        group_key="",
+        team_labels=("red", "blue"),
+        category_of={},
+        team_flags={"zone": ((1, "red"), (2, "blue"))},
+    )
+    assert r.team_of("zone", {"spawnflags": "2"}) == "blue"
+    assert r.team_of("zone", {"spawnflags": "3"}) == "red", "the first flag set wins"
+    assert r.team_of("zone", {}) == analysis.UNASSIGNED_TEAM, "a listed class never guesses"
+    assert r.team_of("red_spawn", {}) == "red", "unlisted classes still use the classname"
+
+
+def test_markers_group_spawns_by_the_nearest_anchor_and_centre_brush_objectives():
+    r = analysis.Roles(
+        profile="test",
+        spawns=frozenset({"red_spawn", "blue_spawn"}),
+        objectives=frozenset({"zone"}),
+        team_key="",
+        group_key="",
+        team_labels=("red", "blue"),
+        category_of={},
+        team_flags={"zone": ((1, "red"), (2, "blue"))},
+        group_nearest="anchor",
+        group_label_key="description",
+    )
+    game_map = _FakeMap(
+        [
+            _point(0, "anchor", (0, 0, 0), description="West"),
+            _point(1, "anchor", (1000, 0, 0)),
+            _point(2, "red_spawn", (40, 10, 0)),
+            _point(3, "red_spawn", (900, 0, 0)),
+            _point(4, "blue_spawn", (1100, 0, 0)),
+            _point(5, "zone", brushes=2, spawnflags="1"),
+            _point(6, "zone", brushes=1),  # no usable brush: counted as without a position
+        ],
+        {5: [((400, 0, 0), (500, 64, 64)), ((500, 0, 0), (600, 64, 64))]},
+    )
+    spawns, objectives, without = analysis._markers(game_map, r)
+    groups = {m.entity: m.group for m in spawns}
+    assert groups == {2: "West (entity 0)", 3: "entity 1", 4: "entity 1"}
+    assert {m.entity: m.team for m in spawns} == {2: "red", 3: "red", 4: "blue"}
+    (zone,) = objectives
+    assert zone.origin == (500.0, 32.0, 32.0)
+    assert zone.team == "red"
+    assert without == 1, "anchors are not markers, so only the zone without bounds counts"
+
+
+def test_the_etl_profile_groups_spawns_by_marker_and_owns_objectives_by_flag():
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    r = analysis.roles("etl")
+    assert {"team_CTF_redspawn", "team_CTF_bluespawn"} <= r.spawns
+    assert "trigger_objective_info" in r.objectives
+    assert r.category_of["trigger_objective_info"] == "trigger", "still non-solid"
+    assert r.group_nearest == "team_WOLF_objective"
+    assert r.team_of("team_CTF_bluespawn", {}) == "blue"
+    assert r.team_of("trigger_objective_info", {"spawnflags": "1"}) == "red"
 
 
 def test_symmetry_detection_distinguishes_a_mirror_from_a_rotation():
