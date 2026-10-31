@@ -49,8 +49,9 @@ def repo_root() -> Path:
 
 sys.path.insert(0, str(repo_root() / "python" / "src"))
 
-from nrc_mcp import playspace, surface  # noqa: E402
+from nrc_mcp import playspace, profiles, surface  # noqa: E402
 from nrc_mcp import server as srv  # noqa: E402
+from nrc_mcp.analysis import resolve_profile  # noqa: E402
 
 TAPE_DIR = repo_root() / "bench" / "tapes"
 
@@ -68,7 +69,7 @@ class TapeError(RuntimeError):
 
 
 def _expand(value: Any, subs: dict[str, str]) -> Any:
-    """Substitute `{work}`, `{workspace}` and `{repo}` anywhere in a tape's arguments."""
+    """Substitute `{work}`, `{workspace}`, `{repo}` and `{clip_player}` anywhere in a tape's arguments."""
     if isinstance(value, str):
         return value.format(**subs) if "{" in value else value
     if isinstance(value, list):
@@ -112,6 +113,16 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
         "workspace": str(workspace),
         "repo": str(repo_root()),
     }
+    # The shader that stops a player is game data: a tape names it by role, not by name.
+    clip_player = _clip_player(tape.get("profile"))
+    if clip_player:
+        subs["clip_player"] = clip_player
+    elif "{clip_player}" in json.dumps(tape):
+        return _fail(
+            name,
+            started,
+            "the tape uses {clip_player}, but the profile states no assets.clip_shaders.player",
+        )
 
     baseline: Path | None = None
     fixture = tape.get("fixture")
@@ -234,6 +245,13 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
         "steps": steps,
         "invariants": outcomes,
     }
+
+
+def _clip_player(profile_id: str | None) -> str:
+    """The active profile's player clip shader, or "" when it states none."""
+    assets = profiles.load(resolve_profile(profile_id)).get("assets")
+    shaders = assets.get("clip_shaders") if isinstance(assets, dict) else None
+    return str(shaders.get("player") or "") if isinstance(shaders, dict) else ""
 
 
 def _fail(name: str, started: float, message: str) -> dict:
