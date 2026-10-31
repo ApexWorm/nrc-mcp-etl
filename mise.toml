@@ -34,8 +34,10 @@ Q3MAP2          = "{{config_root}}/vendor/netradiant-custom/install/q3map2"
 # Upstream names this tool `mbspc`, not `bspc` — there is no `bspc` target.
 MBSPC           = "{{config_root}}/vendor/netradiant-custom/install/mbspc"
 MAP_CORPUS      = "{{config_root}}/corpus"
-# Which game to serve: a file in profiles/. Override in mise.local.toml (`etl` for ET: Legacy).
-NRC_PROFILE     = "urt43"
+# Which game to serve: a file in profiles/ (`etl` for ET: Legacy). Taken from the shell, so
+# `NRC_PROFILE=etl mise run test` works; urt43 when unset. A value in mise.local.toml
+# overrides both, shell included.
+NRC_PROFILE     = "{{ get_env(name='NRC_PROFILE', default='urt43') }}"
 NRC_BENCH_OUT   = "{{config_root}}/bench/results"
 # The game install (NRC_FS_BASEPATH) is set in mise.local.toml; there is no default.
 PYTHONPATH      = "{{config_root}}/python/src"

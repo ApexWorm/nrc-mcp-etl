@@ -118,7 +118,7 @@ NRC_Q3MAP2_MODE = "windows"
 
 | Variable | Required for | Notes |
 | --- | --- | --- |
-| `NRC_PROFILE` | — | Active game profile: `urt43` (default) or `etl`. |
+| `NRC_PROFILE` | — | Active game profile: `urt43` (default) or `etl`. Set it in `mise.local.toml`, or per command from the shell (`NRC_PROFILE=etl mise run test`); a `mise.local.toml` value wins over the shell. |
 | `NRC_FS_BASEPATH` | compiling, packaging | Passed as `-fs_basepath`. No default; without it q3map2 uses its own. |
 | `NRC_FS_GAME` | mods | Passed as `-fs_game` when set. |
 | `Q3MAP2` | compiling, BSP reports | Defaults to the source build under `vendor/`. |
