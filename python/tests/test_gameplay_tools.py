@@ -10,6 +10,8 @@ The lesson generalises: a tool is not tested by testing the module underneath it
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from nrc_mcp import analysis, server
 from test_analysis import room, write_map
@@ -22,7 +24,9 @@ def pid() -> str:
     available = profiles.available()
     if not available:
         pytest.skip("no profiles on disk")
-    return available[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or available[0]
 
 
 @pytest.fixture

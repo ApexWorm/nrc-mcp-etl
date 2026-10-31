@@ -8,6 +8,8 @@ which prevents a repeat is actually in place, not just documented.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from nrc_mcp import profiles, tasks
 
@@ -25,7 +27,9 @@ def pid() -> str:
     av = profiles.available()
     if not av:
         pytest.skip("no profiles on disk")
-    return av[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or av[0]
 
 
 def test_profile_loads_and_declares_its_sources(pid):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,9 @@ def pid() -> str:
     av = profiles.available()
     if not av:
         pytest.skip("no profiles on disk")
-    return av[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or av[0]
 
 
 def write_obj(
@@ -340,7 +343,8 @@ def test_the_hull_is_pushed_outward_never_inward(tmp_path: Path, pid):
 
 def test_clip_kinds_and_bad_arguments(tmp_path: Path, pid):
     obj = write_obj(tmp_path / "a.obj", (32, 32, 32))
-    assert "weapclip" in blender.model_make_clip(obj, pid, kind="weapon")["shader"]
+    weapon = profiles.load(pid)["assets"]["clip_shaders"]["weapon"]
+    assert blender.model_make_clip(obj, pid, kind="weapon")["shader"].endswith(weapon)
     with pytest.raises(blender.AssetError, match="clip shader"):
         blender.model_make_clip(obj, pid, kind="nonsense")
     with pytest.raises(blender.AssetError, match="k must be"):

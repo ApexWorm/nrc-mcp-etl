@@ -13,6 +13,7 @@ missing the disaster, or blocking ordinary work. Both are represented.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -55,7 +56,9 @@ def _profile() -> str:
     available = profiles.available()
     if not available:
         pytest.skip("no profile on disk")
-    return available[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or available[0]
 
 
 # ---------------------------------------------------------------------------

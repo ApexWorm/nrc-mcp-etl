@@ -1,7 +1,7 @@
 # nrc-mcp
 
 An MCP server for designing, sculpting, optimizing and shipping levels for
-[NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror.
+[NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
 arithmetic, drives `q3map2`, and exposes all of it to an agent as **51 tools, 6 resources and 4 prompts** —
@@ -89,11 +89,13 @@ survive a round-trip. See [Troubleshooting](#troubleshooting).
 Machine-specific paths go in **`mise.local.toml`**, which is gitignored. Nothing in `mise.toml`
 needs editing.
 
+Two game profiles ship: `urt43` (Urban Terror 4.3, the default) and `etl` (ET: Legacy). The
+profile decides the entity rules, the movement constants and the `-game` q3map2 is run with.
+
 ```toml
 [env]
-# Where the game lives. The directory that CONTAINS q3ut4/, not q3ut4 itself.
-URT_BASEPATH = "/mnt/c/Program Files/UrbanTerror43"
-URT_GAMEDIR  = "/mnt/c/Program Files/UrbanTerror43/q3ut4"
+# Urban Terror. The basepath is the directory that CONTAINS q3ut4/, not q3ut4 itself.
+NRC_FS_BASEPATH = "/mnt/c/Program Files/UrbanTerror43"
 
 # The compiler.
 Q3MAP2 = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20240309/q3map2.exe"
@@ -101,23 +103,39 @@ Q3MAP2 = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20240309/q3map2.exe"
 # Set to "windows" when q3map2 is a .exe reached from WSL. Omit on native Linux/macOS.
 NRC_Q3MAP2_MODE = "windows"
 
-# The gamepack .ent files — the only accepted source for the entity ontology.
-URT_GAMEPACK = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20240309/gamepacks/urt.game/q3ut4"
-
 # Your own .map sources. Read-only: corpus:import copies out, never writes back.
-URT_MAPSRC = "/mnt/c/Program Files/UrbanTerror43/q3ut4/maps"
+NRC_MAPSRC = "/mnt/c/Program Files/UrbanTerror43/q3ut4/maps"
+```
+
+```toml
+[env]
+# ET: Legacy. The basepath is the directory that CONTAINS etmain/.
+NRC_PROFILE     = "etl"
+NRC_FS_BASEPATH = "/mnt/c/Program Files (x86)/ETLegacy"
+Q3MAP2          = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20260114/q3map2.exe"
+NRC_Q3MAP2_MODE = "windows"
 ```
 
 | Variable | Required for | Notes |
 | --- | --- | --- |
-| `URT_BASEPATH` | compiling, packaging | Passed as `-fs_basepath`. Defaults to a stub in `vendor/`. |
-| `URT_GAMEDIR` | shader auditing | Where `scripts/` and `textures/` are found. |
+| `NRC_PROFILE` | — | Active game profile: `urt43` (default) or `etl`. |
+| `NRC_FS_BASEPATH` | compiling, packaging | Passed as `-fs_basepath`. No default; without it q3map2 uses its own. |
+| `NRC_FS_GAME` | mods | Passed as `-fs_game` when set. |
 | `Q3MAP2` | compiling, BSP reports | Defaults to the source build under `vendor/`. |
+| `NRC_Q3MAP2_GAME` | — | Overrides the profile's `-game` (`quake3` for `urt43`, `et` for `etl`). |
 | `NRC_Q3MAP2_MODE` | WSL only | `windows` makes every path translate through `wslpath`. |
-| `URT_GAMEPACK` | re-extracting a profile | Not needed to *use* the shipped profile. |
-| `URT_MAPSRC` | `corpus:import` | Optional. The corpus works without your maps. |
-| `NRC_PROFILE` | — | Active game profile. Defaults to `urt43`. |
+| `NRC_MAPSRC` | `corpus:import` | Optional. The corpus works without your maps. |
 | `NRC_SELFDEV` | — | Set to `1` to allow the opt-in self-tuning loop. Off by default. |
+
+`URT_BASEPATH` and `URT_MAPSRC`, the names these had before there was a second profile, are
+still read when the new names are unset.
+
+**What the ET profile does not do yet.** Its entities, movement constants, engine limits and six
+load-stopping rules are in place. Not yet modelled: spawnflag checks (team spawns without
+`STARTACTIVE` are never used), grouping spawns by their nearest `team_WOLF_objective`,
+dynamite objectives (a `func_explosive` that a `trigger_objective_info` targets), the map script
+`maps/<map>.script`, and the companion files `ship_check` should look for. `profiles/etl.yaml`
+lists each one where it would go.
 
 Check what resolved:
 
@@ -391,7 +409,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | URI | Contents |
 | --- | --- |
 | `nrc://tasks` | The live mise task list — capability discovery, always current. |
-| `nrc://profile/{id}` | A game profile as YAML. `nrc://profile/urt43` ships. |
+| `nrc://profile/{id}` | A game profile as YAML. `nrc://profile/urt43` and `nrc://profile/etl` ship. |
 | `nrc://conventions` | Representation tiers, caulk, grid discipline, authoring order. |
 | `nrc://corrections` | Claims from the design document that did not survive verification. |
 | `nrc://solid-ir` | The Solid IR operator reference, without spending a tool call. |
@@ -627,7 +645,7 @@ meaningless until you know why.
 | `mise run test:diff` fails on a map | The kernel could not reproduce that file's bytes. Nothing downstream is trustworthy. Run `nrc roundtrip <file>` for the first differing offset. |
 | `semantic: skipped` | No compiler configured. Set `Q3MAP2` in `mise.local.toml`, or `mise run vendor:build`. Not a failure. |
 | q3map2 exits immediately, or complains about the path | Almost always WSL path translation. Set `NRC_Q3MAP2_MODE = "windows"`. UNC paths (`\\wsl$\...`) are rejected by q3map2 itself and staging exists to avoid them. |
-| `-fs_basepath` errors, or no shaders found | `URT_BASEPATH` must be the directory *containing* `q3ut4`, not `q3ut4` itself. |
+| `-fs_basepath` errors, or no shaders found | `NRC_FS_BASEPATH` must be the directory *containing* the game directory (`q3ut4`, `etmain`), not that directory itself. |
 | MCP client shows no tools | The server needs to start in the repo. Set `cwd`, or use `mise -C /path/to/nrc-mcp run mcp:serve`. Check `mise run mcp:tools` works first. |
 | A rule fires that you believe is wrong | Check `nrc://corrections` — some of the design document's rules were wrong. If it is `info`, it is `unverified` by construction and cannot fail a build. |
 | `BRUSH_OFF_GRID` on curves and prisms | Expected. A `.map` stores planes; angled geometry has off-grid vertices necessarily. Judge it only on axis-aligned geometry. |

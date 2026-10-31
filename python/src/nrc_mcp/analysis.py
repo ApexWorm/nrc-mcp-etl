@@ -397,7 +397,11 @@ def _role_keys(data: dict) -> tuple[str, str]:
 
 
 def _team_labels(data: dict, entities: list[dict], team_key: str) -> tuple[str, ...]:
-    """Values the team key may take, from the entity key definition or an enum."""
+    """Values the team key may take, from the entity key definition, an enum, or `teams:`.
+
+    A profile whose spawns carry no team key names its sides under `teams.sides` instead, so
+    the classname fallback in `Roles.team_of` still has labels to match.
+    """
     labels: list[str] = []
 
     def add(values: Any) -> None:
@@ -419,6 +423,9 @@ def _team_labels(data: dict, entities: list[dict], team_key: str) -> tuple[str, 
         params = rule.get("params") if isinstance(rule, dict) else None
         if isinstance(params, dict) and str(params.get("key")) == team_key:
             add(params.get("values"))
+    teams = data.get("teams")
+    if isinstance(teams, dict) and isinstance(teams.get("sides"), list):
+        add([s.get("label") for s in teams["sides"] if isinstance(s, dict)])
     return tuple(labels)
 
 

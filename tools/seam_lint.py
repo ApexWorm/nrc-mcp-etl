@@ -82,6 +82,10 @@ ALWAYS_FORBIDDEN = [
     r"\binfo_ut_",
     r"\but_jump",
     r"\bg_gametype\b",
+    r"\betmain\b",
+    r"\benemy\s*territory\b",
+    r"\bteam_WOLF_",
+    r"\bwolf(mp|sw|lms)\b",
 ]
 
 MIN_LENGTH = 6

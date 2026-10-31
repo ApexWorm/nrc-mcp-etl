@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -264,7 +265,9 @@ def pid() -> str:
     av = profiles.available()
     if not av:
         pytest.skip("no profiles on disk")
-    return av[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or av[0]
 
 
 def test_shipped_rules_are_all_well_formed(pid):
@@ -480,8 +483,10 @@ def test_ship_check_flags_a_bad_map_name(tmp_path: Path, pid):
     pk3 = make_pk3(tmp_path / "MyMap.pk3", ["maps/MyMap.bsp"])
     r = pack.ship_check(tmp_path / "MyMap.bsp", pid, pk3=pk3)
     f = next(x for x in r["findings"] if x["code"] == "SHIP_MAP_NAME")
-    assert f["confidence"] == "verified"
-    assert f["severity"] == "warning"
+    # Only a verified convention may warn; an unverified one is reported as info.
+    conf = profiles.load(pid)["packaging"]["map_name_confidence"]
+    assert f["confidence"] == conf
+    assert f["severity"] == ("warning" if conf == "verified" else "info")
 
 
 def test_ship_check_flags_shadowing_the_base_game(tmp_path: Path, pid):

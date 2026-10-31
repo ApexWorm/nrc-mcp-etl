@@ -8,6 +8,7 @@ at the end are deliberately cheap; they skip when the corpus has not been import
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,9 @@ def pid() -> str:
     available = profiles.available()
     if not available:
         pytest.skip("no profiles on disk")
-    return available[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or available[0]
 
 
 @pytest.fixture(scope="module")
@@ -132,12 +135,14 @@ def simple_room(tmp_path, kern, pid) -> analysis.NavGrid:
 # ---------------------------------------------------------------------------
 
 
-def test_movement_constants_are_the_gamepack_figures_not_the_design_document_s(constants):
+def test_movement_constants_are_the_gamepack_figures_not_the_design_document_s(constants, pid):
     """The corrections document's W2: the spec assumed 56 units, the gamepack says 69.375.
 
     Asserted as an exact value because the whole discipline rests on it: a check built on 56
     would pass corridors the player cannot stand up in.
     """
+    if pid != "urt43":
+        pytest.skip("asserts the Urban Terror gamepack's figures")
     assert constants.headroom_stand.value == pytest.approx(69.375)
     assert constants.headroom_stand.value != 56
     assert constants.headroom_stand.confidence == "verified"
@@ -148,10 +153,39 @@ def test_movement_constants_are_the_gamepack_figures_not_the_design_document_s(c
     assert constants.fall_no_damage.value == pytest.approx(200.125)
 
 
-def test_eye_height_is_inferred_and_says_so(constants):
+def test_movement_constants_are_the_engine_source_figures(constants, pid):
+    """ET states no measurements; its figures are literal constants in the engine source.
+
+    The player box is -24..48 (72 tall, 36 wide), and the fall threshold is derived from a
+    damage formula rather than read off, so it must arrive marked unverified.
+    """
+    if pid != "etl":
+        pytest.skip("asserts the ET: Legacy source figures")
+    assert constants.headroom_stand.value == pytest.approx(72)
+    assert constants.headroom_stand.confidence == "verified"
+    assert constants.step_height.value == pytest.approx(18)
+    assert constants.headroom_crouch.value == pytest.approx(48)
+    assert constants.player_width.value == pytest.approx(36)
+    assert constants.ledge_grab_max is None
+    assert constants.fall_no_damage.value == pytest.approx(242)
+    assert not constants.fall_no_damage.verified
+
+
+def test_eye_height_is_inferred_and_says_so(constants, pid):
     """This profile records that the gamepack states no eye height."""
+    if pid != "urt43":
+        pytest.skip("the Urban Terror gamepack is the one that states no eye height")
     assert constants.eye_height_is_inferred is True
     assert constants.eye_height.value == pytest.approx(constants.headroom_stand.value)
+
+
+def test_a_stated_eye_height_is_used_not_inferred(constants, pid):
+    """ET states its view height in source, so the camera goes there, not at the head top."""
+    if pid != "etl":
+        pytest.skip("asserts the ET: Legacy source figures")
+    assert constants.eye_height_is_inferred is False
+    assert constants.eye_height.value == pytest.approx(64)
+    assert profiles.standing_height(pid) == pytest.approx(64)
 
 
 def test_a_profile_without_movement_constants_is_refused_not_guessed(monkeypatch):
@@ -180,11 +214,13 @@ def test_roles_are_discovered_from_profile_data(role_map):
     assert role_map.spawns, "the profile should categorize some classname as a spawn"
     assert role_map.objectives
     assert role_map.spawns.isdisjoint(role_map.objectives)
-    assert role_map.team_key and role_map.group_key
     assert len(role_map.team_labels) >= 2
     # A team taken from a key, and a team taken from the classname, are both understood.
+    # A profile whose spawns carry no team key (ET) names its sides only in classnames.
     label = role_map.team_labels[0]
-    assert role_map.team_of("whatever", {role_map.team_key: label.upper()}) == label
+    if role_map.team_key:
+        assert role_map.group_key
+        assert role_map.team_of("whatever", {role_map.team_key: label.upper()}) == label
     assert role_map.team_of(f"prefix_{label}_suffix", {}) == label
     assert role_map.team_of("nothing", {}) == analysis.UNASSIGNED_TEAM
 
