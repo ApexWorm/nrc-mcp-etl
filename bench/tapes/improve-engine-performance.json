@@ -1,6 +1,6 @@
 {
   "name": "improve-engine-performance",
-  "note": "The optimisation pass: find out what is costing compile time and runtime visibility, and confirm the map is still the same map. HONEST LIMIT \u2014 this tape covers the measuring half only. Marking a brush detail, the change structural_audit exists to recommend, has no tool on the MCP surface, so nothing here applies a fix. When that tool lands, this tape gains the apply step and a compile_ab that proves the surfaces went down.",
+  "note": "The optimisation pass: find out what is costing compile time and runtime visibility, apply what structural_audit recommends with brush_set_detail, and confirm the map is still the same map. The detailed copy is saved beside the original, so the invariants still judge the untouched work map; with --compile, compile_ab measures the difference. detail-pass covers the same loop on a map this repo owns.",
   "fixture": "corpus/real/ut4_woolis.map",
   "steps": [
     {
@@ -54,6 +54,40 @@
       "expect": {
         "written": true,
         "modified_since_open": false
+      }
+    },
+    {
+      "tool": "brush_set_detail",
+      "as": "detail",
+      "args_from": {
+        "brushes": "audit.candidates"
+      }
+    },
+    {
+      "tool": "map_save",
+      "as": "save_detailed",
+      "args": {
+        "path": "{workspace}/detailed.map",
+        "allow_non_identical": true
+      },
+      "expect": {
+        "written": true
+      }
+    },
+    {
+      "tool": "compile_ab",
+      "as": "ab",
+      "needs_compile": true,
+      "args": {
+        "map_a": "{workspace}/baseline.map",
+        "map_b": "{workspace}/detailed.map",
+        "preset": "draft"
+      },
+      "expect": {
+        "deltas.leafs.percent": {
+          "$lt": 0
+        },
+        "summary.error": 0
       }
     }
   ],

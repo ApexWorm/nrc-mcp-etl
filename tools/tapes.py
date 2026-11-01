@@ -111,18 +111,20 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
     `NRC_PROFILE`, so without this an ET tape would be validated against whatever the suite
     happens to run under.
     """
-    profile = tape.get("profile")
-    saved = os.environ.get("NRC_PROFILE")
-    if profile:
-        os.environ["NRC_PROFILE"] = str(profile)
+    # A tape's A/B comparisons are its own: they go to its workspace, not the repo's history.
+    overrides = {"NRC_AB_HISTORY": str(workspace / "ab-history.jsonl")}
+    if tape.get("profile"):
+        overrides["NRC_PROFILE"] = str(tape["profile"])
+    saved = {k: os.environ.get(k) for k in overrides}
+    os.environ.update(overrides)
     try:
         return _run_tape(tape, workspace=workspace, allow_compile=allow_compile)
     finally:
-        if profile:
-            if saved is None:
-                os.environ.pop("NRC_PROFILE", None)
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
             else:
-                os.environ["NRC_PROFILE"] = saved
+                os.environ[k] = v
 
 
 def _run_tape(tape: dict, *, workspace: Path, allow_compile: bool) -> dict:
@@ -191,6 +193,19 @@ def _run_tape(tape: dict, *, workspace: Path, allow_compile: bool) -> dict:
         tool = step.get("tool")
         label = step.get("as") or f"{i}:{tool}"
         args = _expand(step.get("args") or {}, subs)
+        # `args_from` feeds an earlier step's answer into this one: {"arg": "step.dotted.path"}.
+        # A tape that applies what an audit found has no other way to say "these brushes".
+        for arg, ref in (step.get("args_from") or {}).items():
+            source, _, path = str(ref).partition(".")
+            if source not in results:
+                steps.append(
+                    {"step": label, "ok": False, "error": f"args_from: no step {source!r}"}
+                )
+                ok = False
+                break
+            args[arg] = _dig(results[source], path)
+        if not ok:
+            break
         # Resolved through the surface package rather than off the server module, so a
         # tape reaches the tool where it is defined instead of depending on a re-export.
         fn = surface.get(tool)
