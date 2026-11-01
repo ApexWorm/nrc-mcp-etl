@@ -381,6 +381,25 @@ def test_the_etl_profile_refuses_a_map_a_spectator_cannot_join():
         assert "ETL_SPECTATOR_POINT_REQUIRED" not in codes([*team_spawns, ent(3, fallback)])
 
 
+def test_the_etl_profile_errors_only_on_the_script_multiplayer_count_the_engine_stops_on():
+    """Checked in etlded: two stop the game at load, none only prints a complaint."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    world = ent(0, "worldspawn")
+    gm = [ent(i, "script_multiplayer") for i in (1, 2)]
+
+    def codes(entities):
+        return {
+            f.code: f.severity
+            for f in rules.evaluate("etl", entities)
+            if f.code.startswith("ETL_SCRIPT_MULTIPLAYER")
+        }
+
+    assert codes([world]) == {"ETL_SCRIPT_MULTIPLAYER_REQUIRED": "warning"}
+    assert codes([world, gm[0]]) == {}
+    assert codes([world, *gm]) == {"ETL_SCRIPT_MULTIPLAYER_AT_MOST_ONE": "error"}
+
+
 # ---------------------------------------------------------------------------
 # The shipped profile's rules, against real maps
 # ---------------------------------------------------------------------------

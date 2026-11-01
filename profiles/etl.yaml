@@ -2523,15 +2523,30 @@ counts:
 # spacing, which needs spawns grouped by nearest marker inside the rule engine.
 
 rules:
-  - id: ETL_SCRIPT_MULTIPLAYER_EXACTLY_ONE
-    check: count_exact
+  # The gamepack says a map MUST have exactly one, but the engine enforces only the upper
+  # bound: a second one stops the game, a missing one is a printed complaint.
+  - id: ETL_SCRIPT_MULTIPLAYER_AT_MOST_ONE
+    check: count_max
     severity: error
     confidence: verified
-    rule_source: "gamepack et_entities.ent: script_multiplayer notes; etlegacy game/g_script.c:1406-1409"
+    rule_source: "etlegacy game/g_script.c:1410-1412 (G_Error \"multiple script_multiplayers found\")"
     message: >-
-      found {found} script_multiplayer entities; the gamepack states a map MUST have exactly
-      {expected} for its map script to run
-    fix_hint: "keep exactly one script_multiplayer, with scriptname game_manager"
+      found {found} script_multiplayer entities; the game stops at load with "multiple
+      script_multiplayers found" above {expected}
+    fix_hint: "keep exactly one script_multiplayer"
+    params:
+      classname: script_multiplayer
+      count: 1
+
+  - id: ETL_SCRIPT_MULTIPLAYER_REQUIRED
+    check: count_min
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_main.c:1858-1861 (prints \"No 'script_multiplayer' found in map\" and carries on); gamepack et_entities.ent: script_multiplayer notes"
+    message: >-
+      found {found} script_multiplayer entities; the map loads, but its game_manager block never
+      runs, so no respawn times, autospawns or win conditions are set
+    fix_hint: "add one script_multiplayer; it always runs the game_manager block"
     params:
       classname: script_multiplayer
       count: 1
