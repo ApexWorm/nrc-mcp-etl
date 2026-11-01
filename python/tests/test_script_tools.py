@@ -80,7 +80,9 @@ def test_a_map_built_from_nothing_gets_its_script_through_the_tools(tmp_path):
     srv.map_new(str(tmp_path / "maps" / "fresh.map"))
     srv.entity_place("script_multiplayer", [0, 0, 64])
     assert srv.script_show()["exists"] is False
-    r = srv.script_set_event("game_manager", "spawn", ["wm_axis_respawntime 10", "wm_setwinner 0", "wait 50"])
+    r = srv.script_set_event(
+        "game_manager", "spawn", ["wm_axis_respawntime 10", "wm_setwinner 0", "wait 50"]
+    )
     assert r["did"] == "created block"
     assert (tmp_path / "maps" / "fresh.script").read_text().startswith("game_manager\n{\n\tspawn")
     assert r["summary"] == {"error": 0, "warning": 0, "info": 0}
