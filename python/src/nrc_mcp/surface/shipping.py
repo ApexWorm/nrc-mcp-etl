@@ -6,8 +6,13 @@ annotations. See `nrc_mcp.server` for how the surface is assembled and scoped.
 
 from __future__ import annotations
 
+import math
+from pathlib import Path
+from typing import Any
+
 from mcp.server.mcpserver.exceptions import ToolError
 
+from .. import analysis, profiles
 from .. import pack as packmod
 from ..runtime import (
     SESSION,
@@ -68,3 +73,214 @@ def ship_check(
         return packmod.ship_check(t, pid, pk3=pk3)
     except packmod.PackError as e:
         raise ToolError(str(e)) from e
+
+
+# ---------------------------------------------------------------------------
+# Release files: everything a game looks a map up by besides the BSP and its script
+# ---------------------------------------------------------------------------
+
+
+def _release() -> tuple[str, dict, Path, str]:
+    """The active profile's packaging section, the folder holding maps/, and the map's name."""
+    SESSION.require()
+    if SESSION.path is None:
+        raise ToolError("the open map has no path on disk; save it first")
+    pid = active_profile()
+    if not pid:
+        raise ToolError("no profile selected; set NRC_PROFILE")
+    pkg = profiles.load(pid).get("packaging")
+    if not isinstance(pkg, dict):
+        raise ToolError(f"profile {pid} states no packaging conventions")
+    return pid, pkg, packmod._map_root(SESSION.path), SESSION.path.stem
+
+
+def _write(path: Path, data: bytes | str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    if isinstance(data, str):
+        tmp.write_text(data, encoding="utf-8", newline="\n")
+    else:
+        tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def _quoted(text: str, what: str) -> str:
+    text = str(text)
+    if '"' in text or "\n" in text or "\r" in text:
+        raise ToolError(
+            f"{what} is written in quotes on one line: no double quotes, no line breaks"
+        )
+    return text
+
+
+@tool("shipping", "Write the arena file", writes=True, destructive=True, idempotent=True)
+def arena_write(longname: str, keys: dict | None = None) -> dict:
+    """Write the map's arena file, which puts it in the game's map list with a name and briefing.
+
+    `longname` is the name players see. `keys` adds any other key the profile lists (for
+    ET: Legacy: `briefing`, `timelimit`, `axisRespawnTime`, `alliedRespawnTime`,
+    `mapposition_x`/`_y`, win texts, `type`); the map name and the profile's defaults are filled
+    in. Written beside the map's folder, where `pack_pk3` picks it up. Replaces an existing one.
+    """
+    _pid, pkg, root, stem = _release()
+    arena = pkg.get("arena")
+    if not isinstance(arena, dict):
+        raise ToolError("the profile describes no arena file")
+    allowed = [str(k) for k in arena.get("keys") or []]
+    values: dict[str, Any] = {
+        **(arena.get("defaults") or {}),
+        **(keys or {}),
+        "longname": longname,
+        "map": stem,
+    }
+    unknown = [k for k in values if allowed and k not in allowed]
+    if unknown:
+        raise ToolError(
+            f"unknown arena key(s) {', '.join(unknown)}; the profile lists: {', '.join(allowed)}"
+        )
+    order = [k for k in allowed if k in values] or list(values)
+    width = max(len(k) for k in order)
+    body = "".join(f'\t{k.ljust(width)}\t"{_quoted(values[k], k)}"\n' for k in order)
+    path = (
+        root / str(arena.get("directory", "scripts")) / f"{stem}.{arena.get('extension', 'arena')}"
+    )
+    _write(path, "{\n" + body + "}\n")
+    missing = [k for k in arena.get("required_keys") or [] if k not in values]
+    return {"path": str(path), "keys": {k: values[k] for k in order}, "missing_required": missing}
+
+
+@tool("shipping", "Write objective descriptions", writes=True, destructive=True, idempotent=True)
+def objdata_write(descriptions: dict, objectives: dict | None = None) -> dict:
+    """Write the descriptions players read in the limbo menu: the map's, and each objective's.
+
+    `descriptions` maps a team (for ET: Legacy `axis`, `allied`, `neutral`) to its text;
+    `objectives` maps a team to a list of texts, numbered in order from 1, matching the
+    objective numbers the map script uses. Replaces an existing file.
+    """
+    _pid, pkg, root, stem = _release()
+    spec = pkg.get("objdata")
+    if not isinstance(spec, dict):
+        raise ToolError("the profile describes no objective description file")
+    teams = [str(t) for t in spec.get("teams") or []]
+    oteams = [str(t) for t in spec.get("objective_teams") or []]
+    lines = []
+    for team, text in descriptions.items():
+        if team not in teams:
+            raise ToolError(f"descriptions: team must be one of {', '.join(teams)}, got {team!r}")
+        lines.append(
+            spec["description"].format(team=team, text=_quoted(text, f"{team} description"))
+        )
+    for team, texts in (objectives or {}).items():
+        if team not in oteams:
+            raise ToolError(f"objectives: team must be one of {', '.join(oteams)}, got {team!r}")
+        if len(texts) > int(spec.get("max_objectives", 99)):
+            raise ToolError(f"at most {spec['max_objectives']} objectives per team")
+        for n, text in enumerate(texts, 1):
+            lines.append(
+                spec["objective"].format(
+                    team=team, number=n, text=_quoted(text, f"{team} objective {n}")
+                )
+            )
+    path = root / spec["path"].format(map=stem)
+    _write(path, "\n".join(lines) + "\n")
+    return {"path": str(path), "lines": len(lines)}
+
+
+def _cut_height(pid: str, m, lo_z: float, hi_z: float) -> float:
+    """Where to cut the roof off: above the highest spawn by a standing player's height."""
+    spawns = analysis.roles(pid).spawns
+    zs = [e["origin"][2] for e in m.entities() if e["classname"] in spawns and e.get("origin")]
+    head = profiles.standing_height(pid) or 64.0
+    if zs:
+        return max(zs) + head + 32.0
+    return (lo_z + hi_z) / 2
+
+
+@tool("shipping", "Make the command map", writes=True, destructive=True, idempotent=True)
+def commandmap_make(margin: int = 128, cut_height: float | None = None) -> dict:
+    """Draw the command map and tell the game where it lies.
+
+    Sets the worldspawn's map coordinates to a square around the map (plus `margin`), draws a
+    top-down section of the map into exactly that square - roofs cut away above `cut_height`,
+    walls in a dark section colour - and writes the image and the shaders the game draws it
+    with, beside the map's folder. Default `cut_height`: a standing player's height above the
+    highest spawn. Save the map afterwards: the coordinates are worldspawn keys.
+    """
+    pid, pkg, root, stem = _release()
+    spec = pkg.get("commandmap")
+    if not isinstance(spec, dict):
+        raise ToolError("the profile describes no command map")
+    m = SESSION.map
+    bounds = m.bounds()
+    if bounds is None:
+        raise ToolError("the map has no geometry to draw")
+    (x0, y0, z0), (x1, y1, z1) = bounds
+    side = max(x1 - x0, y1 - y0) + 2 * margin
+    side = math.ceil(side / 64) * 64
+    cx, cy = round((x0 + x1) / 2), round((y0 + y1) / 2)
+    half = side // 2
+    mins = (cx - half, cy + half)  # top-left
+    maxs = (cx + half, cy - half)  # bottom-right
+    m.set_keys(
+        0, [(spec["mins_key"], f"{mins[0]} {mins[1]}"), (spec["maxs_key"], f"{maxs[0]} {maxs[1]}")]
+    )
+    cut = cut_height if cut_height is not None else _cut_height(pid, m, z0, z1)
+    size = int(spec.get("size", 512))
+    image, notes = m.render(
+        view="top",
+        width=size,
+        height=size,
+        grid_spacing=0,
+        wireframe=False,
+        hide_invisible=True,
+        annotate=False,
+        frame=[cx - half, cy - half, cx + half, cy + half],
+        padding=0,
+        tga=True,
+        cut_above=float(cut),
+    )
+    img_path = root / spec["image"].format(map=stem)
+    shader_path = root / spec["shader_file"].format(map=stem)
+    _write(img_path, image)
+    _write(shader_path, spec["shader_text"].format(map=stem))
+    return {
+        "image": str(img_path),
+        "shaders": str(shader_path),
+        spec["mins_key"]: list(mins),
+        spec["maxs_key"]: list(maxs),
+        "cut_height": cut,
+        "units_per_pixel": notes.get("units_per_pixel"),
+        "next": "map_save: the map coordinates are worldspawn keys; pack_pk3 picks up the files",
+    }
+
+
+@tool("shipping", "Make the levelshot", writes=True, destructive=True, idempotent=True)
+def levelshot_make(position: list[float], yaw_deg: float = 0.0) -> dict:
+    """Render the levelshot - the picture shown while the map loads and in the server browser.
+
+    Taken from a standing player's eyes at the floor `position`, looking along `yaw_deg`
+    (0 = +X, 90 = +Y), at the profile's preferred size. Written beside the map's folder.
+    """
+    pid, pkg, root, stem = _release()
+    shot = pkg.get("levelshot")
+    if not isinstance(shot, dict):
+        raise ToolError("the profile describes no levelshot")
+    eye = profiles.standing_height(pid)
+    if eye is None:
+        raise ToolError("the profile states no standing height to take the shot from")
+    w, h = (int(v) for v in shot.get("preferred_size") or (256, 256))
+    image, _notes = SESSION.map.render(
+        view="player_eye",
+        width=w,
+        height=h,
+        grid_spacing=0,
+        hide_invisible=True,
+        annotate=False,
+        eye=list(position),
+        yaw_deg=yaw_deg,
+        eye_height=eye,
+        tga=True,
+    )
+    path = root / str(shot.get("directory", "levelshots")) / f"{stem}.tga"
+    _write(path, image)
+    return {"path": str(path), "size": [w, h]}

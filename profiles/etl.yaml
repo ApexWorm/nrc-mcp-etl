@@ -3212,6 +3212,59 @@ packaging:
     required_keys: [map, longname, type]
     confidence: unverified
     note: "scripts/<map>.arena is read at cgame/cg_missionbriefing.c:476; see unverified.arena_required_keys"
+    # What arena_write may write. cgame reads map, longname, briefing, lmsbriefing,
+    # alliedwintext, axiswintext and mapposition_x/y (cgame/cg_missionbriefing.c:260-417); the
+    # UI reads map, longname, briefing, timelimit, the respawn times and type (ui/ui_gameinfo.c:101-215).
+    keys: [map, longname, type, briefing, lmsbriefing, alliedwintext, axiswintext, timelimit,
+           axisRespawnTime, alliedRespawnTime, mapposition_x, mapposition_y]
+    # type lists the gametypes the map offers in the menu; these two are objective and stopwatch.
+    defaults: {type: "wolfmp wolfsw"}
+  # What objdata_write writes: limbo's map and objective descriptions (cgame/cg_main.c:521-629).
+  objdata:
+    path: "maps/{map}.objdata"
+    teams: [axis, allied, neutral]
+    description: 'wm_mapdescription {team} "{text}"'
+    objective: 'wm_objective_{team}_desc {number} "{text}"'
+    objective_teams: [axis, allied]
+    max_objectives: 8          # MAX_OBJECTIVES, game/bg_public.h:229
+    confidence: verified
+  # What commandmap_make writes. The game frames levelshots/<map>_cc by the worldspawn's
+  # mapcoordsmins (top-left: x min, y max) and mapcoordsmaxs (bottom-right), cgame/cg_spawn.c:555-586;
+  # the area must be square (game/bg_tracemap.c:98-101). The shaders it draws are <map>_cc_trans
+  # and _cc_automap (cgame/cg_commandmap.c:1572-1589), defined as the base game defines its own
+  # in scripts/levelshots.shader, in a file of the map's own name so nothing is shadowed.
+  commandmap:
+    image: "levelshots/{map}_cc.tga"
+    size: 512                  # every stock _cc.tga is 512x512, 24-bit
+    mins_key: mapcoordsmins
+    maxs_key: mapcoordsmaxs
+    shader_file: "scripts/levelshots_{map}.shader"
+    shader_text: |
+      levelshots/{map}_cc_automap
+      {{
+      	nopicmip
+      	nocompress
+      	nomipmaps
+      	{{
+      		clampmap levelshots/{map}_cc.tga
+      		depthFunc equal
+      		rgbGen identity
+      	}}
+      }}
+
+      levelshots/{map}_cc_trans
+      {{
+      	nopicmip
+      	nocompress
+      	nomipmaps
+      	{{
+      		clampmap levelshots/{map}_cc.tga
+      		blendfunc blend
+      		rgbGen identity
+      		alphaGen vertex
+      	}}
+      }}
+    confidence: verified
   # The other files a map is looked up by; ship_check reports any that are missing. An image
   # may ship under any extension the renderer tries (renderercommon/tr_common.c:45-53).
   companions:
@@ -3220,6 +3273,8 @@ packaging:
     - {path: "levelshots/{map}_cc.tga", any_extension: [png, tga, jpg, jpeg], confidence: verified, role: command map, required: false, locus: "cgame/cg_main.c:1087"}
     - {path: "maps/{map}_tracemap.tga", confidence: verified, role: tracemap (written by generatetracemap), required: false, locus: "game/bg_tracemap.c:598"}
     - {path: "maps/{map}_loc.dat", confidence: verified, role: location names, required: false, locus: "cgame/cg_locations.c:526"}
+    - {path: "levelshots/{map}.tga", any_extension: [png, tga, jpg, jpeg], confidence: verified, role: levelshot, required: false, locus: "cgame/cg_loadpanel.c:449"}
+    - {path: "scripts/levelshots_{map}.shader", confidence: verified, role: command map shaders, required: false, locus: "cgame/cg_commandmap.c:1572-1589"}
   reserved_shader_prefixes: [common/, sfx/, gfx/, models/]
   size_budget_bytes: 52428800
   size_budget_confidence: unverified

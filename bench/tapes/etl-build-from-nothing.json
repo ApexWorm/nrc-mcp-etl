@@ -1,6 +1,6 @@
 {
   "name": "etl-build-from-nothing",
-  "note": "A playable ET: Legacy map built with nothing but tool calls: map_new, solid_commit for the rooms, the player clip and the scripted gate, entity_set_keys for the gate's names, entity_place for both teams' spawns and spawn markers, script_multiplayer, an intermission point and lights, and script_set_event for the whole script. No step writes map or script text by hand, and every entity_place must come back with no notes. It must validate clean under the ET profile; with --compile it compiles, packs with its script inside and nothing the base game ships, passes the pre-ship check, and loads in ET: Legacy with a client joined. Not covered: the .arena file, which no tool writes yet (the pre-ship check notes its absence as info).",
+  "note": "A complete, shippable ET: Legacy map built with nothing but tool calls: map_new, solid_commit for the rooms, the player clip and the scripted gate, entity_set_keys, entity_place for both teams' spawns and markers, script_multiplayer, an intermission point and lights, script_set_event for the script, objective_place for a dynamite objective, then arena_write, objdata_write, commandmap_make and levelshot_make. No step writes map or script text by hand, and every entity_place must come back with no notes. It must validate clean under the ET profile; with --compile it compiles, packs with all its release files and nothing the base game ships, passes the pre-ship check with no warnings, and loads in ET: Legacy with a client joined.",
   "profile": "etl",
   "steps": [
     {
@@ -356,6 +356,98 @@
       }
     },
     {
+      "tool": "objective_place",
+      "as": "radio",
+      "args": {
+        "kind": "dynamite",
+        "name": "radio",
+        "track": "the Allied Radio",
+        "team": "allies",
+        "objective": {
+          "min": [
+            800,
+            400,
+            0
+          ],
+          "max": [
+            864,
+            464,
+            64
+          ]
+        },
+        "trigger": {
+          "min": [
+            768,
+            368,
+            0
+          ],
+          "max": [
+            896,
+            496,
+            128
+          ]
+        },
+        "texture": "battery_wall/wall02_mid"
+      },
+      "expect": {
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    },
+    {
+      "tool": "arena_write",
+      "as": "arena",
+      "args": {
+        "longname": "From Nothing",
+        "keys": {
+          "briefing": "Built with tool calls only."
+        }
+      },
+      "expect": {
+        "missing_required": []
+      }
+    },
+    {
+      "tool": "objdata_write",
+      "as": "objdata",
+      "args": {
+        "descriptions": {
+          "axis": "Destroy the Allied radio.",
+          "allied": "Defend the radio.",
+          "neutral": "The Axis must destroy the Allied radio."
+        },
+        "objectives": {
+          "axis": [
+            "Destroy the Allied Radio"
+          ],
+          "allied": [
+            "Defend the Allied Radio"
+          ]
+        }
+      }
+    },
+    {
+      "tool": "commandmap_make",
+      "as": "commandmap",
+      "expect": {
+        "cut_height": {
+          "$gt": 0
+        }
+      }
+    },
+    {
+      "tool": "levelshot_make",
+      "as": "levelshot",
+      "args": {
+        "position": [
+          96,
+          96,
+          0
+        ],
+        "yaw_deg": 0
+      }
+    },
+    {
       "tool": "map_save",
       "as": "save",
       "args": {
@@ -424,7 +516,12 @@
         "step": "pack",
         "has": [
           "maps/fromnothing.bsp",
-          "maps/fromnothing.script"
+          "maps/fromnothing.script",
+          "maps/fromnothing.objdata",
+          "scripts/fromnothing.arena",
+          "levelshots/fromnothing.tga",
+          "levelshots/fromnothing_cc.tga",
+          "scripts/levelshots_fromnothing.shader"
         ],
         "no_basegame": true
       }

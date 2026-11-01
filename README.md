@@ -339,7 +339,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-60 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+64 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -428,6 +428,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | Tool | Does |
 | --- | --- |
 | `ship_check` | Naming, levelshot, arena file, companion files, package contents. |
+| `arena_write` · `objdata_write` | The arena file (the map in the menu: name, briefing, gametypes) and the limbo objective descriptions. |
+| `commandmap_make` · `levelshot_make` | The command map - map coordinates on the worldspawn, a top-down section image and its shaders - and the loading-screen levelshot. |
 | `pack_pk3` | Build the release archive. |
 | `repack_analyze` | Every resource the BSP actually references. |
 

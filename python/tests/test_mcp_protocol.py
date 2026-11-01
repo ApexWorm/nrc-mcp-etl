@@ -147,6 +147,10 @@ WRITERS = {
     "solid_edit_param",
     "model_place",
     "pack_pk3",
+    "arena_write",
+    "objdata_write",
+    "commandmap_make",
+    "levelshot_make",
     "compile_map",
     "compile_ab",
     "task_run",
@@ -162,6 +166,10 @@ DESTRUCTIVE = {
     "entity_remove_keys",
     "script_set_event",
     "script_remove",
+    "arena_write",
+    "objdata_write",
+    "commandmap_make",
+    "levelshot_make",
     "task_run",
 }
 
