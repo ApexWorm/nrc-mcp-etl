@@ -247,6 +247,10 @@
     "doc": "Run a mise task by name.\n\nArgs:\n    name: exact task name from `task_list`.\n    args: arguments passed after `--`.\n    acknowledge_mutation: required for tasks that mutate user data.",
     "signature": "(name: 'str', args: 'list[str] | None' = None, acknowledge_mutation: 'bool' = False) -> 'dict'"
   },
+  "texture_search": {
+    "doc": "Texture names the base game ships, for brush faces: every server has them, so a map\nthat uses them packs and draws everywhere.\n\n`query` is matched as space-separated words that must all appear in the name (`floor sand`,\n`wall brick`, `trim`); empty lists the texture folders with a count each. Names come back\nthe way a brush face spells them, without the `textures/` prefix. A name that is not a real\ntexture packs into a `_FAILEDpack` archive, so pick from here rather than guessing.\n\nEach match says whether a shader script defines it (and its surfaceparms, e.g. `nonsolid`,\n`trans`, `nodraw`) or it is a plain image. Shaders whose surfaceparms make them invisible or\nnon-solid are marked, since they are not wall material.",
+    "signature": "(query: 'str' = '', limit: 'int' = 40, profile_id: 'str | None' = None) -> 'dict'"
+  },
   "upstream_diff": {
     "doc": "Report upstream drift that would break the editor bridge, against the local baseline.\n\nHashes the individual declarations in `include/` the plugin binds to, rather than whole files,\nso it fires when something the plugin calls has actually moved instead of on every comment\nchange. Also reports new or removed compiler flags, because each new flag is a potential\noptimizer capability (\u00a76) \u2014 that feed pays for itself even if the pull request never happens.\n\nReads what is already on disk. `upstream_fetch` is the one that goes to the network.",
     "signature": "() -> 'dict'"

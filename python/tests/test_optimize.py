@@ -829,6 +829,43 @@ def test_shader_audit_counts_what_the_base_game_ships_as_defined(tmp_path, refer
     assert out["basegame_definitions"] == 2
 
 
+def test_a_name_nothing_supplies_is_an_error_once_the_base_game_is_read(tmp_path, references):
+    """A Tier 2 run invented a texture path; validate_profile passed and the pack failed. With
+    the base game's archives read, nothing is left that could supply the name."""
+    game = tmp_path / "basegame"
+    pk3(game / "pak0.pk3", {"scripts/stock.shader": STOCK})
+    references({"textures/egypt/made_up": 4})
+
+    with_base = optimize.shader_audit(tmp_path / "m.map", [], profile_id=None, basegame_dirs=[game])
+    (missing,) = [f for f in with_base["findings"] if f["code"] == "SHADER_MISSING"]
+    assert missing["severity"] == "error"
+    assert "_FAILEDpack" in missing["message"]
+
+    scripts = tmp_path / "elsewhere"
+    shader_script(scripts / "other.shader", STOCK)
+    unmeasured = optimize.shader_audit(tmp_path / "m.map", [scripts], profile_id=None)
+    (missing,) = [f for f in unmeasured["findings"] if f["code"] == "SHADER_MISSING"]
+    assert missing["severity"] == "warning", "without the base game it is only unmeasured"
+
+
+def test_what_the_map_ships_beside_it_counts_as_supplied(tmp_path, references):
+    game = tmp_path / "basegame"
+    pk3(game / "pak0.pk3", {"scripts/stock.shader": STOCK})
+    root = tmp_path / "mymod"
+    (root / "maps").mkdir(parents=True)
+    (root / "textures" / "mymap").mkdir(parents=True)
+    (root / "textures" / "mymap" / "plain.tga").write_bytes(b"")
+    shader_script(root / "scripts" / "mymap.shader", "textures/mymap/fancy\n{\n}\n")
+    references({"textures/mymap/plain": 2, "textures/mymap/fancy": 1, "textures/mymap/gone": 1})
+
+    out = optimize.shader_audit(root / "maps" / "m.map", [], profile_id=None, basegame_dirs=[game])
+    assert out["shipped_images"] == ["textures/mymap/plain"]
+    assert out["missing"] == ["textures/mymap/gone"]
+    assert any(f.endswith("mymap.shader") for f in out["scripts_scanned"]), (
+        "the map's own scripts/ is read without being named"
+    )
+
+
 def test_shader_audit_reports_a_shipped_shader_the_base_game_also_defines(tmp_path, references):
     game = tmp_path / "basegame"
     pk3(game / "pak0.pk3", {"scripts/stock.shader": STOCK})
@@ -856,6 +893,37 @@ def test_the_base_game_directory_comes_from_the_profile(monkeypatch):
     assert compiling._basegame_dir(None, "test") is None, "no game path, no base game"
     monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": {}})
     assert compiling._basegame_dir("/games/x", "test") is None
+
+
+def test_texture_search_lists_what_the_base_game_ships_by_keyword(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    from nrc_mcp.surface import compiling
+
+    pk3(
+        tmp_path / "maingame" / "pak0.pk3",
+        {
+            "scripts/stock.shader": STOCK + "textures/stock/glass\n{\nsurfaceparm trans\n}\n",
+            "textures/stock/floor_sand.jpg": "",
+            "textures/other/floor_stone.tga": "",
+            "models/stock/floor_crate.tga": "",
+        },
+    )
+    monkeypatch.setenv("NRC_FS_BASEPATH", str(tmp_path))
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": {"basegame": "maingame"}})
+
+    found = compiling.texture_search("floor", profile_id="test")
+    names = [t["texture"] for t in found["textures"]]
+    assert names == ["other/floor_stone", "stock/floor_sand"], "textures/ only, prefix dropped"
+    assert compiling.texture_search("floor sand", profile_id="test")["matches"] == 1
+    (glass,) = compiling.texture_search("glass", profile_id="test")["textures"]
+    assert glass == {
+        "texture": "stock/glass",
+        "shader": True,
+        "surfaceparms": ["trans"],
+        "not_wall_material": True,
+    }
+    folders = compiling.texture_search("", profile_id="test")["folders"]
+    assert folders == {"other": 1, "stock": 3}
 
 
 def test_shader_audit_without_a_base_game_is_unchanged(tmp_path, references):

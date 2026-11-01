@@ -260,6 +260,7 @@ TOOL_NAMES = (
     "hint_suggest",
     "leak_trace",
     "shader_audit",
+    "texture_search",
     "compile_ab",
     "ab_history",
     "navgrid_stats",

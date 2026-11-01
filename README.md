@@ -359,7 +359,7 @@ stops on it; each such rule names the engine source line and was checked by load
 
 ## Tool reference
 
-66 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+67 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -430,7 +430,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `structural_audit` | Brushes marked structural that need not be. |
 | `hint_suggest` | Hint brush planes, proposed from a portal file. |
 | `leak_trace` | Where the map leaks, from the pointfile. |
-| `shader_audit` | Shader references against the scripts on disk. |
+| `shader_audit` | Shader references against the scripts on disk; a name nothing supplies is an error once the base game is scanned. |
+| `texture_search` | Base-game texture names by keyword, so faces use textures every server has. |
 | `compile_ab` · `ab_history` | Compile two variants and diff what matters; every past comparison. |
 
 **Gameplay analysis** — all constants read from the profile, never hardcoded
@@ -696,7 +697,7 @@ exactly why it costs nothing.
 
 `mise run bench:tier2` is the harness that closes that gap — a model driving this MCP over stdio
 against small fixtures, graded by the same invariants. Its free modes are exercised
-(`--check` starts the server, lists the 66 tools, and verifies every scenario's goal is false on
+(`--check` starts the server, lists the 67 tools, and verifies every scenario's goal is false on
 the untouched fixture). **`--run` has never executed**: it spends tokens, and that is the
 owner's call to make, so nothing here reports a Tier 2 score and none should be inferred. Three
 ET: Legacy scenarios - build a map from nothing, add an objective, ship a map - are ready for it.

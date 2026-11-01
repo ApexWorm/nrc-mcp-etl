@@ -1176,8 +1176,12 @@ def shader_audit(
     shader_dirs: list[str | Path],
     profile_id: str | None = None,
     basegame_dirs: list[str | Path] | None = None,
+    game_map: Any = None,
 ) -> dict[str, Any]:
     """Missing, unused, shadowing and non-drawing shaders (§6.3).
+
+    `game_map` audits an already-parsed map (an unsaved edit) instead of reading `map_path`,
+    which still places the map: what it ships is looked for beside it.
 
     Four reports, and the difference between them matters:
 
@@ -1217,8 +1221,15 @@ def shader_audit(
     unreferenced, and a patch's missing shader went unreported. `Map.patches()` closed that, so the
     counts here are complete without anything re-parsing the `.map`.
     """
-    mp = load_map(map_path)
+    mp = game_map if game_map is not None else load_map(map_path)
     referenced, patches = _referenced_shaders(mp)
+    # The folder that holds maps/: what the map ships sits beside it, as it will in the pk3.
+    here = Path(map_path).resolve().parent
+    map_root = here.parent if here.name.lower() == "maps" else here
+    shader_dirs = list(shader_dirs)
+    own_scripts = map_root / "scripts"
+    if own_scripts.is_dir() and all(Path(d).resolve() != own_scripts for d in shader_dirs):
+        shader_dirs.append(own_scripts)
 
     definitions: dict[str, dict] = {}
     duplicates: dict[str, list[str]] = {}
@@ -1253,8 +1264,22 @@ def shader_audit(
     def in_basegame(name: str) -> bool:
         return name.lower() in base["shaders"] or name.lower() in base["images"]
 
+    def shipped_image(name: str) -> bool:
+        """A plain texture image beside the map, which needs no shader script."""
+        return any(
+            (map_root / f"{n}.{ext}").is_file()
+            for n in {name, name.lower()}
+            for ext in IMAGE_EXTENSIONS
+        )
+
     from_basegame = sorted(n for n in referenced if n not in definitions and in_basegame(n))
-    missing = sorted(n for n in referenced if n not in definitions and not in_basegame(n))
+    unresolved = [n for n in referenced if n not in definitions and not in_basegame(n)]
+    shipped_images = sorted(n for n in unresolved if shipped_image(n))
+    missing = sorted(n for n in unresolved if n not in shipped_images)
+    # With the base game's archives read, nothing is left that could supply the name: q3map2
+    # cannot find it either, and its packer writes <map>_FAILEDpack.pk3 (seen in a Tier 2 run
+    # where a model invented a texture path). Without them it is only unmeasured.
+    missing_severity = "error" if base["archives"] else "warning"
     scanned = f"{len(files)} shader script(s)" + (
         f" and {len(base['archives'])} base-game archive(s)" if base["archives"] else ""
     )
@@ -1262,13 +1287,22 @@ def shader_audit(
         findings.append(
             _finding(
                 "SHADER_MISSING",
-                "warning",
+                missing_severity,
                 f"{referenced[name]} surface(s) reference {name}, which none of the "
-                f"{scanned} scanned define. That is legal if a plain texture image of that name "
-                "ships with the map, or if the definition lives somewhere not scanned.",
+                f"{scanned} scanned define, and no texture image of that name ships beside the "
+                "map"
+                + (
+                    ". The packer cannot resolve it and writes a _FAILEDpack archive."
+                    if base["archives"]
+                    else ". That is legal if the definition lives somewhere not scanned."
+                ),
                 "verified",
                 source=f"map references versus {scanned}",
-                fix_hint="add the shader, fix the name, or pass the directory that defines it",
+                fix_hint=(
+                    "use a texture the base game ships (shader_audit's from_basegame lists the "
+                    "ones this map already uses), add the shader or image beside the map, or fix "
+                    "the name"
+                ),
                 detail={"shader": name, "surfaces": referenced[name]},
             )
         )
@@ -1427,6 +1461,7 @@ def shader_audit(
         "reference_counts": dict(sorted(referenced.items())),
         "missing": missing,
         "from_basegame": from_basegame,
+        "shipped_images": shipped_images,
         "unreferenced": unused,
         "shadowing_basegame": shadowing,
         "reserved_prefixes": sorted(reserved),

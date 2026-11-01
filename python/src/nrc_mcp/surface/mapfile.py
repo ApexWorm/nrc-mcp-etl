@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -528,6 +529,7 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
         found += mapscript.check(pid, ents, SESSION.path)
     except profiles.ProfileError as e:
         raise ToolError(_profile_error_text(e)) from e
+    found += _missing_textures(m, pid)
 
     floor = rules.SEVERITIES.index(severity_min) if severity_min in rules.SEVERITIES else 0
     kept = [f for f in found if rules.SEVERITIES.index(f.severity) >= floor]
@@ -539,6 +541,39 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
         "summary": rules.summarize(found),
         "findings": [f.as_dict() for f in kept],
     }
+
+
+def _missing_textures(m, pid: str) -> list[rules.Finding]:
+    """shader_audit's SHADER_MISSING, so the check a builder runs also catches a texture name
+    nothing supplies - which packs into a _FAILEDpack archive. Only with the base game known
+    and the map on disk (what it ships is looked for beside it); otherwise nothing is claimed.
+    """
+    from .. import optimize as optmod  # noqa: PLC0415
+    from .compiling import _basegame_dir  # noqa: PLC0415
+
+    if SESSION.path is None:
+        return []
+    basegame = _basegame_dir(
+        os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH"), pid
+    )
+    if not basegame or not Path(basegame).is_dir():
+        return []
+    try:
+        audit = optmod.shader_audit(SESSION.path, [], pid, [basegame], game_map=m)
+    except (OSError, ValueError):
+        return []
+    return [
+        rules.Finding(
+            code=f["code"],
+            severity=f["severity"],
+            message=f["message"] + " Find a real one with texture_search.",
+            confidence=f.get("confidence", "verified"),
+            rule_source=f.get("rule_source", "shader_audit"),
+            fix_hint=f.get("fix_hint", ""),
+        )
+        for f in audit.get("findings", [])
+        if f["code"] == "SHADER_MISSING"
+    ]
 
 
 def _script_spec() -> tuple[str, dict, Path]:

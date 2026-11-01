@@ -237,6 +237,68 @@ def shader_audit(
         raise ToolError(str(e)) from e
 
 
+@tool("compiling", "Find base-game textures")
+def texture_search(query: str = "", limit: int = 40, profile_id: str | None = None) -> dict:
+    """Texture names the base game ships, for brush faces: every server has them, so a map
+    that uses them packs and draws everywhere.
+
+    `query` is matched as space-separated words that must all appear in the name (`floor sand`,
+    `wall brick`, `trim`); empty lists the texture folders with a count each. Names come back
+    the way a brush face spells them, without the `textures/` prefix. A name that is not a real
+    texture packs into a `_FAILEDpack` archive, so pick from here rather than guessing.
+
+    Each match says whether a shader script defines it (and its surfaceparms, e.g. `nonsolid`,
+    `trans`, `nodraw`) or it is a plain image. Shaders whose surfaceparms make them invisible or
+    non-solid are marked, since they are not wall material.
+    """
+    pid = profile_id or active_profile() or None
+    basegame = _basegame_dir(
+        os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH"), pid
+    )
+    if not basegame:
+        return {
+            "error": "no base game known",
+            "hint": "set the game path in mise.local.toml and select a profile with packaging.basegame",
+        }
+    index = optmod.basegame_index([basegame])
+    names: dict[str, dict] = {}
+    for name, shader in index["shaders"].items():
+        if name.startswith("textures/"):
+            names[name] = {"shader": True, "surfaceparms": shader.get("surfaceparms") or []}
+    for name in index["images"]:
+        if name.startswith("textures/") and name not in names:
+            names[name] = {"shader": False, "surfaceparms": []}
+
+    words = [w.lower() for w in query.split()]
+    if not words:
+        folders: dict[str, int] = {}
+        for name in names:
+            folder = name.split("/")[1] if name.count("/") >= 2 else ""
+            folders[folder] = folders.get(folder, 0) + 1
+        return {
+            "basegame": basegame,
+            "textures": len(names),
+            "folders": dict(sorted(folders.items())),
+            "hint": "search with words, e.g. texture_search('floor stone')",
+        }
+
+    special = {"nodraw", "nonsolid", "trans", "sky", "fog", "lava", "slime", "water", "playerclip"}
+    hits = sorted(n for n in names if all(w in n for w in words))
+    rows = []
+    for name in hits[: max(1, limit)]:
+        info = names[name]
+        parms = [p.lower() for p in info["surfaceparms"]]
+        rows.append(
+            {
+                "texture": name.removeprefix("textures/"),
+                "shader": info["shader"],
+                **({"surfaceparms": parms} if parms else {}),
+                **({"not_wall_material": True} if special & set(parms) else {}),
+            }
+        )
+    return {"query": query, "matches": len(hits), "shown": len(rows), "textures": rows}
+
+
 def _basegame_dir(base: str | None, profile_id: str | None) -> str | None:
     """The base game's directory: the game path joined with the profile's `packaging.basegame`."""
     if not base or not profile_id:
