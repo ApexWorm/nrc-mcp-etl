@@ -580,6 +580,10 @@ impl PyMap {
         yaw_deg = 0.0,
         eye_height = None,
         fov_deg = 55.0,
+        frame = None,
+        padding = 26.0,
+        tga = false,
+        cut_above = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn render<'py>(
@@ -599,6 +603,10 @@ impl PyMap {
         yaw_deg: f64,
         eye_height: Option<f64>,
         fov_deg: f64,
+        frame: Option<[f64; 4]>,
+        padding: f64,
+        tga: bool,
+        cut_above: Option<f64>,
     ) -> PyResult<(Bound<'py, pyo3::types::PyBytes>, Bound<'py, PyDict>)> {
         use nrc_render::camera::OrthoAxis;
         use nrc_render::{RenderOptions, SceneOptions, View};
@@ -678,6 +686,14 @@ impl PyMap {
                     grid_spacing: spacing,
                     annotate,
                     scene,
+                    // [xmin, ymin, xmax, ymax]; z spans everything, so only the plan matters.
+                    frame: frame.map(|[x0, y0, x1, y1]| nrc_core::math::Aabb {
+                        min: nrc_core::math::vec3(x0, y0, -65536.0),
+                        max: nrc_core::math::vec3(x1, y1, 65536.0),
+                    }),
+                    padding,
+                    tga,
+                    cut_above,
                 },
             )
         }
@@ -719,7 +735,9 @@ impl PyMap {
             _ => d.set_item("bounds", py.None())?,
         }
 
-        Ok((pyo3::types::PyBytes::new(py, &result.png), d))
+        // A TGA, when asked for, comes back in place of the PNG: it is what the caller writes.
+        let bytes = result.tga.as_deref().unwrap_or(&result.png);
+        Ok((pyo3::types::PyBytes::new(py, bytes), d))
     }
 
     #[getter]

@@ -224,6 +224,23 @@ impl Canvas {
         }
     }
 
+    /// Encode as an uncompressed 24-bit TGA, top row first.
+    ///
+    /// The format the game reads levelshots and command maps in. Header per the Truevision
+    /// TGA 2.0 spec: image type 2 (uncompressed true colour), descriptor bit 5 set for a
+    /// top-left origin; pixels are stored blue, green, red.
+    pub fn to_tga(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(18 + self.pixels.len());
+        out.extend_from_slice(&[0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.extend_from_slice(&(self.width as u16).to_le_bytes());
+        out.extend_from_slice(&(self.height as u16).to_le_bytes());
+        out.extend_from_slice(&[24, 0x20]);
+        for px in self.pixels.chunks_exact(3) {
+            out.extend_from_slice(&[px[2], px[1], px[0]]);
+        }
+        out
+    }
+
     /// Encode as a PNG.
     pub fn to_png(&self) -> Vec<u8> {
         // Raw scanlines, each prefixed with filter type 0 (None). Filtering would compress
