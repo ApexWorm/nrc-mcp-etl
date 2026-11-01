@@ -1,10 +1,11 @@
 {
-  "note": "The ET twin of continue-existing-level, on Splash Damage's radar source (a 8.7 MB map, imported by `mise run corpus:import` from NRC_MAPSRC; skipped where it is absent). Add to a finished map without costing the old work anything. radar has 62,032 walkable cells at cell 32; the floor is set about one 512-unit room above that, so doing nothing fails.",
+  "note": "The ET twin of continue-existing-level, on Splash Damage's radar source (a 8.7 MB map, imported by `mise run corpus:import` from NRC_MAPSRC; skipped where it is absent). Add to a finished map without costing the old work anything. radar has 62,032 walkable cells at cell 32; the floor is set about one 512-unit room above that, so doing nothing fails. A room placed well clear of the map grows its bounds: one Tier 2 run built 11456x14464x2688 units, past the default 12M-cell grid cap at cell 32, so max_cells is raised (one byte per cell).",
   "profile": "etl",
   "fixture": "corpus/real/radar_final.map",
   "prompt": "Open the map at {work}. Add one new enclosed room, roughly 512 by 512 units and 256 tall, somewhere clear of the existing geometry, with a doorway in one wall. Leave everything already in the map exactly as it is. Save when done.",
   "max_turns": 20,
   "max_output_tokens": 120000,
+  "max_cells": 40000000,
   "invariants": [
     {
       "name": "round_trip_identical"

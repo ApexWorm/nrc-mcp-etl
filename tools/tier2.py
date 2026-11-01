@@ -238,6 +238,7 @@ def grade(
         results=results or {},
         profile_id=scenario.get("profile"),
         cell=float(scenario.get("cell") or playspace.DEFAULT_DIFF_CELL),
+        max_cells=int(scenario["max_cells"]) if scenario.get("max_cells") else None,
         allow_compile=allow_compile,
     )
     outcomes = [

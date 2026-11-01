@@ -719,6 +719,24 @@ def test_tier2_stages_fixture_trees_and_passes_images_through(tmp_path, monkeypa
     assert t2._field(Result2(), "is_error", "isError") is True
 
 
+def test_a_checks_grid_budget_reaches_every_grid_it_builds(plaza):
+    """A room built far from a large map grows its bounds past the default cap at the same
+    cell; a scenario can raise the budget, and an invariant must then honour it."""
+    tight = playspace.Check(
+        workspace=plaza.parent,
+        baseline=plaza,
+        current=plaza,
+        profile_id=_profile(),
+        cell=32.0,
+        max_cells=10,
+    )
+    for name in ("walkable_area_at_least", "no_playable_space_regression"):
+        out = playspace.run_invariant(name, tight)
+        assert not out.ok and "max_cells cap of 10" in out.detail, (name, out.detail)
+    tight.max_cells = None
+    assert playspace.run_invariant("walkable_area_at_least", tight).ok
+
+
 def test_tier2_skips_a_scenario_whose_fixture_is_not_on_disk():
     """Game-install maps are absent on most machines; that is an absent input, not a fail,
     and a run must not spend anything on it."""

@@ -277,7 +277,9 @@ class _Lookup:
         return any(s.contains(x, y, z) for s in self.oversized)
 
 
-def _grid_for(ref: Any, cell: float, profile_id: str | None) -> NavGrid:
+def _grid_for(
+    ref: Any, cell: float, profile_id: str | None, max_cells: int | None = None
+) -> NavGrid:
     """The grid for one side of a comparison: a file, or a parsed map under a file's name.
 
     Both go through `cached_navgrid`, which reuses a grid only when it is provably the same
@@ -285,10 +287,11 @@ def _grid_for(ref: Any, cell: float, profile_id: str | None) -> NavGrid:
     be answered from it — `cached_navgrid` bypasses the cache outright when `game_map` is
     given, which is what keeps this comparison honest.
     """
+    extra = {"max_cells": max_cells} if max_cells else {}
     if isinstance(ref, (str, Path)):
-        return cached_navgrid(ref, cell=cell, profile_id=profile_id)
+        return cached_navgrid(ref, cell=cell, profile_id=profile_id, **extra)
     path, parsed = ref
-    return cached_navgrid(path, cell=cell, profile_id=profile_id, game_map=parsed)
+    return cached_navgrid(path, cell=cell, profile_id=profile_id, game_map=parsed, **extra)
 
 
 def _round3(p: tuple[float, float, float]) -> list[float]:
@@ -308,6 +311,7 @@ def diff(
     profile_id: str | None = None,
     lost_tolerance: float = DEFAULT_LOST_TOLERANCE,
     max_examples: int = 6,
+    max_cells: int | None = None,
 ) -> dict[str, Any]:
     """Compare the walkable space of two states of a map.
 
@@ -319,8 +323,8 @@ def diff(
     movement = movement_constants(profile)
     confidence = "verified" if movement.headroom_stand.verified else "unverified"
 
-    grid_before = _grid_for(before, cell, profile)
-    grid_after = _grid_for(after, cell, profile)
+    grid_before = _grid_for(before, cell, profile, max_cells)
+    grid_after = _grid_for(after, cell, profile, max_cells)
     dx, dy, dz = _alignment(grid_before, grid_after)
 
     walkable_before = grid_before.walkable_cells()
@@ -538,8 +542,19 @@ class Check:
     results: dict[str, Any] = field(default_factory=dict)
     profile_id: str | None = None
     cell: float = DEFAULT_DIFF_CELL
+    #: The voxel budget, when a large map needs more than build_navgrid's default cap. Building
+    #: a map's bounds out (a room added far from the rest) can cross the cap at the same cell.
+    max_cells: int | None = None
     #: Whether invariants that need a compiler may run one.
     allow_compile: bool = False
+
+
+def _grid_args(check: Check) -> dict[str, Any]:
+    """build_navgrid's arguments for a check: its cell and profile, and its budget if set."""
+    args: dict[str, Any] = {"cell": check.cell, "profile_id": check.profile_id}
+    if check.max_cells:
+        args["max_cells"] = check.max_cells
+    return args
 
 
 @dataclass(frozen=True)
@@ -614,6 +629,7 @@ def _no_playable_space_regression(
         cell=check.cell,
         profile_id=check.profile_id,
         lost_tolerance=max_lost_fraction,
+        max_cells=check.max_cells,
     )
     codes = [f["code"] for f in report["findings"] if f["severity"] == "error"]
     over = report["lost_fraction"] > max_lost_fraction
@@ -632,7 +648,11 @@ def _no_clip_surface_walkable(check: Check) -> Outcome:
     if check.baseline is None:
         return Outcome("no_clip_surface_walkable", True, "no baseline", skipped=True)
     report = diff(
-        check.baseline, _require_current(check), cell=check.cell, profile_id=check.profile_id
+        check.baseline,
+        _require_current(check),
+        cell=check.cell,
+        profile_id=check.profile_id,
+        max_cells=check.max_cells,
     )
     n = report["walkable_on_clip_cells"]
     if not report["clip_shaders_checked"]:
@@ -654,7 +674,7 @@ def _no_clip_surface_walkable(check: Check) -> Outcome:
 @invariant("walkable_area_at_least")
 def _walkable_area_at_least(check: Check, cells: int = 1) -> Outcome:
     """The map has at least this much standable space. Catches an edit that sealed it shut."""
-    grid = build_navgrid(_require_current(check), cell=check.cell, profile_id=check.profile_id)
+    grid = build_navgrid(_require_current(check), **_grid_args(check))
     n = len(grid.walkable_cells())
     return Outcome("walkable_area_at_least", n >= cells, f"{n} walkable cells (want >= {cells})")
 
@@ -662,7 +682,7 @@ def _walkable_area_at_least(check: Check, cells: int = 1) -> Outcome:
 @invariant("single_walkable_region")
 def _single_walkable_region(check: Check, min_fraction: float = 0.9) -> Outcome:
     """Most walkable space is one connected region — nothing important got cut off."""
-    grid = build_navgrid(_require_current(check), cell=check.cell, profile_id=check.profile_id)
+    grid = build_navgrid(_require_current(check), **_grid_args(check))
     sizes = sorted(grid.component_sizes(), reverse=True)
     total = sum(sizes)
     if not total:
@@ -718,7 +738,7 @@ def _positions_not_walkable(
     tool for that — this is the narrower claim, and calling it the narrower thing keeps a
     passing scenario from implying more than was measured.
     """
-    grid = build_navgrid(_require_current(check), cell=check.cell, profile_id=check.profile_id)
+    grid = build_navgrid(_require_current(check), **_grid_args(check))
     tol = check.cell if tolerance is None else float(tolerance)
     still = [
         (list(p), _standable_near(grid, p, tol))
@@ -739,7 +759,7 @@ def _positions_walkable(
     check: Check, positions: Sequence[Sequence[float]] = (), tolerance: float | None = None
 ) -> Outcome:
     """All of these places can still be stood on. The other half of a sealing task."""
-    grid = build_navgrid(_require_current(check), cell=check.cell, profile_id=check.profile_id)
+    grid = build_navgrid(_require_current(check), **_grid_args(check))
     tol = check.cell if tolerance is None else float(tolerance)
     gone = [list(p) for p in positions if _standable_near(grid, p, tol) is None]
     return Outcome(
