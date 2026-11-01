@@ -563,7 +563,11 @@ mod tests {
         e.keys.push(("origin".into(), "0 0 0".into()));
         e.keys.push(("angle".into(), "180".into()));
         let (previous, dropped) = e.set_effective("angle", "270");
-        assert_eq!(previous.as_deref(), Some("180"), "the last duplicate is what was read");
+        assert_eq!(
+            previous.as_deref(),
+            Some("180"),
+            "the last duplicate is what was read"
+        );
         assert_eq!(dropped, 1);
         assert_eq!(
             e.keys,
@@ -582,7 +586,9 @@ mod tests {
     fn pairs_the_format_cannot_hold_are_named() {
         assert_eq!(unwritable_pair("message", "a plain value"), None);
         assert!(unwritable_pair("", "x").is_some());
-        assert!(unwritable_pair("message", "say \"hi\"").unwrap().contains("value"));
+        assert!(unwritable_pair("message", "say \"hi\"")
+            .unwrap()
+            .contains("value"));
         assert!(unwritable_pair("mess\nage", "x").unwrap().contains("key"));
         assert!(unwritable_pair("message", "line\r").is_some());
     }
