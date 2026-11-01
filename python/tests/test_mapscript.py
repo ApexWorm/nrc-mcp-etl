@@ -269,6 +269,23 @@ def test_a_trigger_needs_the_event_it_names(tmp_path, spec):
     assert "'nobody'" in unknown.message, "self and global are not block names"
 
 
+def test_a_reference_that_never_runs_is_reported_one_step_milder(tmp_path, spec):
+    script = (
+        block("game_manager", ("spawn", ["alertentity shared", "trigger door shut"]))
+        + block("ghost", ("spawn", ["alertentity shared", "alertentity only_dead"]))
+        + block("door", ("trigger open", ["wait 1"]))
+        + block("game_manager", ("spawn", ["alertentity second_copy"]))
+    )
+    found = check(tmp_path, script, [ent(0, "manager"), ent(1, "d", scriptname="door")])
+    refs = {f.message.split("'")[1]: f for f in found["MAPSCRIPT_UNRESOLVED_REFERENCE"]}
+    assert refs["shared"].severity == "error", "one live use is enough"
+    assert refs["only_dead"].severity == "warning"
+    assert "never run" in refs["only_dead"].message
+    assert "second_copy" not in refs, "the engine reads only the first block of a name"
+    (missing,) = found["MAPSCRIPT_MISSING_EVENT"]
+    assert missing.severity == "warning", "trigger is a warning when it runs"
+
+
 def test_entities_the_script_creates_are_real(tmp_path, spec):
     script = """game_manager
 {

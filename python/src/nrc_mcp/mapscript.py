@@ -283,7 +283,8 @@ def check(profile_id: str, entities: list[dict], map_path: str | Path | None) ->
                         )
                     )
 
-    out += _references(spec, blocks, entities, by_name, path.name, finding)
+    live = {n for n in by_name if n in named}
+    out += _references(spec, live, entities, by_name, path.name, finding)
     out += _entity_events(spec, entities, by_name, path.name, finding)
     return out
 
@@ -374,8 +375,16 @@ def _lines(lines: list[int]) -> str:
     return shown + (f" (+{len(lines) - 6} more)" if len(lines) > 6 else "")
 
 
-def _references(spec, blocks, entities, by_name, filename, finding) -> list[Finding]:
-    """One finding per name that resolves to nothing, listing every line that uses it."""
+def _milder(severity: str) -> str:
+    return {"error": "warning", "warning": "info"}.get(severity, severity)
+
+
+def _references(spec, live, entities, by_name, filename, finding) -> list[Finding]:
+    """One finding per name that resolves to nothing, listing every line that uses it.
+
+    Only the first block of each name is read, as the engine does. A name used only in blocks
+    that never run cannot fail the game, so it is reported one step milder.
+    """
     out: list[Finding] = []
     for rule in spec.get("references") or []:
         if not isinstance(rule, dict):
@@ -389,7 +398,8 @@ def _references(spec, blocks, entities, by_name, filename, finding) -> list[Find
         event = str(rule.get("event", "")).lower()
         unresolved: dict[str, list[int]] = {}
         no_event: dict[tuple[str, str], list[int]] = {}
-        for b in blocks:
+        runs: set[str | tuple[str, str]] = set()  # names used somewhere that runs
+        for b in by_name.values():
             for ev in b.events:
                 for act in ev.actions:
                     if act.name != name or len(act.args) <= arg:
@@ -397,6 +407,8 @@ def _references(spec, blocks, entities, by_name, filename, finding) -> list[Find
                     value = act.args[arg]
                     if not ok(value):
                         unresolved.setdefault(value, []).append(act.line)
+                        if b.name.lower() in live:
+                            runs.add(value)
                         continue
                     target = by_name.get(value.lower())
                     if label_arg is None or target is None or len(act.args) <= int(label_arg):
@@ -404,14 +416,18 @@ def _references(spec, blocks, entities, by_name, filename, finding) -> list[Find
                     label = act.args[int(label_arg)]
                     if not target.has_event(event, [label]):
                         no_event.setdefault((target.name, label), []).append(act.line)
+                        if b.name.lower() in live:
+                            runs.add((target.name, label))
+        dead = "; only in blocks that never run"
         for value, lines in unresolved.items():
             out.append(
                 finding(
                     "MAPSCRIPT_UNRESOLVED_REFERENCE",
-                    sev,
-                    f"{filename} line {_lines(lines)}: {name} {value!r} names nothing "
+                    sev if value in runs else _milder(sev),
+                    f"{filename} line {_lines(sorted(lines))}: {name} {value!r} names nothing "
                     f"({rule.get('describe', rule.get('resolves'))}); "
-                    f"{rule.get('consequence', '')}".rstrip("; "),
+                    f"{rule.get('consequence', '')}".rstrip("; ")
+                    + ("" if value in runs else dead),
                     c=conf,
                 )
             )
@@ -419,9 +435,10 @@ def _references(spec, blocks, entities, by_name, filename, finding) -> list[Find
             out.append(
                 finding(
                     "MAPSCRIPT_MISSING_EVENT",
-                    sev,
-                    f"{filename} line {_lines(lines)}: {name} {block} {label} - block "
-                    f"{block!r} has no '{event} {label}' event, so nothing happens",
+                    sev if (block, label) in runs else _milder(sev),
+                    f"{filename} line {_lines(sorted(lines))}: {name} {block} {label} - block "
+                    f"{block!r} has no '{event} {label}' event, so nothing happens"
+                    + ("" if (block, label) in runs else dead),
                     c=conf,
                 )
             )
