@@ -3077,6 +3077,9 @@ mapscript:
       describe: "the target of a trigger_objective_info"
       consequence: "nothing happens: the objective is looked up by its trigger's target, and a miss is silent"
       locus: "game/g_script_actions.c:3358-3405"
+      # Every stock map passes an objective number here, the old syntax, which the engine
+      # ignores on purpose "for old map scripts compatibility" (g_script_actions.c:3372-3386).
+      skip_numeric: true
   # Numeric arguments the engine refuses, with a G_Error, when the action runs.
   arg_ranges:
     - action: constructible_class

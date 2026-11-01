@@ -526,3 +526,28 @@ def test_an_objective_requirement_is_met_by_a_key_or_by_its_own_script(tmp_path,
     assert unmet(ent(1, "boom", targetname="wall", scriptname="wall"), scripted) == []
     too_low = block("wall", ("spawn", ["constructible_class 1"]))
     assert unmet(ent(1, "boom", targetname="wall", scriptname="wall"), too_low)
+
+
+def test_a_reference_can_skip_the_old_numeric_syntax(tmp_path, monkeypatch):
+    """wm_set_main_objective took a number before it took a name; the engine ignores numbers."""
+    spec = {
+        **SPEC,
+        "actions": [*SPEC["actions"], "main"],
+        "references": [
+            {
+                "action": "main",
+                "arg": 0,
+                "resolves": [{"key": "target", "classname": "trig"}],
+                "severity": "warning",
+                "skip_numeric": True,
+            }
+        ],
+    }
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"mapscript": spec})
+    text = block("game_manager", ("spawn", ["main 1 0", "main nowhere 0"]))
+    found = [
+        f.message
+        for f in mapscript.check("test", [ent(0, "manager")], tmp_path / "m.map", text=text)
+        if f.code == "MAPSCRIPT_UNRESOLVED_REFERENCE"
+    ]
+    assert len(found) == 1 and "nowhere" in found[0]

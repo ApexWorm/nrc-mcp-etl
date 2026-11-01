@@ -566,6 +566,9 @@ def _references(spec, live, entities, by_name, filename, finding) -> list[Findin
                     if act.name != name or len(act.args) <= arg:
                         continue
                     value = act.args[arg]
+                    # An old syntax the engine takes a number in and ignores on purpose.
+                    if rule.get("skip_numeric") and value.lstrip("-").isdigit():
+                        continue
                     if not ok(value):
                         unresolved.setdefault(value, []).append(act.line)
                         if b.name.lower() in live:
