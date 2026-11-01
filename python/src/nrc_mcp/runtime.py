@@ -153,6 +153,19 @@ def _require_profile(profile_id: str | None) -> str:
     return pid
 
 
+def _add_entity(keys: list[tuple[str, str]]) -> int:
+    """Append an entity to the open map and return its index — the one path that does.
+
+    The map is edited in place, so it keeps the path `map_save` writes to and the bytes it
+    was opened from, which is what lets `map_save` see the edit and check playable space.
+    """
+    m = SESSION.require()
+    try:
+        return m.add_entity(keys)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+
+
 def _kernel():
     from .kernel import kernel
 

@@ -6,6 +6,8 @@ annotations. See `nrc_mcp.server` for how the surface is assembled and scoped.
 
 from __future__ import annotations
 
+import contextlib
+import math
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ from .. import playspace as playspacemod
 from ..kernel import load_map, repo_root
 from ..runtime import (
     SESSION,
+    _add_entity,
     _profile_error_text,
     active_profile,
     tool,
@@ -64,6 +67,43 @@ def map_open(path: str, grid: int = 8) -> dict:
         "grid": grid,
         "warnings": SESSION.warnings,
     }
+
+
+#: An empty map: the worldspawn every map starts with, and nothing else.
+EMPTY_MAP = '{\n"classname" "worldspawn"\n}\n'
+
+
+@tool("map", "Create a new map", writes=True)
+def map_new(path: str, grid: int = 8) -> dict:
+    """Create an empty `.map` holding only a worldspawn, and open it.
+
+    The start of a map built from nothing: then `solid_commit` for geometry, `entity_place`
+    for point entities, `map_save` to write. An existing file is never overwritten — open it
+    with `map_open` instead. Missing parent folders are created.
+
+    Args:
+        path: where to create it, ending in `.map`. Relative paths resolve against the repo root.
+        grid: authoring grid, as for `map_open`.
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        p = repo_root() / p
+    if p.suffix.lower() != ".map":
+        raise ToolError(f"{p} does not end in .map")
+    if p.exists():
+        raise ToolError(f"{p} already exists; map_new never overwrites — open it with map_open")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Exclusive creation, so a file that appears between the check and the write is not
+        # overwritten either.
+        with p.open("x", encoding="utf-8", newline="\n") as f:
+            f.write(EMPTY_MAP)
+    except FileExistsError as e:
+        raise ToolError(f"{p} already exists; map_new never overwrites") from e
+    result = map_open(str(p), grid=grid)
+    result["created"] = True
+    result["next"] = "solid_commit for geometry, entity_place for point entities, then map_save"
+    return result
 
 
 @tool("map", "Map statistics")
@@ -179,6 +219,203 @@ def query_entities(classname: str | None = None, with_keys: bool = True) -> dict
     m = SESSION.require()
     ents = m.entities(classname=classname, with_keys=with_keys)
     return {"count": len(ents), "filter": classname, "entities": ents}
+
+
+@tool("map", "Place a point entity", writes=True)
+def entity_place(
+    classname: str,
+    origin: list[float],
+    keys: dict[str, str | float | list[float]] | None = None,
+    grid: int | None = None,
+) -> dict:
+    """Add a point entity to the open map: a spawn, a script or objective marker, a light.
+
+    `keys` are written after `classname` and `origin`, in the order given. A number becomes
+    its shortest spelling and a list of numbers a space-separated vector, so
+    `{"angles": [0, 90, 0]}` writes `"angles" "0 90 0"`.
+
+    The classname and keys are checked against the active profile and anything it does not
+    declare comes back in `notes` — written anyway, because profiles are incomplete, but a
+    misspelt key is silent in game, so read them. `profile_summary` and `nrc://profile/{id}`
+    list what the profile knows. The origin is written as given, never snapped; one off the
+    grid (default: the session's) is noted, as the brush tools count off-grid vertices.
+
+    A classname the profile declares as a brush entity — a door, a trigger — is refused: build
+    its brushes with `solid_commit` and `target_classname`, then give it keys with
+    `entity_set_keys`. Nothing reaches disk until `map_save`.
+    """
+    if "classname" in (keys or {}) or "origin" in (keys or {}):
+        raise ToolError("pass classname and origin as their own arguments, not inside keys")
+    if len(origin) != 3:
+        raise ToolError(f"origin must be three numbers, got {len(origin)}")
+    pid = active_profile()
+    ent = None
+    if pid:
+        with contextlib.suppress(profiles.ProfileError):
+            ent = profiles.entity_def(pid, classname)
+    if ent is not None and ent.get("kind") == "brush":
+        raise ToolError(
+            f"profile {pid} declares {classname} as a brush entity, and a point entity of it "
+            "has no volume. Build it with solid_commit(target_classname=...), then give it "
+            "keys with entity_set_keys."
+        )
+    pairs = [("classname", classname), ("origin", _value_text("origin", origin))]
+    pairs += [(k, _value_text(k, v)) for k, v in (keys or {}).items()]
+
+    index = _add_entity(pairs)
+
+    g = grid if grid is not None else SESSION.grid
+    notes = _profile_notes(classname, pairs)
+    if g > 0 and any(float(c) % g for c in origin):
+        notes.append(
+            f"origin {pairs[1][1]} is off the {g}-unit grid; it was written as given, not snapped"
+        )
+    return {
+        "entity": index,
+        "keys": pairs,
+        "notes": notes,
+        "entities_now": SESSION.map.entity_count,
+        "next": "call map_save to write it, and validate_profile to check spawns and counts",
+    }
+
+
+@tool("map", "Set entity keys", writes=True, destructive=True, idempotent=True)
+def entity_set_keys(entity: int, keys: dict[str, str | float | list[float]]) -> dict:
+    """Set keys on any entity — a point entity, a brush entity or the worldspawn.
+
+    `entity` is the index `query_entities` reports; worldspawn is normally 0. An existing key
+    keeps its position and gets the new value; a new key is appended. Values are spelt as in
+    `entity_place`. Changing `classname` is allowed, except on the worldspawn or into a
+    second one.
+
+    The previous value of every key comes back in `changed`, because this overwrites. If the
+    entity carried a key twice, the later copy is what the engine reads, so it is removed and
+    reported in `duplicates_removed`. Keys and values the profile does not declare for the
+    classname come back in `notes`, as in `entity_place`.
+
+    Every key is checked before any is written, so a refusal changes nothing. Nothing
+    reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    if not keys:
+        raise ToolError("no keys given; pass a mapping of key to value")
+    pairs = [(k, _value_text(k, v)) for k, v in keys.items()]
+    try:
+        results = m.set_keys(_entity_index(entity), pairs)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+
+    classname = m.entities(with_keys=False)[entity]["classname"]
+    values = dict(pairs)
+    out: dict[str, Any] = {
+        "entity": entity,
+        "classname": classname,
+        "changed": [
+            {"key": r["key"], "value": values[r["key"]], "previous": r["previous"]} for r in results
+        ],
+        "notes": _profile_notes(classname, pairs),
+        "next": "call map_save to write it",
+    }
+    duplicates = {r["key"]: r["duplicates_removed"] for r in results if r["duplicates_removed"]}
+    if duplicates:
+        out["duplicates_removed"] = duplicates
+    return out
+
+
+@tool("map", "Remove entity keys", writes=True, destructive=True, idempotent=True)
+def entity_remove_keys(entity: int, keys: list[str]) -> dict:
+    """Remove keys from any entity, every copy of each.
+
+    `entity` is the index `query_entities` reports. A key the entity does not have is listed
+    in `absent` rather than refused, so the call is safe to repeat. `classname` cannot be
+    removed: change it with `entity_set_keys` instead. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    if not keys:
+        raise ToolError("no keys given; pass a list of key names")
+    try:
+        results = m.remove_keys(_entity_index(entity), list(keys))
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    return {
+        "entity": entity,
+        "classname": m.entities(with_keys=False)[entity]["classname"],
+        "removed": [k for k, removed in results if removed],
+        "absent": [k for k, removed in results if not removed],
+        "next": "call map_save to write it",
+    }
+
+
+def _entity_index(entity: int) -> int:
+    # The kernel takes an unsigned index; a negative one would fail as an overflow, with a
+    # message about integers rather than about entities.
+    if entity < 0:
+        raise ToolError(f"no entity {entity}: indices start at 0; query_entities lists them")
+    return entity
+
+
+def _value_text(key: str, value: Any) -> str:
+    """A key's value as the `.map` spells it."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            raise ToolError(f"{key}: {value} is not a number a .map can hold")
+        # repr is the shortest spelling that reads back as the same float; `:g` is not, and
+        # rounds a coordinate like 1234.5678 to six significant figures.
+        return str(int(value)) if float(value).is_integer() else repr(float(value))
+    if isinstance(value, (list, tuple)):
+        return " ".join(_value_text(key, v) for v in value)
+    raise ToolError(
+        f"{key}: a value is a string, a number or a list of numbers, not {type(value).__name__}"
+    )
+
+
+def _profile_notes(classname: str, pairs: list[tuple[str, str]]) -> list[str]:
+    """What the active profile does not know about this classname and these keys.
+
+    Advice, never a refusal: a profile is extracted from a gamepack and can lag the game, so a
+    key it does not declare may still be real. But a misspelt key does nothing in game and
+    says nothing, so it is worth a sentence.
+    """
+    pid = active_profile()
+    if not pid:
+        return ["no profile is selected (NRC_PROFILE), so the classname and keys were not checked"]
+    try:
+        ent = profiles.entity_def(pid, classname)
+        declared = profiles.declared_keys(pid, ent) if ent is not None else {}
+    except profiles.ProfileError as e:
+        return [f"the classname and keys were not checked: {_profile_error_text(e)}"]
+    if ent is None:
+        return [
+            f"profile {pid} does not define classname {classname!r}. It was written anyway, "
+            "since the profile may be incomplete, but a misspelt classname does nothing in game"
+        ]
+
+    notes = []
+    # Keys every entity format has, which entries do not repeat.
+    generic = {"classname"}
+    if ent.get("kind") == "point":
+        generic.add("origin")
+    if ent.get("spawnflags"):
+        generic.add("spawnflags")
+    unknown = [k for k, _ in pairs if k not in declared and k not in generic]
+    if unknown:
+        notes.append(
+            f"profile {pid} declares no {', '.join(repr(k) for k in unknown)} on {classname}. "
+            "Written anyway, since the profile may be incomplete; check the spelling. It "
+            f"declares: {', '.join(sorted(declared)) or 'no keys'}"
+        )
+    for k, v in pairs:
+        allowed = (declared.get(k) or {}).get("values")
+        if isinstance(allowed, list) and allowed and v not in [str(a) for a in allowed]:
+            notes.append(
+                f"{k}={v!r} is not one of the values profile {pid} lists for it: "
+                f"{', '.join(str(a) for a in allowed)}"
+            )
+    return notes
 
 
 @tool("map", "Brush geometry")

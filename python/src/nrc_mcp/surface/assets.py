@@ -16,7 +16,7 @@ from .. import profiles
 from ..kernel import repo_root
 from ..runtime import (
     SESSION,
-    _kernel,
+    _add_entity,
     _require_profile,
     active_profile,
     tool,
@@ -216,15 +216,12 @@ def model_place(
     Nothing reaches disk until `map_save`.
     """
     keys = _model_place_keys(model_path, origin, angles, scale, lightmap_scale, remap, profile_id)
-    m = SESSION.require()
-    entity = "{\n" + "".join(f'"{k}" "{v}"\n' for k, v in keys) + "}\n"
-    k = _kernel()
-    merged = k.Map.parse(m.source() + entity)
-    SESSION.map = merged
+    index = _add_entity(keys)
     return {
         "keys": keys,
         "committed": True,
-        "entities_now": merged.entity_count,
+        "entity": index,
+        "entities_now": SESSION.map.entity_count,
         "next": "call map_save to write it, and model_make_clip if it needs collision",
     }
 

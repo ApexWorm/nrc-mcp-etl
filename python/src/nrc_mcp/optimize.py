@@ -47,6 +47,7 @@ import json
 import math
 import re
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -980,7 +981,16 @@ def parse_shader_file(path: str | Path) -> list[dict[str, Any]]:
     A `:q3map` suffix on the name is stripped and the shader is compiler-only (`:817-820`).
     """
     p = Path(path)
-    tokens = _shader_tokens(p.read_text(errors="replace"))
+    return parse_shader_text(p.read_text(errors="replace"), str(p))
+
+
+def parse_shader_text(text: str, source: str) -> list[dict[str, Any]]:
+    """`parse_shader_file` for script text already in hand, such as a member of a pk3.
+
+    `source` stands in for the file path in errors and in each shader's `file`.
+    """
+    p = source
+    tokens = _shader_tokens(text)
     out: list[dict[str, Any]] = []
     i = 0
 
@@ -1042,7 +1052,7 @@ def parse_shader_file(path: str | Path) -> list[dict[str, Any]]:
         out.append(
             {
                 "name": name,
-                "file": str(p),
+                "file": p,
                 "line": line,
                 "compiler_only": compiler_only,
                 "directives": [t.lower() for t in body],
@@ -1093,20 +1103,83 @@ def _draws_nothing(shader: dict) -> str | None:
     return None
 
 
+#: Image types a shader name with no script can resolve to: a bare texture image of that name
+#: is what both q3map2 and the renderer fall back to.
+IMAGE_EXTENSIONS = ("tga", "jpg", "jpeg", "png")
+
+
+def basegame_index(dirs: list[str | Path], skip_prefix: str = "") -> dict[str, Any]:
+    """What the base game itself defines: shaders from its scripts, and texture images.
+
+    Read from the `.pk3` archives in each directory, because a base game ships almost everything
+    inside them and a loose-file scan sees none of it. Loose files are left out on purpose: in a
+    game directory they are usually the mapper's own work in progress, not the game's.
+
+    Archives whose name starts with `skip_prefix` (the map's own name) are skipped, so a package
+    the packer wrote into the game directory is not mistaken for the base game.
+
+    Keys are lowercased, because the engine looks shaders and images up case-insensitively. No
+    archive order is applied: this answers "does the base game define it", which no order changes.
+    """
+    shaders: dict[str, dict] = {}
+    images: set[str] = set()
+    archives: list[str] = []
+    skipped: list[str] = []
+    errors: list[str] = []
+    for d in dirs:
+        root = Path(d)
+        if not root.is_dir():
+            errors.append(f"base game directory {root} does not exist")
+            continue
+        for pk3 in sorted(p for p in root.iterdir() if p.suffix.lower() == ".pk3"):
+            if skip_prefix and pk3.name.lower().startswith(skip_prefix.lower()):
+                skipped.append(str(pk3))
+                continue
+            archives.append(str(pk3))
+            try:
+                with zipfile.ZipFile(pk3) as z:
+                    for info in z.infolist():
+                        name = info.filename.replace("\\", "/")
+                        low = name.lower()
+                        stem, _, ext = low.rpartition(".")
+                        if low.startswith("scripts/") and ext == "shader":
+                            try:
+                                text = z.read(info).decode("utf-8", errors="replace")
+                                parsed = parse_shader_text(text, f"{pk3}:{name}")
+                            except OptimizeError as e:
+                                errors.append(str(e))
+                                continue
+                            for shader in parsed:
+                                shaders.setdefault(shader["name"].lower(), shader)
+                        elif stem and ext in IMAGE_EXTENSIONS:
+                            images.add(stem)
+            except (zipfile.BadZipFile, OSError) as e:
+                errors.append(f"{pk3}: {e}")
+    return {
+        "shaders": shaders,
+        "images": images,
+        "archives": archives,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
 def shader_audit(
     map_path: str | Path,
     shader_dirs: list[str | Path],
     profile_id: str | None = None,
+    basegame_dirs: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Missing, unused, shadowing and non-drawing shaders (§6.3).
 
     Four reports, and the difference between them matters:
 
     `SHADER_MISSING`
-        The map references a name that none of `shader_dirs` defines. Stated as a measurement
-        over the directories given, not as a claim that the shader does not exist — a bare
-        texture image with no shader block is perfectly legal, and the base game's own scripts
-        are only in scope if they were passed in.
+        The map references a name that none of `shader_dirs` defines and, when `basegame_dirs`
+        is given, that the base game's archives neither define as a shader nor ship as a texture
+        image (`basegame_index`). Stated as a measurement over what was scanned, not as a claim
+        that the shader does not exist. A name the base game provides is listed in
+        `from_basegame` instead: it works on any server and need not ship.
 
     `SHADER_UNREFERENCED`
         Defined but never named by this map. Informational: a shared script legitimately holds
@@ -1117,7 +1190,9 @@ def shader_audit(
         `packaging.reserved_shader_prefixes` — this module has no idea which game it is serving
         — and inherit the profile's own confidence, so an unverified prefix list cannot produce
         a hard failure. Shipping such a shader overrides it for every other map on the server,
-        which is the classic "works for me, broken on the server" bug.
+        which is the classic "works for me, broken on the server" bug. With `basegame_dirs`, a
+        shipped shader whose name the base game also defines is reported too, as verified
+        whatever the prefix list says: that is the collision itself, not a guess at it.
 
         `shader_dirs` should therefore be **the scripts this map ships**, not the game's own.
         Pointed at the base game's script directory this check fires on every base shader,
@@ -1163,23 +1238,43 @@ def shader_audit(
                     continue
                 definitions[name] = shader
 
+    base = basegame_index(list(basegame_dirs or []), skip_prefix=Path(map_path).stem)
+    parse_errors += base["errors"]
     reserved, reserved_confidence = _reserved_prefixes(profile_id)
     findings: list[dict] = []
 
-    missing = sorted(n for n in referenced if n not in definitions)
+    def in_basegame(name: str) -> bool:
+        return name.lower() in base["shaders"] or name.lower() in base["images"]
+
+    from_basegame = sorted(n for n in referenced if n not in definitions and in_basegame(n))
+    missing = sorted(n for n in referenced if n not in definitions and not in_basegame(n))
+    scanned = f"{len(files)} shader script(s)" + (
+        f" and {len(base['archives'])} base-game archive(s)" if base["archives"] else ""
+    )
     for name in missing:
         findings.append(
             _finding(
                 "SHADER_MISSING",
                 "warning",
                 f"{referenced[name]} surface(s) reference {name}, which none of the "
-                f"{len(files)} shader script(s) scanned define. That is legal if a plain texture "
-                "image of that name exists, or if the definition lives in a script outside the "
-                "directories given.",
+                f"{scanned} scanned define. That is legal if a plain texture image of that name "
+                "ships with the map, or if the definition lives somewhere not scanned.",
                 "verified",
-                source=f"map references versus {len(files)} shader script(s)",
+                source=f"map references versus {scanned}",
                 fix_hint="add the shader, fix the name, or pass the directory that defines it",
                 detail={"shader": name, "surfaces": referenced[name]},
+            )
+        )
+    if from_basegame:
+        findings.append(
+            _finding(
+                "SHADER_FROM_BASEGAME",
+                "info",
+                f"{len(from_basegame)} referenced shader(s) come from the base game (for example "
+                f"{', '.join(from_basegame[:5])}); every server has them, so they need not ship",
+                "verified",
+                source=f"{len(base['archives'])} base-game archive(s)",
+                detail={"shaders": from_basegame[:200], "count": len(from_basegame)},
             )
         )
 
@@ -1198,17 +1293,39 @@ def shader_audit(
             )
         )
 
+    collides = {n for n in definitions if n.lower() in base["shaders"]}
     shadowing = sorted(
-        n
-        for n in definitions
-        if any(n.lower().startswith(f"{SHADER_NAME_PREFIX}{p}") for p in reserved)
+        collides
+        | {
+            n
+            for n in definitions
+            if any(n.lower().startswith(f"{SHADER_NAME_PREFIX}{p}") for p in reserved)
+        }
     )
     for name in shadowing:
+        here = Path(definitions[name]["file"]).name
+        if name in collides:
+            theirs = base["shaders"][name.lower()]["file"]
+            findings.append(
+                _finding(
+                    "SHADER_SHADOWS_BASEGAME",
+                    "error",
+                    f"{name} is defined in {here} and also by the base game ({theirs}); one of "
+                    "the two is silently ignored, and if it is the base game's, the change "
+                    "reaches every other map on the server",
+                    "verified",
+                    source=f"shader definitions versus {len(base['archives'])} base-game "
+                    "archive(s)",
+                    fix_hint="rename the shader under a directory named for this map",
+                    detail={"shader": name, "file": definitions[name]["file"], "basegame": theirs},
+                )
+            )
+            continue
         findings.append(
             _finding(
                 "SHADER_SHADOWS_BASEGAME",
                 "error",
-                f"{name} is defined in {Path(definitions[name]['file']).name} but sits under a "
+                f"{name} is defined in {here} but sits under a "
                 "path the base game owns; shipping it overrides that shader for every other map "
                 "on the server",
                 reserved_confidence,
@@ -1302,9 +1419,15 @@ def shader_audit(
         "referenced": len(referenced),
         "reference_counts": dict(sorted(referenced.items())),
         "missing": missing,
+        "from_basegame": from_basegame,
         "unreferenced": unused,
         "shadowing_basegame": shadowing,
         "reserved_prefixes": sorted(reserved),
+        "basegame_dirs": [str(d) for d in basegame_dirs or []],
+        "basegame_archives": base["archives"],
+        "basegame_archives_skipped": base["skipped"],
+        "basegame_definitions": len(base["shaders"]),
+        "basegame_images": len(base["images"]),
         "findings": _sorted(findings),
         "summary": _summarize(findings),
         "patches_not_scanned": patches,  # kept for compatibility; patches ARE scanned now
@@ -1313,7 +1436,10 @@ def shader_audit(
             "(map.cpp:1009, patch.cpp:207); the .map stores them without it.",
             "'Missing' means 'not defined in the directories scanned', which is a measurement, "
             "not proof the shader does not exist.",
-            "References are counted from brush faces only; the binding exposes no patch shader.",
+            "References are counted from brush faces and patches.",
+            "Base-game shaders are never reported on themselves: they answer 'is it defined' "
+            "and 'does a shipped shader collide', and the draws-nothing checks see only the "
+            "map's own scripts.",
         ],
     }
 
