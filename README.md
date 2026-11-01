@@ -159,6 +159,22 @@ compiling, then results are copied back. You do not have to do anything except s
 The consequence to expect: compiling a map under `/home` is slower than compiling one already on
 `/mnt/c`, because of the staging copy.
 
+### Testing an ET map in the engine
+
+`pack_pk3` writes `<map>_autopacked.pk3` next to the folder that holds `maps/`. Put it in an
+`etmain/` under a folder of your choosing and point the server's home there. ET: Legacy's home
+folder is `~/.etlegacy`, not the current directory, so pass `+set fs_homepath`. Pass
+`+set dedicated 1` too: the default, 2, advertises the server to the public master servers.
+
+```sh
+mkdir -p ~/etl-test/etmain && cp mymap_autopacked.pk3 ~/etl-test/etmain/
+etlded +set dedicated 1 +set fs_homepath ~/etl-test +set fs_basepath /path/to/etlegacy \
+       +set sv_pure 0 +set developer 1 +set logfile 2 +devmap mymap
+```
+
+The log is written to `~/etl-test/legacy/etconsole.log`. "Can't find mapscripts/mymap.script" is
+expected: the game looks there first, then in `maps/`.
+
 ## Connect an MCP client
 
 The server speaks JSON-RPC on stdio.
