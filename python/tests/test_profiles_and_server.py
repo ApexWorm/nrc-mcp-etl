@@ -9,6 +9,7 @@ which prevents a repeat is actually in place, not just documented.
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 from nrc_mcp import profiles, tasks
@@ -266,3 +267,17 @@ def test_resource_uris_are_game_agnostic():
     text = server.describe_surface()
     assert "nrc://profile/" in text
     assert "urt://" not in text
+
+
+def test_the_etl_profile_lists_the_keys_every_entity_accepts():
+    """game/g_spawn.c fields[]: the engine parses these for any classname."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    block = profiles.load("etl")["key_blocks"]["engine_fields"]
+    assert block["applies_to_all"] is True
+    keys = {k["name"]: k for k in block["keys"]}
+    assert {"angle", "angles", "targetname", "target", "scriptName", "spawnflags"} <= set(keys)
+    for k in block["keys"]:
+        assert k["type"] and k["confidence"] == "verified", k
+        assert re.fullmatch(r"game/g_spawn\.c:\d+", k["locus"]), k
+    assert len(keys) == len(block["keys"]), "one entry per key"

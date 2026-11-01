@@ -293,6 +293,80 @@ roles:
 # for collision, and func_explosive stays `breakable` (see focus:).
 # ---------------------------------------------------------------------------
 
+key_blocks:
+  # The keys every entity accepts: game/g_spawn.c's fields[] table (lines 153-243), which
+  # G_ParseField matches for any classname without regard to case (g_spawn.c:749). The
+  # gamepack lists few of them per class (team spawns list none), so without this block every
+  # angle, targetname or scriptname would read as unknown. Read by profiles.declared_keys on
+  # entity-tools, which adds an applies_to_all block to every entity.
+  engine_fields:
+    applies_to_all: true
+    # G_ParseField compares with Q_stricmp, so "scriptname" is scriptName (g_spawn.c:749).
+    case_insensitive: true
+    confidence: verified
+    source: etlegacy_source
+    note: "game/g_spawn.c fields[] (ET: Legacy v2.86.2)"
+    keys:
+      - {name: classname, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:155"}
+      - {name: origin, type: vec3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:156"}
+      - {name: model, type: model, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:157"}
+      - {name: model2, type: model, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:158"}
+      - {name: spawnflags, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:159"}
+      - {name: eflags, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:160"}
+      - {name: svflags, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:161"}
+      - {name: maxs, type: vec3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:162"}
+      - {name: mins, type: vec3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:163"}
+      - {name: speed, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:164"}
+      - {name: closespeed, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:165"}
+      - {name: target, type: target, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:166"}
+      - {name: targetname, type: targetname, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:167"}
+      - {name: message, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:168"}
+      - {name: popup, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:169", note: "fills message, like message and book"}
+      - {name: book, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:170", note: "fills message, like message and popup"}
+      - {name: team, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:171"}
+      - {name: wait, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:172"}
+      - {name: random, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:173"}
+      - {name: count, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:174"}
+      - {name: health, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:175"}
+      - {name: light, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:176", note: "F_IGNORE: the game skips it; q3map2 reads it as light intensity"}
+      - {name: dmg, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:177"}
+      - {name: angles, type: angles3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:178"}
+      - {name: angle, type: angle, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:179", note: "F_ANGLEHACK: sets the yaw of angles"}
+      - {name: duration, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:181"}
+      - {name: rotate, type: vec3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:182"}
+      - {name: degrees, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:184", note: "fills angle"}
+      - {name: time, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:185", note: "fills speed"}
+      - {name: skin, type: skin, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:188"}
+      - {name: _color, type: color3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:191"}
+      - {name: color, type: color3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:192"}
+      - {name: stylestring, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:193"}
+      - {name: shader, type: texture, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:195"}
+      - {name: key, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:198"}
+      - {name: harc, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:201"}
+      - {name: varc, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:202"}
+      - {name: delay, type: float, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:205"}
+      - {name: radius, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:206"}
+      - {name: missionlevel, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:209"}
+      - {name: start_size, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:211"}
+      - {name: end_size, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:212"}
+      - {name: shard, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:214", note: "fills count"}
+      - {name: spawnitem, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:216"}
+      - {name: track, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:218"}
+      - {name: scriptName, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:220"}
+      - {name: shortname, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:222", note: "fills message"}
+      - {name: constages, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:223"}
+      - {name: desstages, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:224"}
+      - {name: partofstage, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:225"}
+      - {name: override, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:226", note: "fills spawnitem (the trigger_objective_info override text)"}
+      - {name: damageparent, type: string, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:228"}
+      - {name: numPlayers, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:230"}
+      - {name: contents, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:232"}
+      - {name: clipmask, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:233"}
+      - {name: count2, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:234"}
+      - {name: baseAngle, type: angles3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:236"}
+      - {name: baseOrigin, type: vec3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:237"}
+      - {name: id, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:240"}
+
 enums:
   leakType:
     confidence: verified
