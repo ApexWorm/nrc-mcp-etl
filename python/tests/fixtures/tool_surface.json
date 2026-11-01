@@ -84,7 +84,7 @@
     "signature": "(cell: 'float' = 16, profile_id: 'str | None' = None) -> 'dict'"
   },
   "pack_pk3": {
-    "doc": "Build a release archive for a compiled BSP with `q3map2 -pk3` (\u00a76.4).\n\nThe packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a\nresource that is not on disk, so the map would show missing content on a server even\nthough it compiled. That is reported as a failure whatever the exit code.",
+    "doc": "Build a release archive for a compiled BSP with `q3map2 -pk3` (\u00a76.4).\n\nThe packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a\nresource that is not on disk, so the map would show missing content on a server even\nthough it compiled. That is reported as a failure whatever the exit code.\n\nThe archive is then fixed up from the active profile: companion files and the arena that\nsit beside the map are added, files the base game already ships are dropped, and it is\nwritten next to the folder that holds `maps/`, never into the game install.",
     "signature": "(bsp: 'str', complevel: 'int | None' = None, png: 'bool' = False) -> 'dict'"
   },
   "playable_space_diff": {

@@ -793,3 +793,125 @@ def test_packer_text_survives_output_that_is_not_json():
         {"stdout": "Saved to /tmp/a.pk3\n", "stderr": ""}
     )
     assert pack._packer_text({"stdout": "", "stderr": ""}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Fixing up what the packer wrote
+# ---------------------------------------------------------------------------
+
+_PACKAGING = {
+    "basegame": "basedir",
+    "arena": {"directory": "scripts", "extension": "arena"},
+    "companions": [
+        {"path": "maps/{map}.script", "required": True},
+        {"path": "levelshots/{map}_cc.tga", "any_extension": ["png", "jpg"]},
+        {"path": "maps/{map}.objdata"},
+    ],
+}
+
+
+@pytest.fixture
+def packer(tmp_path, monkeypatch):
+    """A fake game install and a fake q3map2 that, like the real one, packs into the install."""
+    install = tmp_path / "install"
+    (install / "basedir").mkdir(parents=True)
+    make_pk3(
+        install / "basedir" / "pak0.pk3",
+        ["textures/base/wall.TGA", "maps/nrcroom.bsp", "scripts/shared.shader"],
+    )
+    work = tmp_path / "work"
+    (work / "maps").mkdir(parents=True)
+    bsp = work / "maps" / "nrcroom.bsp"
+    bsp.write_bytes(b"IBSP")
+    monkeypatch.setenv("NRC_FS_BASEPATH", str(install))
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": _PACKAGING})
+    packed = ["maps/nrcroom.bsp", "textures/base/wall.tga", "textures/mine/door.tga"]
+
+    def fake_q3map2(args, target, timeout=1800):
+        out = install / f"{target.stem}{pack.SUCCESS_SUFFIX}"
+        make_pk3(out, packed)
+        return {"ok": True, "returncode": 0, "stdout": f"Saved to {out}\n", "stderr": ""}
+
+    monkeypatch.setattr(pack, "_q3map2", fake_q3map2)
+    return {"install": install, "work": work, "bsp": bsp, "packed": packed}
+
+
+def names(pk3) -> list[str]:
+    with zipfile.ZipFile(pk3) as z:
+        return sorted(z.namelist())
+
+
+def test_pack_pk3_lands_next_to_the_maps_folder_never_in_the_install(packer):
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["ok"]
+    assert r["packages"] == [str(packer["work"] / f"nrcroom{pack.SUCCESS_SUFFIX}")]
+    assert not list(packer["install"].glob("*.pk3")), "nothing may be left in the game install"
+
+
+def test_pack_pk3_adds_the_companions_and_arena_beside_the_map(packer):
+    work = packer["work"]
+    (work / "maps" / "nrcroom.script").write_text("game_manager {}")
+    (work / "scripts").mkdir()
+    (work / "scripts" / "nrcroom.arena").write_text("{}")
+    (work / "levelshots").mkdir()
+    (work / "levelshots" / "nrcroom_cc.jpg").write_bytes(b"jpg")  # an accepted alternative
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert sorted(r["added_companions"]) == [
+        "levelshots/nrcroom_cc.jpg",
+        "maps/nrcroom.script",
+        "scripts/nrcroom.arena",
+    ]
+    assert {"maps/nrcroom.script", "scripts/nrcroom.arena"} <= set(names(r["packages"][0]))
+    assert "maps/nrcroom.objdata" not in names(r["packages"][0]), "absent files are not invented"
+
+
+def test_pack_pk3_does_not_add_a_companion_the_packer_already_packed(packer, monkeypatch):
+    packer["packed"].append("Maps/NRCROOM.script")
+    (packer["work"] / "maps" / "nrcroom.script").write_text("x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert "maps/nrcroom.script" not in r["added_companions"]
+    assert [n.lower() for n in names(r["packages"][0])].count("maps/nrcroom.script") == 1
+
+
+def test_pack_pk3_drops_what_the_base_game_ships_and_says_so(packer):
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == ["textures/base/wall.tga"], "matched without regard to case"
+    contents = names(r["packages"][0])
+    assert "textures/mine/door.tga" in contents
+    assert "maps/nrcroom.bsp" in contents, "the map's own BSP always ships"
+
+
+def test_pack_pk3_keeps_base_game_files_when_no_base_path_is_set(packer, monkeypatch):
+    monkeypatch.delenv("NRC_FS_BASEPATH")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+    assert "textures/base/wall.tga" in names(r["packages"][0])
+
+
+def test_pack_pk3_without_a_profile_only_moves_the_archive(packer):
+    (packer["work"] / "maps" / "nrcroom.script").write_text("x")
+    r = pack.pack_pk3(packer["bsp"])
+    assert r["added_companions"] == [] and r["dropped_basegame"] == []
+    assert names(r["packages"][0]) == sorted(packer["packed"])
+    assert not list(packer["install"].glob("*.pk3"))
+
+
+def test_pack_pk3_for_a_map_inside_the_install_goes_to_out(packer, monkeypatch, tmp_path):
+    inside = packer["install"] / "basedir" / "maps"
+    inside.mkdir()
+    bsp = inside / "nrcroom.bsp"
+    bsp.write_bytes(b"IBSP")
+    monkeypatch.setattr(pack, "repo_root", lambda: tmp_path / "repo")
+    r = pack.pack_pk3(bsp, profile_id="test")
+    assert r["packages"] == [
+        str(tmp_path / "repo" / "out" / "nrcroom" / f"nrcroom{pack.SUCCESS_SUFFIX}")
+    ]
+    assert not list(packer["install"].rglob(f"*{pack.SUCCESS_SUFFIX}"))
+
+
+def test_pack_pk3_clears_a_stale_failure_marker_before_packing(packer):
+    stale = packer["work"] / f"nrcroom{pack.FAILURE_SUFFIX}"
+    stale.write_bytes(b"PK\x03\x04")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["ok"] and r["failed_packages"] == []
+    assert not stale.exists()

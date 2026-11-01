@@ -12,6 +12,7 @@ from .. import pack as packmod
 from ..runtime import (
     SESSION,
     _require_profile,
+    active_profile,
     tool,
 )
 
@@ -23,9 +24,15 @@ def pack_pk3(bsp: str, complevel: int | None = None, png: bool = False) -> dict:
     The packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a
     resource that is not on disk, so the map would show missing content on a server even
     though it compiled. That is reported as a failure whatever the exit code.
+
+    The archive is then fixed up from the active profile: companion files and the arena that
+    sit beside the map are added, files the base game already ships are dropped, and it is
+    written next to the folder that holds `maps/`, never into the game install.
     """
     try:
-        return packmod.pack_pk3(bsp, complevel=complevel, png=png)
+        return packmod.pack_pk3(
+            bsp, complevel=complevel, png=png, profile_id=active_profile() or None
+        )
     except packmod.PackError as e:
         raise ToolError(str(e)) from e
 
