@@ -96,8 +96,15 @@ def solid_commit(
     grid: int | None = None,
     target_classname: str = "worldspawn",
     remember: bool = True,
+    new_entity: bool = False,
+    target_entity: int | None = None,
 ) -> dict:
     """Compile a Solid IR tree and add the brushes to the open map.
+
+    The brushes go to the first entity of `target_classname` (created if there is none), to a
+    fresh one with `new_entity` - needed for a second door, trigger or objective of a class -
+    or to entity `target_entity` by index. The result's `entity` says which; give it keys with
+    `entity_set_keys`.
 
     `textures` picks shaders per face direction and can make the brushes detail; `solid_help`
     lists its keys (`default`, `top`, `bottom`, `north`/`south`/`east`/`west`, `scale`,
@@ -115,7 +122,12 @@ def solid_commit(
     m = SESSION.require()
     k = _kernel()
     g = grid if grid is not None else SESSION.grid
-    result = k.solid_commit(m, ir, textures, g, target_classname, False, label)
+    try:
+        result = k.solid_commit(
+            m, ir, textures, g, target_classname, False, label, new_entity, target_entity
+        )
+    except ValueError as e:
+        raise ToolError(str(e)) from e
 
     if remember and SESSION.path is not None:
         try:

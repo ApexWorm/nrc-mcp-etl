@@ -1177,7 +1177,7 @@ fn solid_compile<'py>(
 /// `dry_run` compiles and reports without touching the map, which is what `solid_preview`
 /// uses. Nothing is written to disk here regardless — that still needs an explicit `save`.
 #[pyfunction]
-#[pyo3(signature = (map, ir, textures=None, grid=1, target_classname="worldspawn", dry_run=false, label=None))]
+#[pyo3(signature = (map, ir, textures=None, grid=1, target_classname="worldspawn", dry_run=false, label=None, new_entity=false, target_entity=None))]
 #[allow(clippy::too_many_arguments)]
 fn solid_commit<'py>(
     py: Python<'py>,
@@ -1188,7 +1188,12 @@ fn solid_commit<'py>(
     target_classname: &str,
     dry_run: bool,
     label: Option<String>,
+    new_entity: bool,
+    target_entity: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    if new_entity && target_entity.is_some() {
+        return Err(err("pass new_entity or target_entity, not both"));
+    }
     let node = node_from_dict(ir, 0)?;
     let evaluated = nrc_solid::ir::evaluate(&node).map_err(|e| err(e.to_string()))?;
     let spec = texture_spec_from(textures)?;
@@ -1232,21 +1237,44 @@ fn solid_commit<'py>(
             .push(format!("// nrc-mcp {} ({count} brushes)", node.kind()));
     }
 
-    let target = m
-        .inner
-        .entities
-        .iter_mut()
-        .find(|e| e.classname() == target_classname);
-    match target {
-        Some(e) => e.prims.extend(prims),
-        None => {
-            let mut e = nrc_core::model::Entity::default();
-            e.set("classname", target_classname);
-            e.prims = prims;
-            m.inner.entities.push(e);
-            d.set_item("created_entity", target_classname)?;
+    // Which entity receives the brushes: a named one, a new one, or the first of the class
+    // (created if there is none). A second entity of a class needs `new_entity`, since the
+    // first-of-class rule would otherwise pile every door into one.
+    let index = if let Some(i) = target_entity {
+        let n = m.inner.entities.len();
+        let e = m.inner.entities.get_mut(i).ok_or_else(|| {
+            err(format!(
+                "no entity {i}: this map has {n} (0 to {})",
+                n.saturating_sub(1)
+            ))
+        })?;
+        e.prims.extend(prims);
+        i
+    } else {
+        let found = if new_entity {
+            None
+        } else {
+            m.inner
+                .entities
+                .iter()
+                .position(|e| e.classname() == target_classname)
+        };
+        match found {
+            Some(i) => {
+                m.inner.entities[i].prims.extend(prims);
+                i
+            }
+            None => {
+                let mut e = nrc_core::model::Entity::default();
+                e.set("classname", target_classname);
+                e.prims = prims;
+                m.inner.entities.push(e);
+                d.set_item("created_entity", target_classname)?;
+                m.inner.entities.len() - 1
+            }
         }
-    }
+    };
+    d.set_item("entity", index)?;
     d.set_item("committed", true)?;
     d.set_item("map_brushes_now", m.inner.brush_count())?;
     Ok(d)
