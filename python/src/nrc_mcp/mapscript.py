@@ -42,6 +42,9 @@ class ScriptSyntaxError(ValueError):
 class Token:
     text: str
     line: int
+    #: Character offsets into the text, end exclusive (a quoted token includes its quotes).
+    start: int = 0
+    end: int = 0
 
 
 @dataclass
@@ -57,6 +60,9 @@ class Event:
     params: list[str]
     line: int
     actions: list[Action] = field(default_factory=list)
+    #: Offsets of the event's name and of the end of its closing brace, for editing in place.
+    start: int = 0
+    end: int = 0
 
 
 @dataclass
@@ -64,6 +70,10 @@ class Block:
     name: str
     line: int
     events: list[Event] = field(default_factory=list)
+    #: Offsets of the block's first token, of its closing brace, and of that brace's end.
+    start: int = 0
+    close: int = 0
+    end: int = 0
 
     def has_event(self, name: str, params: list[str] | None = None) -> bool:
         want = [p.lower() for p in params] if params is not None else None
@@ -95,14 +105,14 @@ def tokenize(text: str) -> list[Token]:
         elif c == '"':
             end = text.find('"', i + 1)
             end = n if end < 0 else end
-            out.append(Token(text[i + 1 : end], line))
+            out.append(Token(text[i + 1 : end], line, i, min(end + 1, n)))
             line += text.count("\n", i, end)
             i = end + 1
         else:
             start = i
             while i < n and not text[i].isspace():
                 i += 1
-            out.append(Token(text[start:i], line))
+            out.append(Token(text[start:i], line, start, i))
     return out
 
 
@@ -132,16 +142,18 @@ def parse(text: str, brace_actions: frozenset[str] = frozenset()) -> list[Block]
             raise ScriptSyntaxError("'}' found, but not expected", t.line)
         if brace(t, "{"):
             raise ScriptSyntaxError("'{' found, a name expected", t.line)
+        first = t
         if t.text.lower() == "entity":
             t = take("a name")
-        block = Block(t.text, t.line)
+        block = Block(t.text, t.line, start=first.start)
         if not brace(take("'{'"), "{"):
             raise ScriptSyntaxError(f"'{{' expected after {block.name!r}", t.line)
         while True:
             t = take("'}'")
             if brace(t, "}"):
+                block.close, block.end = t.start, t.end
                 break
-            event = Event(t.text.lower(), [], t.line)
+            event = Event(t.text.lower(), [], t.line, start=t.start)
             while not brace(t := take("'{'"), "{"):
                 event.params.append(t.text)
             while not brace(t := take("'}'"), "}"):
@@ -156,6 +168,7 @@ def parse(text: str, brace_actions: frozenset[str] = frozenset()) -> list[Block]
                         action.args.append(tokens[pos].text)
                         pos += 1
                 event.actions.append(action)
+            event.end = t.end
             block.events.append(event)
         blocks.append(block)
     return blocks
@@ -184,40 +197,12 @@ def script_path(spec: dict, map_path: str | Path) -> Path:
     return p.with_name(str(spec.get("file", "{map}.script")).format(map=p.stem))
 
 
-def check(profile_id: str, entities: list[dict], map_path: str | Path | None) -> list[Finding]:
-    """Findings for the open map's script. Nothing at all if the profile has no `mapscript:`."""
-    spec = profiles.load(profile_id).get("mapscript")
-    if not isinstance(spec, dict) or map_path is None:
-        return []
-    conf = str(spec.get("confidence", "unverified"))
-    source = f"profile {profile_id} mapscript ({spec.get('locus', '')})".replace(" ()", "")
-    path = script_path(spec, map_path)
+def brace_actions(spec: dict) -> frozenset[str]:
+    return frozenset(str(a).lower() for a in spec.get("brace_actions") or [])
 
-    def finding(code: str, asked: str, message: str, ents=(), hint: str = "", c: str = conf):
-        listed = [i for i in ents if i >= 0][:64]
-        return Finding(code, _severity(asked, c), message, c, source, listed, hint)
 
-    if not path.is_file():
-        return [
-            finding(
-                "MAPSCRIPT_MISSING",
-                str(spec.get("missing_severity", "warning")),
-                f"no map script at {path.name} beside the map; {spec.get('missing_note', '')}",
-                hint=f"create {path.name} next to the .map",
-            )
-        ]
-
-    try:
-        blocks = parse(
-            path.read_text(errors="replace"),
-            frozenset(str(a).lower() for a in spec.get("brace_actions") or []),
-        )
-    except ScriptSyntaxError as e:
-        return [finding("MAPSCRIPT_SYNTAX", "error", f"{path.name}: {e}; the game stops at load")]
-
-    # Entities the script spawns itself are as real as the map's own, for names and blocks.
-    # Index -1 marks them; they are never listed in a finding.
-    entities = entities + _spawned(spec, blocks)
+def names(spec: dict, entities: list[dict]) -> dict[str, list[int]]:
+    """Block names the map's entities run, lowercased, with the entities that run each."""
     key = str(spec.get("block_key", "scriptname")).lower()
     named: dict[str, list[int]] = {}
     for e in entities:
@@ -232,6 +217,53 @@ def check(profile_id: str, entities: list[dict], map_path: str | Path | None) ->
                     named.setdefault(str(implied.get("name", "")).lower(), []).append(
                         int(e["index"])
                     )
+    return named
+
+
+def check(
+    profile_id: str,
+    entities: list[dict],
+    map_path: str | Path | None,
+    text: str | None = None,
+) -> list[Finding]:
+    """Findings for the open map's script. Nothing at all if the profile has no `mapscript:`.
+
+    `text` checks that script instead of the file on disk, for an edit not yet written.
+    """
+    spec = profiles.load(profile_id).get("mapscript")
+    if not isinstance(spec, dict) or map_path is None:
+        return []
+    conf = str(spec.get("confidence", "unverified"))
+    source = f"profile {profile_id} mapscript ({spec.get('locus', '')})".replace(" ()", "")
+    path = script_path(spec, map_path)
+
+    def finding(code: str, asked: str, message: str, ents=(), hint: str = "", c: str = conf):
+        listed = [i for i in ents if i >= 0][:64]
+        return Finding(code, _severity(asked, c), message, c, source, listed, hint)
+
+    if text is None and not path.is_file():
+        return [
+            finding(
+                "MAPSCRIPT_MISSING",
+                str(spec.get("missing_severity", "warning")),
+                f"no map script at {path.name} beside the map; {spec.get('missing_note', '')}",
+                hint=f"create {path.name} next to the .map",
+            )
+        ]
+
+    try:
+        blocks = parse(
+            path.read_text(errors="replace") if text is None else text,
+            brace_actions(spec),
+        )
+    except ScriptSyntaxError as e:
+        return [finding("MAPSCRIPT_SYNTAX", "error", f"{path.name}: {e}; the game stops at load")]
+
+    # Entities the script spawns itself are as real as the map's own, for names and blocks.
+    # Index -1 marks them; they are never listed in a finding.
+    entities = entities + _spawned(spec, blocks)
+    key = str(spec.get("block_key", "scriptname")).lower()
+    named = names(spec, entities)
     by_name: dict[str, Block] = {}
     out: list[Finding] = []
     for b in blocks:
@@ -443,3 +475,137 @@ def _references(spec, live, entities, by_name, filename, finding) -> list[Findin
                 )
             )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Editing
+# ---------------------------------------------------------------------------
+#
+# Edits are spliced into the text at the offsets the parser recorded, so everything outside the
+# event or block being changed - comments, layout, other blocks - is left exactly as it was.
+
+
+class ScriptEditError(ValueError):
+    """An edit the engine could never accept, refused before anything is written."""
+
+
+def _word(text: str, what: str) -> str:
+    text = str(text).strip()
+    if not text or any(c.isspace() or c in '{}"' for c in text) or "//" in text:
+        raise ScriptEditError(f"{what} {text!r} must be one word, with no braces or quotes")
+    return text
+
+
+def validate_event(
+    spec: dict, block: str, event: str, params: list[str], actions: list[str]
+) -> None:
+    """Refuse what the engine stops on: unknown events and actions, and malformed lines."""
+    _word(block, "block name")
+    events = {str(e).lower() for e in spec.get("events") or []}
+    if events and str(event).lower() not in events:
+        raise ScriptEditError(
+            f"unknown event {event!r}; the profile lists: {', '.join(sorted(events))}"
+        )
+    for p in params:
+        _word(p, "event parameter")
+    known = {str(a).lower() for a in spec.get("actions") or []}
+    braced = brace_actions(spec)
+    for line in actions:
+        line = str(line).strip()
+        if not line or "\n" in line or "\r" in line:
+            raise ScriptEditError(f"each action is one non-empty line, got {line!r}")
+        name = line.split()[0].lower()
+        if known and name not in known:
+            raise ScriptEditError(f"unknown action {name!r} in {line!r}")
+        rest = line[len(name) :].strip()
+        if name in braced:
+            if not (rest.startswith("{") and rest.endswith("}")) or rest.count("{") != 1:
+                raise ScriptEditError(f"{name} takes its arguments as one {{ ... }} list: {line!r}")
+        elif "{" in rest or "}" in rest:
+            raise ScriptEditError(f"a brace in {line!r} would end the event early")
+        if rest.count('"') % 2:
+            raise ScriptEditError(f"unbalanced quote in {line!r}")
+
+
+def render_event(event: str, params: list[str], actions: list[str], indent: str = "\t") -> str:
+    head = " ".join([event.lower(), *params])
+    body = "".join(f"{indent}\t{a.strip()}\n" for a in actions)
+    return f"{head}\n{indent}{{\n{body}{indent}}}"
+
+
+def _find(blocks: list[Block], block: str) -> Block | None:
+    return next((b for b in blocks if b.name.lower() == block.lower()), None)
+
+
+def _find_event(b: Block, event: str, params: list[str]) -> Event | None:
+    want = [p.lower() for p in params]
+    return next(
+        (e for e in b.events if e.name == event.lower() and [p.lower() for p in e.params] == want),
+        None,
+    )
+
+
+def _indent_at(text: str, offset: int) -> str:
+    line_start = text.rfind("\n", 0, offset) + 1
+    lead = text[line_start:offset]
+    return lead if lead.strip() == "" else ""
+
+
+def set_event(
+    text: str, spec: dict, block: str, event: str, params: list[str], actions: list[str]
+) -> tuple[str, str]:
+    """`text` with one event's actions set, and what was done: replaced, added or created."""
+    validate_event(spec, block, event, params, actions)
+    blocks = parse(text, brace_actions(spec))
+    b = _find(blocks, block)
+    if b is None:
+        new_block = f"{block}\n{{\n\t{render_event(event, params, actions)}\n}}\n"
+        if not text.strip():
+            return new_block, "created block"
+        return text.rstrip("\n") + "\n\n" + new_block, "created block"
+
+    e = _find_event(b, event, params)
+    if e is not None:
+        rendered = render_event(event, params, actions, _indent_at(text, e.start) or "\t")
+        return text[: e.start] + rendered + text[e.end :], "replaced event"
+
+    # A new event goes last in the block, a blank line after the one before it.
+    indent = (_indent_at(text, b.events[-1].start) if b.events else "") or "\t"
+    rendered = f"{indent}{render_event(event, params, actions, indent)}\n"
+    line_start = text.rfind("\n", 0, b.close) + 1
+    if text[line_start : b.close].strip():  # the brace shares its line with other text
+        line_start, rendered = b.close, "\n" + rendered
+    if b.events:
+        rendered = "\n" + rendered
+    return text[:line_start] + rendered + text[line_start:], "added event"
+
+
+def remove(
+    text: str, spec: dict, block: str, event: str | None = None, params: list[str] | None = None
+) -> str:
+    """`text` without one event, or without a whole block when `event` is None."""
+    blocks = parse(text, brace_actions(spec))
+    b = _find(blocks, block)
+    if b is None:
+        raise ScriptEditError(f"no block named {block!r}")
+    if event is None:
+        start, end = b.start, b.end
+    else:
+        e = _find_event(b, event, params or [])
+        if e is None:
+            label = " ".join([event, *(params or [])])
+            raise ScriptEditError(f"block {block!r} has no {label!r} event")
+        start, end = e.start, e.end
+    # Take the indentation before it and the line break after it, when they are its own.
+    line_start = text.rfind("\n", 0, start) + 1
+    if not text[line_start:start].strip():
+        start = line_start
+    nl = text.find("\n", end)
+    if nl >= 0 and not text[end:nl].strip():
+        end = nl + 1
+    # And one blank line, so removing a block or event leaves no gap of its own behind.
+    if text[:start].endswith("\n\n"):
+        start -= 1
+    elif text[end:].startswith("\n"):
+        end += 1
+    return text[:start] + text[end:]

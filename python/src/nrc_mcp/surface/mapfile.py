@@ -488,6 +488,128 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
     }
 
 
+def _script_spec() -> tuple[str, dict, Path]:
+    """The active profile's map-script description and the open map's script path."""
+    SESSION.require()
+    if SESSION.path is None:
+        raise ToolError("the open map has no path on disk, so its script has no place to live")
+    pid = active_profile()
+    if not pid:
+        raise ToolError("no profile selected; set NRC_PROFILE")
+    try:
+        spec = profiles.load(pid).get("mapscript")
+    except profiles.ProfileError as e:
+        raise ToolError(_profile_error_text(e)) from e
+    if not isinstance(spec, dict):
+        raise ToolError(f"profile {pid} describes no map script; this game's maps carry none")
+    return pid, spec, mapscript.script_path(spec, SESSION.path)
+
+
+def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
+    """The script as blocks and events, which blocks run, and what the checker says."""
+    ents = SESSION.map.entities()
+    named = mapscript.names(spec, ents)
+    blocks = mapscript.parse(text, mapscript.brace_actions(spec)) if text.strip() else []
+    found = mapscript.check(pid, ents, SESSION.path, text=text)
+    return {
+        "path": str(path),
+        "exists": path.is_file(),
+        "blocks": [
+            {
+                "block": b.name,
+                "line": b.line,
+                "runs_for_entities": named.get(b.name.lower(), []),
+                "events": [
+                    {
+                        "event": " ".join([e.name, *e.params]),
+                        "line": e.line,
+                        "actions": [" ".join([a.name, *a.args]) for a in e.actions],
+                    }
+                    for e in b.events
+                ],
+            }
+            for b in blocks
+        ],
+        "summary": rules.summarize(found),
+        "findings": [f.as_dict() for f in found],
+    }
+
+
+def _write_script(path: Path, text: str) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8", newline="\n")
+    tmp.replace(path)
+
+
+@tool("map", "Show the map script")
+def script_show() -> dict:
+    """The open map's script: its blocks and events, which entities run each block, and findings.
+
+    For a game whose maps carry a script beside the `.map` (the profile's `mapscript:`). A block
+    with an empty `runs_for_entities` never runs: no entity names it. The findings are the same
+    ones `validate_profile` reports for the script.
+    """
+    pid, spec, path = _script_spec()
+    text = path.read_text(errors="replace") if path.is_file() else ""
+    try:
+        return _script_report(pid, spec, path, text)
+    except mapscript.ScriptSyntaxError as e:
+        raise ToolError(f"{path.name}: {e}; fix it by hand, the engine stops on it too") from e
+
+
+@tool("map", "Set a script event", writes=True, destructive=True, idempotent=True)
+def script_set_event(
+    block: str, event: str, actions: list[str], params: list[str] | None = None
+) -> dict:
+    """Set one event's actions in a block of the open map's script, creating what is missing.
+
+    `actions` are the event's lines in order, each one action with its arguments, e.g.
+    `["wait 50", "setautospawn \"Axis Bunker\" 0"]`. They replace the event's current actions;
+    the event, its block and the script file are created if they do not exist. `params` follow
+    the event name, as in `trigger open`. Everything else in the file - comments, layout,
+    other blocks - is left exactly as it was.
+
+    Refused before anything is written: an event or action the profile does not list, and a
+    line the engine would misparse. Written, then reported in `findings`: references that
+    resolve to nothing yet, since the entity may be placed next. The script is written
+    immediately; it is a separate file from the `.map`, which still needs `map_save`.
+    """
+    pid, spec, path = _script_spec()
+    text = path.read_text(errors="replace") if path.is_file() else ""
+    try:
+        new, did = mapscript.set_event(text, spec, block, event, list(params or []), actions)
+    except mapscript.ScriptEditError as e:
+        raise ToolError(f"refused, nothing written: {e}") from e
+    except mapscript.ScriptSyntaxError as e:
+        raise ToolError(f"{path.name} does not parse ({e}); fix it by hand first") from e
+    _write_script(path, new)
+    return {"did": did, **_script_report(pid, spec, path, new)}
+
+
+@tool("map", "Remove from the map script", writes=True, destructive=True, idempotent=False)
+def script_remove(block: str, event: str | None = None, params: list[str] | None = None) -> dict:
+    """Remove one event from a block of the open map's script, or the whole block.
+
+    Without `event`, the whole block goes. Everything else in the file is left as it was. The
+    script is written immediately.
+    """
+    pid, spec, path = _script_spec()
+    if not path.is_file():
+        raise ToolError(f"there is no script at {path} to remove anything from")
+    text = path.read_text(errors="replace")
+    try:
+        new = mapscript.remove(text, spec, block, event, list(params or []))
+    except mapscript.ScriptEditError as e:
+        raise ToolError(f"nothing removed: {e}") from e
+    except mapscript.ScriptSyntaxError as e:
+        raise ToolError(f"{path.name} does not parse ({e}); fix it by hand first") from e
+    _write_script(path, new)
+    return {
+        "removed": " ".join([block, *([event] if event else []), *(params or [])]),
+        **_script_report(pid, spec, path, new),
+    }
+
+
 @tool("map", "Game profile summary")
 def profile_summary(profile_id: str | None = None) -> dict:
     """What the active game profile knows, and how much of it is verified.

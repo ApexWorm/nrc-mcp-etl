@@ -139,6 +139,8 @@ WRITERS = {
     "entity_place",
     "entity_set_keys",
     "entity_remove_keys",
+    "script_set_event",
+    "script_remove",
     "solid_commit",
     "solid_edit_param",
     "model_place",
@@ -152,7 +154,14 @@ WRITERS = {
 }
 
 #: Tools that can lose something that was already there.
-DESTRUCTIVE = {"map_save", "entity_set_keys", "entity_remove_keys", "task_run"}
+DESTRUCTIVE = {
+    "map_save",
+    "entity_set_keys",
+    "entity_remove_keys",
+    "script_set_event",
+    "script_remove",
+    "task_run",
+}
 
 
 def test_every_tool_carries_a_title_and_all_four_hints(listing):

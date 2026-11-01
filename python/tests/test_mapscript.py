@@ -354,3 +354,104 @@ def test_the_etl_profile_checks_a_small_map_end_to_end(tmp_path):
     found = mapscript.check(pid, entities, tmp_path / "m.map")
     assert [(f.code, f.severity) for f in found] == [("MAPSCRIPT_UNRESOLVED_REFERENCE", "error")]
     assert "missing_thing" in found[0].message
+
+
+# ---------------------------------------------------------------------------
+# Editing
+# ---------------------------------------------------------------------------
+
+EDITABLE = """// The gate and its trigger.
+game_manager
+{
+\tspawn
+\t{
+\t\twait 50   // let the map settle
+\t}
+}
+
+gate
+{
+\tdeath
+\t{
+\t\twait 10
+\t}
+}
+"""
+
+
+def test_the_parser_records_where_each_event_and_block_sits():
+    (gm, gate) = mapscript.parse(EDITABLE)
+    assert EDITABLE[gm.start : gm.end].startswith("game_manager") and EDITABLE[gm.end - 1] == "}"
+    (spawn,) = gm.events
+    assert EDITABLE[spawn.start : spawn.end].startswith("spawn")
+    assert EDITABLE[spawn.end - 1] == "}" and EDITABLE[gate.close] == "}"
+
+
+def test_setting_an_event_leaves_the_rest_of_the_file_alone():
+    new, did = mapscript.set_event(EDITABLE, SPEC, "game_manager", "spawn", [], ["wait 100"])
+    assert did == "replaced event"
+    assert new.startswith("// The gate and its trigger.\n")
+    assert "wait 100" in new and "let the map settle" not in new
+    assert new[new.index("\ngate\n") :] == EDITABLE[EDITABLE.index("\ngate\n") :]
+
+
+def test_an_added_event_and_block_can_be_removed_back_to_the_original():
+    added, did = mapscript.set_event(EDITABLE, SPEC, "gate", "trigger", ["open"], ["wait 5"])
+    assert did == "added event"
+    assert [e.name for e in mapscript.parse(added)[1].events] == ["death", "trigger"]
+    both, did = mapscript.set_event(added, SPEC, "door", "spawn", [], ["wait 1"])
+    assert did == "created block"
+    back = mapscript.remove(mapscript.remove(both, SPEC, "door"), SPEC, "gate", "trigger", ["open"])
+    assert back == EDITABLE
+
+
+def test_an_event_is_matched_by_its_parameters_without_regard_to_case():
+    added, _ = mapscript.set_event(EDITABLE, SPEC, "gate", "trigger", ["open"], ["wait 5"])
+    replaced, did = mapscript.set_event(added, SPEC, "GATE", "trigger", ["OPEN"], ["wait 6"])
+    assert did == "replaced event"
+    assert "\t\twait 5\n" not in replaced and replaced.count("\ttrigger") == 1
+
+
+def test_a_script_is_created_from_nothing():
+    new, did = mapscript.set_event("", SPEC, "game_manager", "spawn", [], ["wait 50"])
+    assert did == "created block"
+    assert new == "game_manager\n{\n\tspawn\n\t{\n\t\twait 50\n\t}\n}\n"
+
+
+@pytest.mark.parametrize(
+    ("block_name", "event", "actions", "message"),
+    [
+        ("gate", "explode", ["wait 1"], "unknown event"),
+        ("gate", "spawn", ["teleport 1"], "unknown action"),
+        ("gate", "spawn", ["wait 1 }"], "would end the event"),
+        ("gate", "spawn", ['alertentity "gate'], "unbalanced quote"),
+        ("gate", "spawn", ["create origin 0"], "one { ... } list"),
+        ("gate", "spawn", ["wait 1\nwait 2"], "one non-empty line"),
+        ("my gate", "spawn", ["wait 1"], "one word"),
+    ],
+)
+def test_an_edit_the_engine_would_refuse_is_refused(block_name, event, actions, message):
+    with pytest.raises(mapscript.ScriptEditError, match=message):
+        mapscript.set_event(EDITABLE, SPEC, block_name, event, [], actions)
+
+
+def test_a_brace_action_takes_its_list_on_one_line():
+    new, _ = mapscript.set_event(
+        EDITABLE, SPEC, "gate", "spawn", [], ['create { "classname" "x" "origin" "0 0 0" }']
+    )
+    (action,) = mapscript.parse(new, frozenset({"create"}))[1].events[-1].actions
+    assert action.args == ["classname", "x", "origin", "0 0 0"]
+
+
+def test_removing_what_is_not_there_says_so():
+    with pytest.raises(mapscript.ScriptEditError, match="no block"):
+        mapscript.remove(EDITABLE, SPEC, "nothing")
+    with pytest.raises(mapscript.ScriptEditError, match="no 'trigger open' event"):
+        mapscript.remove(EDITABLE, SPEC, "gate", "trigger", ["open"])
+
+
+def test_check_can_judge_an_edit_before_it_is_written(tmp_path, spec):
+    text = block("game_manager", ("spawn", ["alertentity nowhere"]))
+    found = mapscript.check("test", [ent(0, "manager")], tmp_path / "m.map", text=text)
+    assert [f.code for f in found] == ["MAPSCRIPT_UNRESOLVED_REFERENCE"]
+    assert not (tmp_path / "m.script").exists()

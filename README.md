@@ -328,7 +328,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-55 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+58 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -352,6 +352,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `brush_geometry` | Exact vertices and derived properties of one brush. |
 | `validate` | Geometry and file-format findings. |
 | `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
+| `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
 **Seeing it**
