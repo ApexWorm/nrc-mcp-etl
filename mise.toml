@@ -295,6 +295,11 @@ description = "Dump a .bsp to JSON for BSP introspection (§6.2)"
 usage       = 'arg "<bsp>" help="path to .bsp"'
 run         = "uv run python tools/q3map2.py --json-unpack -- {{arg(name='bsp')}}"
 
+[tasks."game:smoke"]
+description = "Load a packed map in the game's own engine and read its log (needs NRC_FS_BASEPATH)"
+# No usage spec: everything after `--` reaches the script (`-- map.pk3 --client`).
+run         = "uv run python tools/smoke.py"
+
 [tasks."corpus:import"]
 description = "Copy real .map sources (game install + upstream regression tests) into corpus/"
 run         = "uv run python tools/import_corpus.py"

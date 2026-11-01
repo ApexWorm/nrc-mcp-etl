@@ -175,6 +175,17 @@ etlded +set dedicated 1 +set fs_homepath ~/etl-test +set fs_basepath /path/to/et
 The log is written to `~/etl-test/legacy/etconsole.log`. "Can't find mapscripts/mymap.script" is
 expected: the game looks there first, then in `maps/`.
 
+Or let the repo do it, in a throwaway home folder, and read the log for you:
+
+```sh
+mise run game:smoke -- mymap_autopacked.pk3            # dedicated server: loads, script starts
+mise run game:smoke -- mymap_autopacked.pk3 --client   # also join as a spectator (needs a display or Xvfb)
+```
+
+It fails on any line meaning the game stopped (a `G_Error`, a crash), and lists the game's
+non-fatal complaints. Some errors only happen when a player connects - a map with no
+intermission point runs fine until then - so use `--client` before shipping.
+
 ## Connect an MCP client
 
 The server speaks JSON-RPC on stdio.

@@ -1,6 +1,6 @@
 {
   "name": "etl-ships-a-loadable-map",
-  "note": "An ET: Legacy map that has been loaded in etlded and played: two sealed rooms, one active spawn per team with its own team_WOLF_objective, a script_multiplayer whose game_manager sets respawn times and autospawns, a func_explosive the script destroys, a player clip pillar and an intermission point. It must validate clean under the ET profile; with --compile it must compile, pack with its script and arena inside and nothing the base game already ships, and pass the pre-ship check. The base-game half of the pk3 check needs NRC_FS_BASEPATH and skips without it.",
+  "note": "An ET: Legacy map that has been loaded in etlded and played: two sealed rooms, one active spawn per team with its own team_WOLF_objective, a script_multiplayer whose game_manager sets respawn times and autospawns, a func_explosive the script destroys, a player clip pillar and an intermission point. It must validate clean under the ET profile; with --compile it must compile, pack with its script and arena inside and nothing the base game already ships, and pass the pre-ship check. Last, the pk3 is loaded in ET: Legacy itself, server and client, the client joining as a spectator. The base-game half of the pk3 check and the engine load need NRC_FS_BASEPATH and an installed game, and skip without them.",
   "profile": "etl",
   "fixture_dir": "bench/tapes/fixtures/nrcroom",
   "map": "maps/nrcroom.map",
@@ -8,39 +8,63 @@
     {
       "tool": "map_open",
       "as": "open",
-      "args": {"path": "{work}"},
-      "expect": {"round_trip.identical": true}
+      "args": {
+        "path": "{work}"
+      },
+      "expect": {
+        "round_trip.identical": true
+      }
     },
     {
       "tool": "validate",
       "as": "geometry",
-      "expect": {"summary.error": 0}
+      "expect": {
+        "summary.error": 0
+      }
     },
     {
       "tool": "validate_profile",
       "as": "entities_and_script",
-      "expect": {"profile": "etl", "summary.error": 0, "summary.warning": 0}
+      "expect": {
+        "profile": "etl",
+        "summary.error": 0,
+        "summary.warning": 0
+      }
     },
     {
       "tool": "compile_map",
       "as": "compile",
       "needs_compile": true,
-      "args": {"preset": "iterate", "path": "{work}"},
-      "expect": {"ok": true}
+      "args": {
+        "preset": "iterate",
+        "path": "{work}"
+      },
+      "expect": {
+        "ok": true
+      }
     },
     {
       "tool": "pack_pk3",
       "as": "pack",
       "needs_compile": true,
-      "args": {"bsp": "{workspace}/maps/nrcroom.bsp"},
-      "expect": {"ok": true}
+      "args": {
+        "bsp": "{workspace}/maps/nrcroom.bsp"
+      },
+      "expect": {
+        "ok": true
+      }
     },
     {
       "tool": "ship_check",
       "as": "ship",
       "needs_compile": true,
-      "args": {"target": "{workspace}/maps/nrcroom.bsp"},
-      "expect": {"summary.error": 0, "summary.warning": 0}
+      "args": {
+        "target": "{workspace}/maps/nrcroom.bsp"
+      },
+      "expect": {
+        "summary.error": 0,
+        "summary.warning": 0
+      }
     }
   ],
   "invariants": [
@@ -48,8 +72,19 @@
       "name": "pk3_contents",
       "args": {
         "step": "pack",
-        "has": ["maps/nrcroom.bsp", "maps/nrcroom.script", "scripts/nrcroom.arena"],
+        "has": [
+          "maps/nrcroom.bsp",
+          "maps/nrcroom.script",
+          "scripts/nrcroom.arena"
+        ],
         "no_basegame": true
+      }
+    },
+    {
+      "name": "engine_loads",
+      "args": {
+        "step": "pack",
+        "client": true
       }
     }
   ]

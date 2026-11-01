@@ -859,6 +859,30 @@ def _pk3_contents(
     return Outcome("pk3_contents", not problems, detail)
 
 
+@invariant("engine_loads")
+def _engine_loads(check: Check, step: str = "", client: bool = False) -> Outcome:
+    """The package a pack step wrote loads in the game's own engine with nothing stopping it.
+
+    Skips, rather than fails, where there is no engine to ask: no compiler run, no `engine:`
+    section in the profile, no game install, no display for the client.
+    """
+    if not check.allow_compile:
+        return Outcome("engine_loads", True, "compiling not enabled for this run", skipped=True)
+    from . import engine  # noqa: PLC0415
+
+    packages = (check.results.get(step) or {}).get("packages") or []
+    if not packages:
+        return Outcome("engine_loads", False, f"step {step!r} produced no package")
+    try:
+        r = engine.smoke(packages[0], resolve_profile(check.profile_id), client=client)
+    except engine.EngineError as e:
+        return Outcome("engine_loads", True, f"no engine to ask: {e}", skipped=True)
+    bad = [f"{run['level']}: {line}" for run in r["runs"] for line in run["fatal"]]
+    bad += [f"{run['level']}: the map never loaded" for run in r["runs"] if not run["loaded"]]
+    levels = " and ".join(run["level"] for run in r["runs"])
+    return Outcome("engine_loads", r["ok"], "; ".join(bad[:4]) or f"loaded clean ({levels})")
+
+
 @invariant("tool_result")
 def _tool_result(check: Check, step: str = "", path: str = "", equals: Any = None) -> Outcome:
     """A recorded step's report matches. For asserting on a tool's own answer, not the map."""

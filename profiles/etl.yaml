@@ -2859,6 +2859,44 @@ mapscript:
       consequence: "the game stops with 'setautospawn, couldn't find target' when it runs"
       locus: "game/g_script_actions.c:176-210; description becomes message at game/g_team.c:942-946"
 
+
+# ---------------------------------------------------------------------------
+# engine - how to load a packed map in the game itself (nrc_mcp.engine, `mise run game:smoke`)
+# ---------------------------------------------------------------------------
+# Every line below was checked by loading maps in ET: Legacy v2.86.2 under Linux.
+engine:
+  confidence: verified
+  source: etlegacy_source
+  # Searched for in NRC_FS_BASEPATH, then on PATH. NRC_ENGINE_SERVER / NRC_ENGINE_CLIENT override.
+  server: [etlded.x86_64, etlded.aarch64, etlded.i386, etlded, etlded.exe]
+  client: [etl.x86_64, etl.aarch64, etl.i386, etl, etl.exe]
+  # The home folder is ~/.etlegacy unless fs_homepath is set (qcommon/files.c:4525), and the
+  # default dedicated 2 advertises the server to the public master servers - hence 1.
+  server_args: ["+set", "dedicated", "1", "+set", "fs_homepath", "{home}", "+set", "fs_basepath", "{basepath}",
+                "+set", "sv_pure", "0", "+set", "developer", "1", "+set", "logfile", "2", "+devmap", "{map}"]
+  # The client hosts the map and joins it as a spectator, which is the step a map with no
+  # intermission point crashes on (game/g_client.c:337-340). A listen server sends no heartbeat.
+  client_args: ["+set", "fs_homepath", "{home}", "+set", "fs_basepath", "{basepath}", "+set", "sv_pure", "0",
+                "+set", "developer", "1", "+set", "logfile", "2", "+set", "com_maxfps", "60",
+                "+set", "r_mode", "-1", "+set", "r_customwidth", "800", "+set", "r_customheight", "600",
+                "+set", "r_fullscreen", "0", "+set", "s_initsound", "0", "+set", "cl_allowDownload", "0",
+                "+devmap", "{map}"]
+  # A profile, so the client skips its first-run dialog (ui main.menu opens it while cl_profile
+  # is empty; profiles/defaultprofile.dat sets it, qcommon/common.c:2997-3014).
+  client_files:
+    - {path: "legacy/profiles/defaultprofile.dat", text: "\"nrc\"\n"}
+    - {path: "legacy/profiles/nrc/etconfig.cfg", text: "seta name \"nrc\"\n"}
+  # logfile 2 writes here, under the mod directory (fs_game defaults to legacy).
+  log: "legacy/etconsole.log"
+  # Proof the map loaded.
+  loaded: "Loaded entities from maps/{map}.bsp"
+  # The game stopped: G_Error prints "ERROR: <message>" at the start of a line, then the server
+  # shuts down "Server crashed". Harmless complaints ("^1ERROR: Can't find hunkusage.dat") carry
+  # a timestamp and a colour code, so they never match.
+  fatal: ["^ERROR: ", "Server crashed", "Received signal (4|6|8|11)\\b"]
+  # Worth reading, never failing: the game's own non-fatal complaints about the map.
+  noted: ["\\^1ERROR No ", "G_Script.*warning"]
+
 # ---------------------------------------------------------------------------
 # engine_limits — what decides whether the map LOADS, as opposed to compiles
 # ---------------------------------------------------------------------------
