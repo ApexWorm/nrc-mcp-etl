@@ -249,6 +249,15 @@ async def _open_server(profile: str | None = None):
     return stdio_client(params), ClientSession
 
 
+def _field(obj, *names):
+    """First present attribute among names: mcp 2 renamed camelCase fields to snake_case."""
+    for name in names:
+        value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return None
+
+
 def _tool_schemas(mcp_tools: Any, allowed: list[str] | None) -> list[dict]:
     """MCP tool definitions as Messages API tools, with the cache breakpoint on the last one.
 
@@ -263,7 +272,7 @@ def _tool_schemas(mcp_tools: Any, allowed: list[str] | None) -> list[dict]:
             {
                 "name": tool.name,
                 "description": tool.description or "",
-                "input_schema": tool.inputSchema,
+                "input_schema": _field(tool, "input_schema", "inputSchema"),
             }
         )
     if schemas:
@@ -286,7 +295,7 @@ def _result_blocks(content: Any) -> list[dict]:
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": getattr(block, "mimeType", None) or "image/png",
+                        "media_type": _field(block, "mime_type", "mimeType") or "image/png",
                         "data": block.data,
                     },
                 }
@@ -388,7 +397,7 @@ async def run_scenario(
             for call in calls:
                 try:
                     got = await session.call_tool(call.name, call.input or {})
-                    body, is_error = _result_blocks(got), bool(getattr(got, "isError", False))
+                    body, is_error = _result_blocks(got), bool(_field(got, "is_error", "isError"))
                 except Exception as e:  # noqa: BLE001 — a tool error is data for the model
                     body, is_error = [{"type": "text", "text": f"{type(e).__name__}: {e}"}], True
                 transcript.append({"turn": turns, "tool": call.name, "error": is_error})
