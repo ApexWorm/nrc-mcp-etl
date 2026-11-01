@@ -42,6 +42,21 @@ would have failed correct maps (`docs/spec-corrections.md`).
     `list_keys` hold several names, split on `separator`. `classname` narrows the entities
     checked; without it every entity is. `exclude_classnames` skips classes whose key of the
     same name means something else.
+`flags_any`
+    Entities of `classname` must have at least one of the spawnflag values in `flags`.
+`targeted_by`
+    Entities of `classname` (optionally only those with every flag in `when_flags_all` and none
+    in `when_flags_none`) must be named, by their `name_key`, in the `by_key` of some entity of
+    `by_classname`.
+`list_targets`
+    Each `separator`-terminated entry of `keys` on entities of `classname` that names an entity
+    must name one of `target_classes`. Unterminated trailing text is not an entry.
+`list_counts_match`
+    On entities of `classname` where both of the two `keys` are set, their resolved entries
+    must be equally many.
+`key_pattern`
+    Where entities of `classname` have `key`, its value must match the regular expression
+    `pattern` in full.
 
 Every check may carry `applies_when: {classname_present: X}` so a rule about one gametype
 stays silent on maps that do not use it. `classname_absent: X` and
@@ -393,6 +408,113 @@ def _check_min_spacing(p: dict, entities: list[dict]) -> tuple[bool, dict]:
     }
 
 
+def _flags(e: dict) -> int:
+    return parse_spawnflags(_keys(e).get("spawnflags"))
+
+
+def _check_flags_any(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    want = [int(f) for f in p.get("flags") or []]
+    bad = [
+        e
+        for e in _of_class(entities, str(p.get("classname", "")))
+        if not any(_flags(e) & f for f in want)
+    ]
+    return not bad, {
+        "found": len(bad),
+        "expected": " or ".join(str(f) for f in want),
+        "entities": [e["index"] for e in bad],
+    }
+
+
+def _check_targeted_by(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    name_key = str(p.get("name_key", "targetname"))
+    by_key = str(p.get("by_key", "target"))
+    all_of = [int(f) for f in p.get("when_flags_all") or []]
+    none_of = [int(f) for f in p.get("when_flags_none") or []]
+    named = {
+        v.lower()
+        for e in _of_class(entities, str(p.get("by_classname", "")))
+        if (v := _keys(e).get(by_key, "").strip())
+    }
+    bad = []
+    for e in _of_class(entities, str(p.get("classname", ""))):
+        f = _flags(e)
+        if not all(f & x for x in all_of) or any(f & x for x in none_of):
+            continue
+        if _keys(e).get(name_key, "").strip().lower() not in named:
+            bad.append(e)
+    return not bad, {"found": len(bad), "entities": [e["index"] for e in bad]}
+
+
+def _list_entries(raw: str, sep: str) -> list[str]:
+    """Entries the engine reads: only those a separator ends (g_mover.c:5366-5392)."""
+    parts = raw.split(sep)
+    return [x.strip() for x in parts[:-1] if x.strip()]
+
+
+def _by_name(entities: list[dict], name_key: str) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for e in entities:
+        v = _keys(e).get(name_key, "").strip()
+        if v:
+            out.setdefault(v.lower(), e)
+    return out
+
+
+def _check_list_targets(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    sep = str(p.get("separator", ";"))
+    classes = {str(c) for c in p.get("target_classes") or []}
+    names = _by_name(entities, str(p.get("name_key", "targetname")))
+    bad: list[tuple[int, str, str, str]] = []
+    for e in _of_class(entities, str(p.get("classname", ""))):
+        for key in p.get("keys") or []:
+            for entry in _list_entries(_keys(e).get(str(key), ""), sep):
+                hit = names.get(entry.lower())
+                if hit is not None and hit.get("classname") not in classes:
+                    bad.append((e["index"], str(key), entry, str(hit.get("classname"))))
+    return not bad, {
+        "found": len(bad),
+        "expected": " or ".join(sorted(classes)),
+        "detail": [f"entity {i} {k} {v!r} is a {c}" for i, k, v, c in bad[:8]],
+        "entities": sorted({i for i, *_ in bad}),
+    }
+
+
+def _check_list_counts_match(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    sep = str(p.get("separator", ";"))
+    first, second = (str(k) for k in p.get("keys") or ["", ""])
+    names = _by_name(entities, str(p.get("name_key", "targetname")))
+    bad: list[tuple[int, int, int]] = []
+    for e in _of_class(entities, str(p.get("classname", ""))):
+        k = _keys(e)
+        if not k.get(first) or not k.get(second):
+            continue
+        a = [x for x in _list_entries(k[first], sep) if x.lower() in names]
+        b = [x for x in _list_entries(k[second], sep) if x.lower() in names]
+        if len(a) != len(b):
+            bad.append((e["index"], len(a), len(b)))
+    return not bad, {
+        "found": len(bad),
+        "detail": [f"entity {i}: {first} {a}, {second} {b}" for i, a, b in bad[:8]],
+        "entities": [i for i, *_ in bad],
+    }
+
+
+def _check_key_pattern(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    key = str(p.get("key", ""))
+    pattern = re.compile(str(p.get("pattern", "")))
+    bad = [
+        (e["index"], v)
+        for e in _of_class(entities, str(p.get("classname", "")))
+        if (v := _keys(e).get(key)) is not None and not pattern.fullmatch(v)
+    ]
+    return not bad, {
+        "found": len(bad),
+        "detail": [f"entity {i} {key} {v!r}" for i, v in bad[:8]],
+        "entities": [i for i, _ in bad],
+    }
+
+
 CHECKS = {
     "require_any": lambda p, e: _check_require_any(p, e),
     "count_exact": lambda p, e: _check_count(p, e, "exact"),
@@ -407,6 +529,11 @@ CHECKS = {
     "flag_count_min": lambda p, e: _check_flag_count_min(p, e),
     "flag_requires_key": lambda p, e: _check_flag_requires_key(p, e),
     "targets_resolve": lambda p, e: _check_targets_resolve(p, e),
+    "flags_any": lambda p, e: _check_flags_any(p, e),
+    "targeted_by": lambda p, e: _check_targeted_by(p, e),
+    "list_targets": lambda p, e: _check_list_targets(p, e),
+    "list_counts_match": lambda p, e: _check_list_counts_match(p, e),
+    "key_pattern": lambda p, e: _check_key_pattern(p, e),
 }
 
 
