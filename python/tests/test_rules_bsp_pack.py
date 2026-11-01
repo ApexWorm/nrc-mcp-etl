@@ -363,6 +363,24 @@ def test_applies_when_flag_present_needs_one_entity_with_the_flag(monkeypatch):
     assert run(rule, [ent(0, "red", spawnflags="2"), ent(1, "marker")], monkeypatch) == []
 
 
+def test_the_etl_profile_refuses_a_map_a_spectator_cannot_join():
+    """Found by loading a map in etlded: team spawns alone crash the server on first connect."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    team_spawns = [
+        ent(0, "worldspawn"),
+        ent(1, "team_CTF_redspawn", spawnflags="3"),
+        ent(2, "team_CTF_bluespawn", spawnflags="3"),
+    ]
+
+    def codes(entities):
+        return {f.code: f.severity for f in rules.evaluate("etl", entities)}
+
+    assert codes(team_spawns)["ETL_SPECTATOR_POINT_REQUIRED"] == "error"
+    for fallback in ("info_player_intermission", "info_player_deathmatch", "info_player_start"):
+        assert "ETL_SPECTATOR_POINT_REQUIRED" not in codes([*team_spawns, ent(3, fallback)])
+
+
 # ---------------------------------------------------------------------------
 # The shipped profile's rules, against real maps
 # ---------------------------------------------------------------------------

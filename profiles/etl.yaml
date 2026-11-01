@@ -2567,6 +2567,20 @@ rules:
       classname: team_WOLF_objective
       count: 16
 
+  - id: ETL_SPECTATOR_POINT_REQUIRED
+    check: require_any
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_client.c:3057-3059 (spectators spawn at the intermission point), game/g_main.c:2464-2466 (no info_player_intermission falls back to SelectSpawnPoint), game/g_client.c:337-340 (G_Error \"Couldn't find a spawn point\" without an info_player_deathmatch)"
+    message: >-
+      the map has no intermission or deathmatch point ({expected}); every client joins as a
+      spectator, and the first one to connect stops the server with "Couldn't find a spawn point"
+    fix_hint: "add an info_player_intermission with no spawnflags, looking over the map"
+    # Team spawns do not count: a spectator never uses them. info_player_start spawns as
+    # info_player_deathmatch (g_client.c:203-207).
+    params:
+      classnames: [info_player_intermission, info_player_deathmatch, info_player_start]
+
   - id: ETL_OBJECTIVE_INFO_TRACK_REQUIRED
     check: key_required
     severity: error
