@@ -68,6 +68,33 @@ def verified_entities(profile_id: str) -> list[dict[str, Any]]:
     return [e for e in entities(profile_id) if e.get("confidence") == "verified"]
 
 
+def entity_def(profile_id: str, classname: str) -> dict[str, Any] | None:
+    """The profile's entry for `classname`, or None if the profile does not define it."""
+    for e in entities(profile_id):
+        if e.get("classname") == classname:
+            return e
+    return None
+
+
+def declared_keys(profile_id: str, entity: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every key the profile declares on an entity entry, by name.
+
+    Includes the shared `key_blocks` the entry names, which is where a profile puts keys that
+    many classes carry alike — leaving them out would report every compiler key as unknown.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    blocks = load(profile_id).get("key_blocks") or {}
+    for block_name in entity.get("key_blocks") or []:
+        block = blocks.get(block_name) if isinstance(blocks, dict) else None
+        for k in (block or {}).get("keys") or []:
+            if isinstance(k, dict) and k.get("name"):
+                out[str(k["name"])] = k
+    for k in entity.get("keys") or []:
+        if isinstance(k, dict) and k.get("name"):
+            out[str(k["name"])] = k
+    return out
+
+
 def gametypes(profile_id: str) -> list[dict[str, Any]]:
     data = load(profile_id)
     return [g for g in (data.get("gametypes") or []) if isinstance(g, dict)]

@@ -135,6 +135,9 @@ def test_reading_a_resource_returns_content():
 #: Tools that change something. Everything else must arrive as read-only.
 WRITERS = {
     "map_save",
+    "entity_place",
+    "entity_set_keys",
+    "entity_remove_keys",
     "solid_commit",
     "solid_edit_param",
     "model_place",
@@ -148,7 +151,7 @@ WRITERS = {
 }
 
 #: Tools that can lose something that was already there.
-DESTRUCTIVE = {"map_save", "task_run"}
+DESTRUCTIVE = {"map_save", "entity_set_keys", "entity_remove_keys", "task_run"}
 
 
 def test_every_tool_carries_a_title_and_all_four_hints(listing):

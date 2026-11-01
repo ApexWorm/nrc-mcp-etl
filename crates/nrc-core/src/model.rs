@@ -313,6 +313,38 @@ impl Entity {
         self.keys.len() != before
     }
 
+    /// Set `key` so that `value` is what the engine reads.
+    ///
+    /// [`Entity::set`] replaces the *first* occurrence, but the engine takes the *last*, so
+    /// on an entity carrying a duplicate it changes a value nobody reads. This replaces the
+    /// first occurrence in place and drops the rest. Returns the value the engine read
+    /// before, if there was one, and how many duplicates were dropped.
+    pub fn set_effective(
+        &mut self,
+        key: &str,
+        value: impl Into<String>,
+    ) -> (Option<String>, usize) {
+        let previous = self
+            .keys
+            .iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone());
+        let before = self.keys.len();
+        let mut seen = false;
+        self.keys.retain(|(k, _)| {
+            if k != key {
+                return true;
+            }
+            let keep = !seen;
+            seen = true;
+            keep
+        });
+        let dropped = before - self.keys.len();
+        self.set(key, value);
+        (previous, dropped)
+    }
+
     /// Parse a whitespace-separated vector value such as `origin`.
     pub fn get_vec3(&self, key: &str) -> Option<crate::math::Vec3> {
         let v = self.get(key)?;
@@ -362,6 +394,26 @@ impl LineEnding {
             _ => LineEnding::Lf,
         }
     }
+}
+
+/// Why `key` and `value` cannot be written into a `.map` as they are, or `None` if they can.
+///
+/// The format has no escapes (see the lexer): a double quote ends the string and a newline
+/// inside one is a parse error, so either would write a file that no longer loads. An empty
+/// key is legal to the lexer and meaningless to the engine.
+pub fn unwritable_pair(key: &str, value: &str) -> Option<String> {
+    if key.is_empty() {
+        return Some("a key name cannot be empty".into());
+    }
+    for (what, text) in [("key", key), ("value", value)] {
+        if let Some(c) = text.chars().find(|c| matches!(c, '"' | '\n' | '\r')) {
+            return Some(format!(
+                "the {what} {text:?} contains {c:?}, which the .map format cannot hold — it \
+                 has no escapes, so the file would no longer load"
+            ));
+        }
+    }
+    None
 }
 
 /// A whole `.map` document.
@@ -500,6 +552,39 @@ mod tests {
             ],
             "an in-place edit must not reorder keys"
         );
+    }
+
+    #[test]
+    fn setting_the_effective_value_drops_later_duplicates() {
+        // The engine reads the last duplicate, so a value set only on the first is ignored.
+        let mut e = Entity::default();
+        e.keys.push(("classname".into(), "point_entity_a".into()));
+        e.keys.push(("angle".into(), "90".into()));
+        e.keys.push(("origin".into(), "0 0 0".into()));
+        e.keys.push(("angle".into(), "180".into()));
+        let (previous, dropped) = e.set_effective("angle", "270");
+        assert_eq!(previous.as_deref(), Some("180"), "the last duplicate is what was read");
+        assert_eq!(dropped, 1);
+        assert_eq!(
+            e.keys,
+            vec![
+                ("classname".to_string(), "point_entity_a".to_string()),
+                ("angle".to_string(), "270".to_string()),
+                ("origin".to_string(), "0 0 0".to_string()),
+            ],
+            "the first occurrence keeps its position"
+        );
+        assert_eq!(e.set_effective("speed", "100"), (None, 0));
+        assert_eq!(e.keys.last().unwrap().0, "speed", "a new key is appended");
+    }
+
+    #[test]
+    fn pairs_the_format_cannot_hold_are_named() {
+        assert_eq!(unwritable_pair("message", "a plain value"), None);
+        assert!(unwritable_pair("", "x").is_some());
+        assert!(unwritable_pair("message", "say \"hi\"").unwrap().contains("value"));
+        assert!(unwritable_pair("mess\nage", "x").unwrap().contains("key"));
+        assert!(unwritable_pair("message", "line\r").is_some());
     }
 
     #[test]

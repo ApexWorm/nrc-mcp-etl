@@ -39,6 +39,18 @@
     "doc": "Compile a map with q3map2.\n\nPresets (\u00a76.1): `draft` geometry-only seconds-long check, `iterate` playable test build,\n`quality` review build, `final` release build.\n\nOn a WSL host where q3map2 is a Windows binary, the wrapper stages the map onto the\nWindows filesystem and copies artefacts back to `out/` \u2014 paths are handled for you.",
     "signature": "(preset: 'str' = 'draft', path: 'str | None' = None) -> 'dict'"
   },
+  "entity_place": {
+    "doc": "Add a point entity to the open map: a spawn, a script or objective marker, a light.\n\n`keys` are written after `classname` and `origin`, in the order given. A number becomes\nits shortest spelling and a list of numbers a space-separated vector, so\n`{\"angles\": [0, 90, 0]}` writes `\"angles\" \"0 90 0\"`.\n\nThe classname and keys are checked against the active profile and anything it does not\ndeclare comes back in `notes` \u2014 written anyway, because profiles are incomplete, but a\nmisspelt key is silent in game, so read them. `profile_summary` and `nrc://profile/{id}`\nlist what the profile knows. The origin is written as given, never snapped; one off the\ngrid (default: the session's) is noted, as the brush tools count off-grid vertices.\n\nA classname the profile declares as a brush entity \u2014 a door, a trigger \u2014 is refused: build\nits brushes with `solid_commit` and `target_classname`, then give it keys with\n`entity_set_keys`. Nothing reaches disk until `map_save`.",
+    "signature": "(classname: 'str', origin: 'list[float]', keys: 'dict[str, str | float | list[float]] | None' = None, grid: 'int | None' = None) -> 'dict'"
+  },
+  "entity_remove_keys": {
+    "doc": "Remove keys from any entity, every copy of each.\n\n`entity` is the index `query_entities` reports. A key the entity does not have is listed\nin `absent` rather than refused, so the call is safe to repeat. `classname` cannot be\nremoved: change it with `entity_set_keys` instead. Nothing reaches disk until `map_save`.",
+    "signature": "(entity: 'int', keys: 'list[str]') -> 'dict'"
+  },
+  "entity_set_keys": {
+    "doc": "Set keys on any entity \u2014 a point entity, a brush entity or the worldspawn.\n\n`entity` is the index `query_entities` reports; worldspawn is normally 0. An existing key\nkeeps its position and gets the new value; a new key is appended. Values are spelt as in\n`entity_place`. Changing `classname` is allowed, except on the worldspawn or into a\nsecond one.\n\nThe previous value of every key comes back in `changed`, because this overwrites. If the\nentity carried a key twice, the later copy is what the engine reads, so it is removed and\nreported in `duplicates_removed`. Keys and values the profile does not declare for the\nclassname come back in `notes`, as in `entity_place`.\n\nEvery key is checked before any is written, so a refusal changes nothing. Nothing\nreaches disk until `map_save`.",
+    "signature": "(entity: 'int', keys: 'dict[str, str | float | list[float]]') -> 'dict'"
+  },
   "hint_suggest": {
     "doc": "Propose hint brush planes from a compiled portal file.\n\nNeeds a `.prt`, which `-vis -saveprt` writes: compile with the `final` preset, or run\n`task_run(\"compile:final\", [map])`.\n\n\u00a76.1 calls this \"tedious, high-skill, high-payoff work that almost nobody does properly by\nhand\". Each suggestion names the leaf, its portal count and a proposed splitting plane, with a\npredicted before/after \u2014 predicted, because confirming it needs another `-vis` run.",
     "signature": "(prt_path: 'str', limit: 'int' = 10) -> 'dict'"

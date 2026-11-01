@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **51 tools, 6 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **54 tools, 6 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -290,7 +290,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-51 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+54 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -308,6 +308,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `map_stats` | Counts, bounds, shader histogram, grid alignment. |
 | `map_save` | Write it back. Refuses if the map did not round-trip when opened, or if the write would destroy playable space. |
 | `query_entities` | Entities, filterable by classname. |
+| `entity_place` | Add a point entity — a spawn, a script or objective marker. Keys the profile does not declare come back as notes. |
+| `entity_set_keys` · `entity_remove_keys` | Set or remove keys on any entity, brush entities and worldspawn included. |
 | `brush_geometry` | Exact vertices and derived properties of one brush. |
 | `validate` | Geometry and file-format findings. |
 | `validate_profile` | Entities against the game profile's rules. |
@@ -412,11 +414,11 @@ than assuming it", "read the profile before sizing anything" are all learned.
 
 ## Narrowing the surface
 
-51 tools is about 23,000 characters of description in every session. Most sessions need a
+54 tools is about 25,000 characters of description in every session. Most sessions need a
 fraction of it, so the server can be told which groups to expose:
 
 ```bash
-NRC_MCP_GROUPS=map,render,sculpt   # a level-design session: 20 tools, 9k chars
+NRC_MCP_GROUPS=map,render,sculpt   # a level-design session: 23 tools, 11k chars
 NRC_MCP_READ_ONLY=1                # a review session: every writer dropped
 ```
 
