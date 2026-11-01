@@ -66,16 +66,22 @@ SCENARIO_DIR = repo_root() / "bench" / "scenarios"
 RESULT_DIR = repo_root() / "bench" / "results"
 WORK_NAME = "work.map"
 
-#: Opus 5. Overridable, but not silently: the report records which model produced it, because
+#: Opus 5.5. Overridable, but not silently: the report records which model produced it, because
 #: a score without a model beside it cannot be compared to anything.
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "claude-opus-5-5"
 
-#: Enough room for thinking and a long answer. On Opus 5 thinking is on by default and
+#: Enough room for thinking and a long answer. On Opus 5.5 thinking is always on and
 #: `max_tokens` caps thinking plus text together, so a tight value truncates mid-edit.
 DEFAULT_MAX_TOKENS = 32000
 
-#: The surface is large and the tasks are small; this is not where quality is won.
+#: Opus 5.5 defaults to medium as well, but the run records the effort it used, so it is
+#: always sent explicitly. The surface is large and the tasks are small.
 DEFAULT_EFFORT = "medium"
+
+#: A safety classifier can decline a turn. With server-side fallbacks the API re-runs that turn
+#: on a fallback model inside the same call, routed by the refusal's category; the report
+#: counts the turns a fallback served, since those were not the chosen model's work.
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 SYSTEM = """You are working on a level for a Quake-3-engine game through the nrc-mcp tool \
 surface. Every tool call operates on real files.
@@ -117,12 +123,33 @@ def load_scenarios(only: str | None = None) -> list[dict]:
     return out
 
 
+def work_path(scenario: dict, workspace: Path) -> Path:
+    """The map the model works on: `map` inside the workspace, or work.map."""
+    return workspace / str(scenario.get("map") or WORK_NAME)
+
+
 def prepare_workspace(scenario: dict) -> tuple[Path, Path | None]:
-    """A throwaway directory holding the fixture, plus a pristine copy to grade against."""
+    """A throwaway directory holding the fixture, plus a pristine copy to grade against.
+
+    `fixture` copies one .map in as work.map. `fixture_dir` with `map` copies a whole game
+    directory tree (maps/, scripts/, ...) and keeps the map's own name, as the tapes do. With
+    neither, the workspace starts empty and the model creates `map` (default work.map).
+    """
     workspace = Path(tempfile.mkdtemp(prefix=f"nrc-tier2-{scenario['name']}-"))
     baseline: Path | None = None
     fixture = scenario.get("fixture")
-    if fixture:
+    fixture_dir = scenario.get("fixture_dir")
+    if fixture_dir:
+        src_dir = Path(fixture_dir)
+        if not src_dir.is_absolute():
+            src_dir = repo_root() / src_dir
+        work = work_path(scenario, workspace)
+        if not (src_dir / str(scenario.get("map") or "")).is_file():
+            raise Tier2Error(f"fixture not found: {src_dir / str(scenario.get('map'))}")
+        shutil.copytree(src_dir, workspace, dirs_exist_ok=True)
+        baseline = workspace / "baseline.map"
+        shutil.copyfile(work, baseline)
+    elif fixture:
         src = Path(fixture)
         if not src.is_absolute():
             src = repo_root() / src
@@ -136,13 +163,53 @@ def prepare_workspace(scenario: dict) -> tuple[Path, Path | None]:
     return workspace, baseline
 
 
-def grade(scenario: dict, workspace: Path, baseline: Path | None, *, allow_compile: bool) -> dict:
+def _subs(scenario: dict, workspace: Path) -> dict[str, str]:
+    return {"work": str(work_path(scenario, workspace)), "workspace": str(workspace)}
+
+
+def run_finish(scenario: dict, workspace: Path, *, allow_compile: bool) -> dict[str, Any]:
+    """The scenario's `finish` steps, run by the harness after the model stops.
+
+    Grading a release needs a compile and a pack, which are not the model's to skip; this runs
+    them through the same tool functions the server exposes, so invariants such as
+    `pk3_contents` and `engine_loads` have a step result to read. A step marked
+    `needs_compile` runs only with --compile. A failing step is recorded, not raised.
+    """
+    from nrc_mcp import surface  # noqa: PLC0415
+
+    results: dict[str, Any] = {}
+    subs = _subs(scenario, workspace)
+    for i, step in enumerate(scenario.get("finish") or []):
+        label = step.get("as") or f"finish{i}"
+        if step.get("needs_compile") and not allow_compile:
+            continue
+        fn = surface.get(step["tool"])
+        args = {
+            k: v.format(**subs) if isinstance(v, str) else v
+            for k, v in (step.get("args") or {}).items()
+        }
+        try:
+            results[label] = fn(**args)
+        except Exception as e:  # noqa: BLE001 — a failed finish step is a graded outcome
+            results[label] = {"error": f"{type(e).__name__}: {e}"}
+    return results
+
+
+def grade(
+    scenario: dict,
+    workspace: Path,
+    baseline: Path | None,
+    *,
+    allow_compile: bool,
+    results: dict[str, Any] | None = None,
+) -> dict:
     """Run the scenario's invariants over whatever the model left behind."""
-    current = workspace / WORK_NAME
+    current = work_path(scenario, workspace)
     check = playspace.Check(
         workspace=workspace,
         baseline=baseline if baseline and baseline.is_file() else None,
         current=current if current.is_file() else None,
+        results=results or {},
         profile_id=scenario.get("profile"),
         cell=float(scenario.get("cell") or playspace.DEFAULT_DIFF_CELL),
         allow_compile=allow_compile,
@@ -162,15 +229,22 @@ def grade(scenario: dict, workspace: Path, baseline: Path | None, *, allow_compi
 # ---------------------------------------------------------------------------
 
 
-async def _open_server():
-    """Start the real server the way a client would, and hand back a live session."""
+async def _open_server(profile: str | None = None):
+    """Start the real server the way a client would, and hand back a live session.
+
+    A scenario's `profile` is the server's NRC_PROFILE: the tools read it, so without this an
+    ET scenario would be served the Urban Terror rules.
+    """
     from mcp import ClientSession, StdioServerParameters  # noqa: PLC0415
     from mcp.client.stdio import stdio_client  # noqa: PLC0415
 
+    env = dict(os.environ)
+    if profile:
+        env["NRC_PROFILE"] = profile
     params = StdioServerParameters(
         command="mise",
         args=["-C", str(repo_root()), "run", "mcp:serve"],
-        env=dict(os.environ),
+        env=env,
     )
     return stdio_client(params), ClientSession
 
@@ -197,16 +271,29 @@ def _tool_schemas(mcp_tools: Any, allowed: list[str] | None) -> list[dict]:
     return schemas
 
 
-def _text_of(content: Any) -> str:
-    """MCP tool results arrive as content blocks; the model wants one string."""
-    parts = []
+def _result_blocks(content: Any) -> list[dict]:
+    """MCP tool results as tool_result content: text blocks, and renders as images.
+
+    Sculpting blind fails, the system prompt says - so a render has to reach the model as the
+    picture it is, not as a note that one was taken.
+    """
+    blocks: list[dict] = []
     for block in getattr(content, "content", None) or []:
-        text = getattr(block, "text", None)
-        if text:
-            parts.append(text)
-        elif getattr(block, "type", "") == "image":
-            parts.append("[image returned]")
-    return "\n".join(parts) or "(no output)"
+        kind = getattr(block, "type", "")
+        if kind == "image" and getattr(block, "data", None):
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": getattr(block, "mimeType", None) or "image/png",
+                        "data": block.data,
+                    },
+                }
+            )
+        elif text := getattr(block, "text", None):
+            blocks.append({"type": "text", "text": text[:20000]})
+    return blocks or [{"type": "text", "text": "(no output)"}]
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +316,7 @@ async def run_scenario(
     started = time.time()
     workspace, baseline = prepare_workspace(scenario)
     max_turns = int(scenario.get("max_turns") or 24)
+    fallback_turns = 0
     budget = int(scenario.get("max_output_tokens") or 120_000)
 
     client = anthropic.AsyncAnthropic()
@@ -237,15 +325,13 @@ async def run_scenario(
     outcome = "completed"
     transcript: list[dict] = []
 
-    stdio_ctx, _ = await _open_server()
+    stdio_ctx, _ = await _open_server(scenario.get("profile"))
     async with stdio_ctx as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         listing = await session.list_tools()
         tools = _tool_schemas(listing.tools, scenario.get("allowed_tools"))
 
-        prompt = scenario["prompt"].format(
-            work=str(workspace / WORK_NAME), workspace=str(workspace)
-        )
+        prompt = scenario["prompt"].format(**_subs(scenario, workspace))
         messages: list[dict] = [{"role": "user", "content": prompt}]
 
         while True:
@@ -257,21 +343,28 @@ async def run_scenario(
                 break
             turns += 1
 
-            response = await client.messages.create(
+            response = await client.beta.messages.create(
                 model=model,
                 max_tokens=int(scenario.get("max_tokens") or DEFAULT_MAX_TOKENS),
                 system=SYSTEM,
                 tools=tools,
                 messages=messages,
                 output_config={"effort": effort},
+                betas=[FALLBACK_BETA],
+                fallbacks="default",
             )
+            if any(
+                getattr(it, "type", "") == "fallback_message"
+                for it in (getattr(response.usage, "iterations", None) or [])
+            ):
+                fallback_turns += 1
             u = response.usage
             usage["input"] += u.input_tokens or 0
             usage["output"] += u.output_tokens or 0
             usage["cache_read"] += getattr(u, "cache_read_input_tokens", 0) or 0
             usage["cache_write"] += getattr(u, "cache_creation_input_tokens", 0) or 0
 
-            # Opus 5's classifiers can decline; content is empty or partial when they do.
+            # The whole fallback chain declined; content is empty or partial when it does.
             if response.stop_reason == "refusal":
                 outcome = "refused"
                 break
@@ -295,21 +388,32 @@ async def run_scenario(
             for call in calls:
                 try:
                     got = await session.call_tool(call.name, call.input or {})
-                    body, is_error = _text_of(got), bool(getattr(got, "isError", False))
+                    body, is_error = _result_blocks(got), bool(getattr(got, "isError", False))
                 except Exception as e:  # noqa: BLE001 — a tool error is data for the model
-                    body, is_error = f"{type(e).__name__}: {e}", True
+                    body, is_error = [{"type": "text", "text": f"{type(e).__name__}: {e}"}], True
                 transcript.append({"turn": turns, "tool": call.name, "error": is_error})
                 results.append(
                     {
                         "type": "tool_result",
                         "tool_use_id": call.id,
-                        "content": body[:20000],
+                        "content": body,
                         "is_error": is_error,
                     }
                 )
             messages.append({"role": "user", "content": results})
 
-    report = grade(scenario, workspace, baseline, allow_compile=allow_compile)
+    saved = os.environ.get("NRC_PROFILE")
+    if scenario.get("profile"):
+        os.environ["NRC_PROFILE"] = str(scenario["profile"])
+    try:
+        finished = run_finish(scenario, workspace, allow_compile=allow_compile)
+        report = grade(scenario, workspace, baseline, allow_compile=allow_compile, results=finished)
+    finally:
+        if scenario.get("profile"):
+            if saved is None:
+                os.environ.pop("NRC_PROFILE", None)
+            else:
+                os.environ["NRC_PROFILE"] = saved
     shutil.rmtree(workspace, ignore_errors=True)
 
     return {
@@ -319,6 +423,7 @@ async def run_scenario(
         "effort": effort,
         "outcome": outcome,
         "turns": turns,
+        "fallback_turns": fallback_turns,
         "tool_calls": len(transcript),
         "usage": usage,
         "seconds": round(time.time() - started, 1),
@@ -363,6 +468,13 @@ async def check(scenarios: list[dict], *, allow_compile: bool) -> int:
                     problems.append(f"unknown invariant {spec['name']!r}")
             if not scenario.get("prompt"):
                 problems.append("no prompt")
+            elif "{work}" not in scenario["prompt"]:
+                problems.append("the prompt never names the map ({work})")
+            for step in scenario.get("finish") or []:
+                if step.get("tool") not in names:
+                    problems.append(
+                        f"finish step names {step.get('tool')!r}, which the server does not expose"
+                    )
 
             # Grade the untouched fixture. This is the control: an invariant that already
             # passes before the model has done anything is not measuring the task.
@@ -371,14 +483,17 @@ async def check(scenarios: list[dict], *, allow_compile: bool) -> int:
                 report = grade(scenario, workspace, baseline, allow_compile=allow_compile)
                 shutil.rmtree(workspace, ignore_errors=True)
                 trivial = [o["name"] for o in report["invariants"] if o["ok"] and not o["skipped"]]
-                if report["passed"]:
+                skipped = [o["name"] for o in report["invariants"] if o["skipped"]]
+                # Skipped is not passed: a scenario whose deciding invariants all skip here
+                # (they need --compile) has not been shown to be trivial.
+                if report["passed"] and not skipped:
                     problems.append(
                         "every invariant already passes on the untouched fixture, so this "
                         "scenario cannot distinguish success from doing nothing"
                     )
             except Tier2Error as e:
                 problems.append(str(e))
-                trivial = []
+                trivial, skipped, report = [], [], {}
 
             mark = "ok  " if not problems else "FAIL"
             print(
@@ -386,6 +501,8 @@ async def check(scenarios: list[dict], *, allow_compile: bool) -> int:
             )
             if trivial and not problems:
                 print(f"         . already true before the run: {', '.join(trivial)}")
+            if not problems and report.get("passed") and skipped:
+                print(f"         - decided only with --compile: {', '.join(skipped)}")
             for p in problems:
                 print(f"         ! {p}")
             failures += bool(problems)
@@ -511,9 +628,12 @@ def main() -> int:
             )
         )
     report(results)
-    if args.out:
-        Path(args.out).write_text(json.dumps({"results": results}, indent=2))
-        print(f"  written: {args.out}")
+    out = (
+        Path(args.out) if args.out else RESULT_DIR / f"tier2-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"results": results}, indent=2))
+    print(f"  written: {out}")
     return 0 if all(r["passed"] for r in results) else 1
 
 

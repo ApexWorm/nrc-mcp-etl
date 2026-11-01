@@ -669,9 +669,10 @@ exactly why it costs nothing.
 
 `mise run bench:tier2` is the harness that closes that gap — a model driving this MCP over stdio
 against small fixtures, graded by the same invariants. Its free modes are exercised
-(`--check` starts the server, lists the 48 tools, and verifies every scenario's goal is false on
-the untouched fixture). **`--run` has never executed**, because there are no API credentials on
-the machine it was written on, so nothing here reports a Tier 2 score and none should be inferred.
+(`--check` starts the server, lists the 66 tools, and verifies every scenario's goal is false on
+the untouched fixture). **`--run` has never executed**: it spends tokens, and that is the
+owner's call to make, so nothing here reports a Tier 2 score and none should be inferred. Three
+ET: Legacy scenarios - build a map from nothing, add an objective, ship a map - are ready for it.
 `bench/scenarios/README.md` covers the cost controls.
 
 **No kernel self-modification.** The exact predicates, the differential harness, the fitness

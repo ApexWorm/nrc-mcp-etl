@@ -1,0 +1,73 @@
+{
+  "note": "ET gameplay on an existing map: nrcroom has two bunkers and no objective; the model must add a dynamite objective the Axis can destroy in the Allied bunker, and keep the map valid. Graded by the profile's rules (no errors or warnings), an objective trigger and a func_explosive being present, both teams still reaching it, and the map loading in ET: Legacy with a client joined.",
+  "profile": "etl",
+  "fixture_dir": "bench/tapes/fixtures/nrcroom",
+  "map": "maps/nrcroom.map",
+  "max_turns": 24,
+  "prompt": "The ET: Legacy map at {work} has an Axis bunker (x below 496) and an Allied bunker (x above 528), joined by a doorway. Add one objective: something in the Allied bunker that the Axis destroy with dynamite. It must show players 'You are near ...' when they stand at it. Keep the map valid against the game profile - fix anything it reports - and save the map when you are done.",
+  "invariants": [
+    {
+      "name": "validates_clean"
+    },
+    {
+      "name": "profile_clean",
+      "args": {
+        "max_warnings": 0
+      }
+    },
+    {
+      "name": "classname_count",
+      "args": {
+        "classname": "trigger_objective_info",
+        "at_least": 1
+      }
+    },
+    {
+      "name": "classname_count",
+      "args": {
+        "classname": "func_explosive",
+        "at_least": 2
+      }
+    },
+    {
+      "name": "spawns_reach_objectives"
+    },
+    {
+      "name": "pk3_contents",
+      "args": {
+        "step": "pack",
+        "has": [
+          "maps/nrcroom.bsp",
+          "maps/nrcroom.script"
+        ],
+        "no_basegame": true
+      }
+    },
+    {
+      "name": "engine_loads",
+      "args": {
+        "step": "pack",
+        "client": true
+      }
+    }
+  ],
+  "finish": [
+    {
+      "tool": "compile_map",
+      "as": "compile",
+      "needs_compile": true,
+      "args": {
+        "preset": "iterate",
+        "path": "{work}"
+      }
+    },
+    {
+      "tool": "pack_pk3",
+      "as": "pack",
+      "needs_compile": true,
+      "args": {
+        "bsp": "{workspace}/maps/nrcroom.bsp"
+      }
+    }
+  ]
+}

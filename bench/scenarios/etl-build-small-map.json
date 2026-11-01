@@ -1,0 +1,72 @@
+{
+  "note": "ET: Legacy from nothing: the model must make a small, playable two-team map with only the tools - geometry, both teams' spawns and spawn markers, a script that sets respawn times and autospawns, an intermission point and lights - and save it. Graded by the profile's own rules (no errors), a sealed compile, and the packed map loading in ET: Legacy with a client joined. The invariants are false on the empty workspace, so doing nothing fails.",
+  "profile": "etl",
+  "map": "maps/smallmap.map",
+  "max_turns": 40,
+  "prompt": "Make a small ET: Legacy map at {work} - the file does not exist yet. Two connected rooms, an Axis side and an Allied side, sealed with walls, floor and ceiling. Each team needs at least one active spawn point with its own team_WOLF_objective spawn marker (with a description), so the map script can autospawn both teams. Add a script_multiplayer, a map script whose game_manager spawn event sets both teams' respawn times, who wins at the time limit and each team's autospawn, an info_player_intermission, and enough lights to see by. Validate it against the game profile and fix what it reports. Save the map when you are done.",
+  "invariants": [
+    {
+      "name": "validates_clean"
+    },
+    {
+      "name": "profile_clean"
+    },
+    {
+      "name": "classname_count",
+      "args": {
+        "classname": "team_CTF_redspawn",
+        "at_least": 1
+      }
+    },
+    {
+      "name": "classname_count",
+      "args": {
+        "classname": "team_CTF_bluespawn",
+        "at_least": 1
+      }
+    },
+    {
+      "name": "map_seals",
+      "args": {
+        "preset": "draft"
+      }
+    },
+    {
+      "name": "pk3_contents",
+      "args": {
+        "step": "pack",
+        "has": [
+          "maps/smallmap.bsp",
+          "maps/smallmap.script"
+        ],
+        "no_basegame": true
+      }
+    },
+    {
+      "name": "engine_loads",
+      "args": {
+        "step": "pack",
+        "client": true
+      }
+    }
+  ],
+  "finish": [
+    {
+      "tool": "compile_map",
+      "as": "compile",
+      "needs_compile": true,
+      "args": {
+        "preset": "iterate",
+        "path": "{work}"
+      }
+    },
+    {
+      "tool": "pack_pk3",
+      "as": "pack",
+      "needs_compile": true,
+      "args": {
+        "bsp": "{workspace}/maps/smallmap.bsp"
+      }
+    }
+  ]
+}
