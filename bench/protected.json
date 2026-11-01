@@ -7,13 +7,13 @@
     "crates/nrc-core/src/num.rs": "cf94b10b6c116c8ea13a6a1f945f975dfffd8fee97602a65794471b084c18edb",
     "crates/nrc-core/src/winding.rs": "a0cb0d69d1e8b59879957d319c02461dd4097739cc4a7d9d561e2c748926cb79",
     "tools/bench.py": "f3f82df62c5c72ab8584ae24ec5260981bca303949264401792e23d7693afef3",
-    "tools/difftest.py": "ac469686034f90c6caa9a052e3115b8761262a95f30b1df784c1a4084cf712e3",
+    "tools/difftest.py": "2e9778d4fb50e8f5b50d80abb4acc655d5faf54fc71d5e2b698f45ee2a54ef3b",
     "tools/protected.py": "40ef9001aaeebac41875f4ff6938b525ab7abb985cee3ceb8b3cd01b281d3256",
     "tools/seam_lint.py": "29f06626f93a741e9f27c8bb638b7ec1bc3215fcddedec2c49abdee87f16afd0"
   },
   "note": "Hash pins for paths self-dev may not modify (\u00a711.4). Re-pinned only by a human who has reviewed the change; the loop cannot call --repin.",
   "profiles": {
-    "etl.yaml": "067b06de40c1e3039033eff5f5e442af1d938593e75820bc43601c939018f187",
+    "etl.yaml": "4cf7dc0082df6d081b50514d0332bd7e6b1b4cee67da49d679eab2a494bdcdce",
     "urt43.yaml": "daeaa63df42c1bd37fc12f6827fdd63a75365decc83e3a6514a0af87b785c9b6"
   },
   "trees": {
