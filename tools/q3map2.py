@@ -98,6 +98,14 @@ class StageResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     tail: list[str] = field(default_factory=list)
+    # The BSP stage's flood fill found the outside, or found no entity to flood from at all.
+    leaked: bool = False
+
+
+#: Printed by `Leak_feedback` whenever the flood fill fails (bsp.cpp:301-303) - for a real leak,
+#: and for a map with no entity inside it (portals.cpp:589-591). Only a real leak also writes a
+#: `.lin` pointfile, so the pointfile alone is not the signal.
+LEAK_BANNER = "******* leaked *******"
 
 
 def is_wsl() -> bool:
@@ -257,6 +265,7 @@ def run_stage(
         elif kind == "warning":
             res.warnings.append(ln.strip())
     res.tail = [ln for ln in lines[-25:] if ln.strip()]
+    res.leaked = any(LEAK_BANNER in ln for ln in lines)
 
     if verbose:
         print(out, file=sys.stderr)
@@ -329,9 +338,22 @@ def compile_map(
         shutil.rmtree(workdir, ignore_errors=True)
 
     ok = all(r.returncode == 0 for r in results) and bool(results)
+    leaked = any(r.leaked for r in results)
+    hint = ""
+    if leaked:
+        has_pointfile = any(a.lower().endswith(".lin") for a in artifacts)
+        hint = (
+            "the map leaks: leak_trace reads the .lin pointfile to show where"
+            if has_pointfile
+            else "q3map2 reports a leak but wrote no pointfile, which means no entity sits "
+            "inside the sealed space to flood from - place a spawn, a light or any point "
+            "entity inside. Until then there is no .prt, so -vis cannot run."
+        )
     return {
         "map": str(map_path),
         "ok": ok,
+        "leaked": leaked,
+        "hint": hint,
         "staged": staged,
         "q3map2": str(exe),
         "windows_mode": is_wsl(),
@@ -342,6 +364,7 @@ def compile_map(
                 "flags": r.flags,
                 "returncode": r.returncode,
                 "seconds": round(r.seconds, 3),
+                "leaked": r.leaked,
                 "error_count": len(r.errors),
                 "warning_count": len(r.warnings),
                 "errors": r.errors[:20],

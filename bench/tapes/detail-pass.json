@@ -1,0 +1,145 @@
+{
+  "name": "detail-pass",
+  "note": "The optimisation loop end to end on a map this repo owns: a room with eight small pillars, saved; structural_audit flags them (it reads the saved file, so save first); brush_set_detail takes its candidates straight in; the result is saved beside the original; with --compile, compile_ab proves the vis tree shrank. Runs everywhere, unlike improve-engine-performance, whose fixture is a game install.",
+  "steps": [
+    {
+      "tool": "map_new",
+      "as": "new",
+      "args": {
+        "path": "{workspace}/before.map"
+      }
+    },
+    {
+      "tool": "solid_commit",
+      "as": "room",
+      "args": {
+        "label": "room",
+        "textures": {
+          "default": "common/caulk"
+        },
+        "ir": {
+          "op": "hollow",
+          "solid": {
+            "op": "box",
+            "min": [
+              -16,
+              -16,
+              -16
+            ],
+            "max": [
+              1040,
+              1040,
+              272
+            ]
+          },
+          "thickness": 16
+        }
+      }
+    },
+    {
+      "tool": "solid_commit",
+      "as": "pillars",
+      "args": {
+        "label": "pillars",
+        "textures": {
+          "default": "common/caulk"
+        },
+        "ir": {
+          "op": "array",
+          "node": {
+            "op": "box",
+            "min": [
+              128,
+              128,
+              0
+            ],
+            "max": [
+              144,
+              144,
+              96
+            ]
+          },
+          "count": 8,
+          "offset": [
+            96,
+            96,
+            0
+          ]
+        }
+      },
+      "expect": {
+        "brushes_created": 8
+      }
+    },
+    {
+      "tool": "map_save",
+      "as": "save_before",
+      "args": {
+        "allow_non_identical": true
+      },
+      "expect": {
+        "written": true
+      }
+    },
+    {
+      "tool": "structural_audit",
+      "as": "audit",
+      "args": {
+        "grid": 8
+      },
+      "expect": {
+        "totals.candidates": 8,
+        "estimated_portal_reduction_total": {
+          "$gte": 1
+        }
+      }
+    },
+    {
+      "tool": "brush_set_detail",
+      "as": "detail",
+      "args_from": {
+        "brushes": "audit.candidates"
+      },
+      "expect": {
+        "already": 0
+      }
+    },
+    {
+      "tool": "map_save",
+      "as": "save_after",
+      "args": {
+        "path": "{workspace}/after.map",
+        "allow_non_identical": true
+      },
+      "expect": {
+        "written": true
+      }
+    },
+    {
+      "tool": "map_stats",
+      "as": "stats",
+      "expect": {
+        "detail_brushes": 8
+      }
+    },
+    {
+      "tool": "compile_ab",
+      "as": "ab",
+      "needs_compile": true,
+      "args": {
+        "map_a": "{workspace}/before.map",
+        "map_b": "{workspace}/after.map",
+        "preset": "draft"
+      },
+      "expect": {
+        "deltas.leafs.percent": {
+          "$lt": 0
+        },
+        "deltas.vis_clusters.percent": {
+          "$lt": 0
+        },
+        "summary.error": 0
+      }
+    }
+  ]
+}

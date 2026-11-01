@@ -99,6 +99,10 @@ def solid_commit(
 ) -> dict:
     """Compile a Solid IR tree and add the brushes to the open map.
 
+    `textures` picks shaders per face direction and can make the brushes detail; `solid_help`
+    lists its keys (`default`, `top`, `bottom`, `north`/`south`/`east`/`west`, `scale`,
+    `offset`, `rotate`, `detail`).
+
     Nothing is written to disk: call `map_save` for that. The brushes are tagged with a comment
     naming `label`, so a human reading the `.map` can see where they came from and delete them
     as a unit.
@@ -123,6 +127,48 @@ def solid_commit(
             result["sidecar_error"] = str(e)
     result["next"] = "call map_save to write the map, or render_contact_sheet to look at it"
     return result
+
+
+@tool("sculpt", "Mark brushes detail", writes=True, idempotent=True)
+def brush_set_detail(brushes: list, detail: bool = True) -> dict:
+    """Mark existing brushes detail (or structural again with `detail=false`).
+
+    A detail brush still blocks players and shots but no longer splits the vis tree, which is
+    the biggest lever on vis cost: trim, pillars, props and anything that does not seal the map
+    should be detail. `brushes` is a list of `[entity, primitive]` pairs, or the findings
+    `structural_audit` returns (each carries its entity and primitive), passed straight in.
+
+    Every brush is checked before any is changed; a patch or a missing primitive refuses the
+    whole call. Nothing reaches disk until `map_save`. New geometry can be made detail as it is
+    built: `solid_commit(textures={"detail": true, ...})`.
+    """
+    m = SESSION.require()
+    pairs: list[tuple[int, int]] = []
+    for item in brushes:
+        if isinstance(item, dict):
+            src = item.get("detail") if isinstance(item.get("detail"), dict) else item
+            ent, prim = src.get("entity"), src.get("primitive")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            ent, prim = item
+        else:
+            raise ToolError(
+                f"each brush is [entity, primitive] or a structural_audit finding: {item!r}"
+            )
+        if not isinstance(ent, int) or not isinstance(prim, int):
+            raise ToolError(f"entity and primitive must be whole numbers: {item!r}")
+        pairs.append((ent, prim))
+    if not pairs:
+        raise ToolError("no brushes given")
+    try:
+        changed = m.set_brush_detail(pairs, detail)
+    except ValueError as e:
+        raise ToolError(f"nothing changed: {e}") from e
+    return {
+        "detail": detail,
+        "brushes": changed,
+        "already": sum(1 for c in changed if c["was_detail"] == detail),
+        "next": "map_save to write it; compile_ab to measure the vis difference",
+    }
 
 
 @tool("sculpt", "Inspect a solid")

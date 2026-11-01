@@ -239,6 +239,7 @@ TOOL_NAMES = (
     "solid_compile",
     "solid_preview",
     "solid_commit",
+    "brush_set_detail",
     "solid_inspect",
     "solid_list",
     "solid_param_preview",

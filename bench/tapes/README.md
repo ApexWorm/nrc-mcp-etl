@@ -31,8 +31,9 @@ not be described as if they were.
 | `build-from-scratch` | A bare slab to a two-room block: hollow, cut a doorway, join. |
 | `continue-existing-level` | Adding to a finished map without costing the old work anything. |
 | `refactor-one-region` | `solid_edit_param` — change one parameter, leave the rest alone. |
-| `improve-engine-performance` | The optimisation pass. **Measuring half only** — see below. |
+| `improve-engine-performance` | The optimisation pass on a real map: audit, mark detail, measure. |
 | `catches-interior-clip` | The `ut4_dofa` failure, small. Expects `map_save` to **refuse**. |
+| `detail-pass` | Audit, mark detail, save beside, `compile_ab`: leafs and vis clusters must fall. |
 | `etl-ships-a-loadable-map` | An ET: Legacy map that loads and plays in etlded. Validates clean; with `--compile`, compiles, packs (script and arena in, base-game files out), passes the pre-ship check and loads in the engine with a client joined. |
 | `etl-build-from-nothing` | A playable ET map made with tool calls only, script included: `map_new` → geometry → entities and keys → `script_set_event`. Same checks, same engine load. |
 
@@ -40,10 +41,10 @@ not be described as if they were.
 failure is a guard nobody knows is connected: delete the playable-space check and that tape
 goes red, while all the others stay green.
 
-`improve-engine-performance` stops at measurement on purpose. `structural_audit` recommends
-marking brushes detail, and there is no tool on the surface that marks a brush detail — so
-no tape can apply the fix. The tape says so in its own `note` rather than quietly covering
-the half that happens to be reachable.
+`improve-engine-performance` and `detail-pass` close the optimisation loop: `structural_audit`
+recommends marking brushes detail, `brush_set_detail` takes its candidates straight in (through
+`args_from`), and with `--compile` a `compile_ab` proves the vis tree shrank. `detail-pass`
+builds its own map, so it runs everywhere; the other needs the game install's map.
 
 ## Writing one
 
@@ -76,6 +77,7 @@ the half that happens to be reachable.
   under.
 - `needs_compile: true` on a step runs it only with `--compile`; otherwise it is reported as
   skipped, never as passed.
+- `args_from` fills arguments from an earlier step's result: `{"brushes": "audit.candidates"}`.
 - `as` names a step so `tool_result` invariants can refer to it later.
 - Steps stop at the first mismatch unless the step sets `continue_on_mismatch`.
 - Invariants run only if every step passed. A tape that broke halfway proves nothing about

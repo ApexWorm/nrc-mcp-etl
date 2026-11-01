@@ -35,8 +35,16 @@ pub struct TextureSpec {
     pub top: Option<String>,
     /// Applied to faces whose normal points mostly down.
     pub bottom: Option<String>,
+    /// Applied to wall faces by the way their normal points: +Y, -Y, +X, -X.
+    pub north: Option<String>,
+    pub south: Option<String>,
+    pub east: Option<String>,
+    pub west: Option<String>,
     /// Texture scale written into the axial texdef.
     pub scale: f64,
+    /// Texture shift (s, t) and rotation in degrees written into the axial texdef.
+    pub offset: [f64; 2],
+    pub rotate: f64,
     /// Set the detail contents bit, so the brush does not block visibility.
     pub detail: bool,
 }
@@ -47,9 +55,15 @@ impl Default for TextureSpec {
             default: "common/caulk".to_string(),
             top: None,
             bottom: None,
+            north: None,
+            south: None,
+            east: None,
+            west: None,
             // 0.5 is what every map in the corpus uses, so a brush emitted here looks like its
             // neighbours instead of standing out at twice the texel density.
             scale: 0.5,
+            offset: [0.0, 0.0],
+            rotate: 0.0,
             detail: false,
         }
     }
@@ -116,8 +130,8 @@ pub fn emit(solid: &Solid, tex: &TextureSpec, grid: i64) -> (Vec<Brush>, EmitRep
                 points,
                 shader,
                 tex: TexDef::Axial {
-                    shift: [num(0.0), num(0.0)],
-                    rotate: num(0.0),
+                    shift: [num(tex.offset[0]), num(tex.offset[1])],
+                    rotate: num(tex.rotate),
                     scale: [num(tex.scale), num(tex.scale)],
                 },
                 surface: Some(SurfaceFlags {
@@ -160,7 +174,10 @@ fn pick_shader(plane: &IPlane, tex: &TextureSpec) -> String {
     match n.major_axis() {
         Axis::Z if n.z > 0.0 => tex.top.clone().unwrap_or_else(|| tex.default.clone()),
         Axis::Z => tex.bottom.clone().unwrap_or_else(|| tex.default.clone()),
-        _ => tex.default.clone(),
+        Axis::Y if n.y > 0.0 => tex.north.clone().unwrap_or_else(|| tex.default.clone()),
+        Axis::Y => tex.south.clone().unwrap_or_else(|| tex.default.clone()),
+        Axis::X if n.x > 0.0 => tex.east.clone().unwrap_or_else(|| tex.default.clone()),
+        Axis::X => tex.west.clone().unwrap_or_else(|| tex.default.clone()),
     }
 }
 
@@ -368,6 +385,35 @@ mod tests {
         assert_eq!(
             plain[0].faces[0].surface.as_ref().unwrap().contents.value(),
             0.0
+        );
+    }
+
+    #[test]
+    fn wall_shaders_follow_the_face_normal_and_the_texdef_carries_offset_and_rotation() {
+        let s = prim::cuboid(ivec3(0, 0, 0), ivec3(64, 64, 64)).unwrap();
+        let spec = TextureSpec {
+            north: Some("t/n".into()),
+            south: Some("t/s".into()),
+            east: Some("t/e".into()),
+            west: Some("t/w".into()),
+            offset: [16.0, 8.0],
+            rotate: 90.0,
+            ..Default::default()
+        };
+        let (brushes, _) = emit(&s, &spec, 1);
+        let mut seen: Vec<String> = brushes[0].faces.iter().map(|f| f.shader.clone()).collect();
+        seen.sort();
+        assert_eq!(
+            seen,
+            ["common/caulk", "common/caulk", "t/e", "t/n", "t/s", "t/w"],
+            "top and bottom fall back to default; each wall gets its side"
+        );
+        let TexDef::Axial { shift, rotate, .. } = &brushes[0].faces[0].tex else {
+            panic!("emit writes axial texdefs")
+        };
+        assert_eq!(
+            (shift[0].value(), shift[1].value(), rotate.value()),
+            (16.0, 8.0, 90.0)
         );
     }
 

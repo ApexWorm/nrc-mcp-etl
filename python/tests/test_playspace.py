@@ -563,3 +563,59 @@ def test_a_fixture_tree_tape_runs_under_its_own_profile_and_skips_compile_steps(
     assert (tmp_path / "scripts" / "nrcroom.arena").is_file()
     assert r["steps"][-1] == {"step": "c", "ok": True, "skipped": "compiling not enabled"}
     assert os.environ["NRC_PROFILE"] == "urt43", "the tape's profile does not outlive it"
+
+
+def test_map_seals_trusts_the_leak_report_not_just_the_pointfile(tmp_path, monkeypatch):
+    """A map with no entity inside 'leaks' without a pointfile (portals.cpp:589-591)."""
+    from nrc_mcp import optimize
+
+    current = tmp_path / "m.map"
+    current.write_text('{\n"classname" "worldspawn"\n}\n')
+    check = playspace.Check(workspace=tmp_path, current=current, allow_compile=True)
+    reports = {
+        "empty": {"ok": False, "artifacts": [], "leaked": True, "hint": "no entity sits inside"},
+        "leak": {"ok": True, "artifacts": [str(tmp_path / "m.lin")], "leaked": True, "hint": ""},
+        "sealed": {"ok": True, "artifacts": [str(tmp_path / "m.bsp")], "leaked": False},
+    }
+    for name, report in reports.items():
+        monkeypatch.setattr(optimize, "_compile_variant", lambda _p, _preset, r=report: r)
+        outcome = playspace.run_invariant("map_seals", check)
+        assert outcome.ok is (name == "sealed"), (name, outcome)
+    monkeypatch.setattr(optimize, "_compile_variant", lambda _p, _preset: reports["empty"])
+    assert "no entity" in playspace.run_invariant("map_seals", check).detail
+
+
+def test_the_compile_wrapper_reports_a_leak_from_q3map2s_banner(tmp_path, monkeypatch):
+    import stat
+
+    q3 = _load_tool("q3map2")
+    fake = tmp_path / "q3map2"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'for a; do m="$a"; done\n'
+        'printf "Size: 0 0 0\\n**********************\\n******* leaked *******\\n" \n'
+        'printf "IBSP" > "${m%.map}.bsp"\n'
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setattr(q3, "find_q3map2", lambda: fake)
+    monkeypatch.setattr(q3, "general_flags", lambda: [])
+    m = tmp_path / "m.map"
+    m.write_text('{\n"classname" "worldspawn"\n}\n')
+    r = q3.compile_map(m, [["-bsp", "-meta"]], stage_dir=None, verbose=False, keep=False)
+    assert r["ok"] and r["leaked"] and r["stages"][0]["leaked"]
+    assert "no entity sits inside" in r["hint"], "no .lin was written, so it is the empty case"
+    (tmp_path / "m.lin").write_text("0 0 0\n")
+    r = q3.compile_map(m, [["-bsp", "-meta"]], stage_dir=None, verbose=False, keep=False)
+    assert "leak_trace" in r["hint"]
+
+
+def _load_tool(name: str):
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parents[2] / "tools" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"_tool_{name}", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module

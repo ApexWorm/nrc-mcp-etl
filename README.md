@@ -339,7 +339,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-58 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+59 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -382,7 +382,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `solid_help` | Every operator, its fields, and the on-grid caveat. |
 | `solid_compile` | Compile geometry and report it, touching nothing. |
 | `solid_preview` | Compile and render, without committing. |
-| `solid_commit` | Compile and add the brushes to the open map. |
+| `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail. |
+| `brush_set_detail` | Mark existing brushes detail (or structural again); takes `structural_audit` findings directly. |
 | `solid_inspect` · `solid_list` | Structure of a recorded shape; everything recorded. |
 | `solid_param_preview` | Show what changing one parameter would produce. |
 | `solid_edit_param` | Change one parameter and record the edited tree. |

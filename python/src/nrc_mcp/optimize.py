@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import time
 import zipfile
@@ -116,6 +117,12 @@ COMPILE_PRESETS = ("draft", "iterate", "quality", "final")
 #: Where `compile_ab` appends its history, so a regression is visible over a project's life
 #: rather than only against whatever was compiled last (§6.1).
 AB_HISTORY_RELATIVE = Path("bench") / "ab-history.jsonl"
+
+
+def _ab_history_default() -> Path:
+    """`NRC_AB_HISTORY` if set - a tape points it into its throwaway workspace - else the repo's."""
+    override = os.environ.get("NRC_AB_HISTORY")
+    return Path(override) if override else repo_root() / AB_HISTORY_RELATIVE
 
 
 class OptimizeError(RuntimeError):
@@ -379,8 +386,8 @@ def structural_audit(
                 "unverified",
                 source="nrc_mcp.optimize structural heuristics",
                 fix_hint=(
-                    "set the detail contents bit (1 << 27) on the brush, or select it in the "
-                    "editor and make it detail"
+                    "brush_set_detail with this finding marks it detail; confirm the gain "
+                    "with compile_ab"
                 ),
                 detail=c,
             )
@@ -1517,9 +1524,21 @@ def _compile_variant(map_path: Path, preset: str) -> dict[str, Any]:
         "bsp_bytes": bsp_file.stat().st_size if bsp_file and bsp_file.is_file() else None,
         "artifacts": [str(a) for a in artifacts],
         "prt": next((str(a) for a in artifacts if a.suffix.lower() == ".prt"), None),
+        "leaked": bool(result.get("leaked")),
+        "hint": result.get("hint") or "",
     }
-    if not metrics["ok"] or bsp_file is None:
+    if bsp_file is None:
         metrics["error"] = "the compile did not produce a .bsp"
+        return metrics
+    if not metrics["ok"]:
+        failed = next(
+            (s for s in result.get("stages") or [] if isinstance(s, dict) and s.get("returncode")),
+            {},
+        )
+        why = metrics["hint"] or "; ".join(
+            (failed.get("errors") or [])[:1] + (failed.get("tail") or [])[-1:]
+        )
+        metrics["error"] = f"stage {' '.join(failed.get('flags') or [])} failed: {why}"
         return metrics
 
     unpack = run_mise_task("bsp:json-unpack", [str(bsp_file)])
@@ -1660,7 +1679,7 @@ def compile_ab(
         "b": {"map": str(b), **{k: right.get(k) for k in ("total_seconds", "bsp_bytes", "counts")}},
         "deltas": deltas,
     }
-    history = Path(history_path) if history_path else repo_root() / AB_HISTORY_RELATIVE
+    history = Path(history_path) if history_path else _ab_history_default()
     history.parent.mkdir(parents=True, exist_ok=True)
     with history.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -1686,7 +1705,7 @@ def compile_ab(
 
 def ab_history(history_path: str | Path | None = None) -> list[dict]:
     """Every A/B row recorded so far, oldest first."""
-    history = Path(history_path) if history_path else repo_root() / AB_HISTORY_RELATIVE
+    history = Path(history_path) if history_path else _ab_history_default()
     if not history.is_file():
         return []
     rows = []
