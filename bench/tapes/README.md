@@ -33,6 +33,8 @@ not be described as if they were.
 | `refactor-one-region` | `solid_edit_param` — change one parameter, leave the rest alone. |
 | `improve-engine-performance` | The optimisation pass. **Measuring half only** — see below. |
 | `catches-interior-clip` | The `ut4_dofa` failure, small. Expects `map_save` to **refuse**. |
+| `etl-ships-a-loadable-map` | An ET: Legacy map that loads and plays in etlded. Validates clean; with `--compile`, compiles, packs (script and arena in, base-game files out), passes the pre-ship check and loads in the engine with a client joined. |
+| `etl-build-from-nothing` | A playable ET map made with tool calls only, script included: `map_new` → geometry → entities and keys → `script_set_event`. Same checks, same engine load. |
 
 `catches-interior-clip` is the one that matters most. A guard nobody tests against a real
 failure is a guard nobody knows is connected: delete the playable-space check and that tape
@@ -67,6 +69,13 @@ the half that happens to be reachable.
   so "before" survives the tape overwriting the working file.
 - `expect` maps a dotted path through the tool's own result to an expected value. A value may
   be a comparison: `{"$gte": 4}`, `{"$lt": 10}`, `{"$ne": null}`, `{"$contains": "x"}`.
+- `fixture_dir` with `map` copies a whole game-directory tree instead (`maps/`, `scripts/`,
+  ...) and keeps the map's own name, for a map whose script and arena are found by that name.
+  `{work}` is then `<workspace>/<map>`.
+- `profile` is the active profile for the whole tape, tools included, whatever the suite runs
+  under.
+- `needs_compile: true` on a step runs it only with `--compile`; otherwise it is reported as
+  skipped, never as passed.
 - `as` names a step so `tool_result` invariants can refer to it later.
 - Steps stop at the first mismatch unless the step sets `continue_on_mismatch`.
 - Invariants run only if every step passed. A tape that broke halfway proves nothing about
@@ -75,7 +84,10 @@ the half that happens to be reachable.
 ## Invariants
 
 Run `python tools/tapes.py --help`, or read `nrc_mcp.playspace`; `playspace.available()` is
-the live list. The ones that need `q3map2` skip cleanly when it is absent and report as
+the live list. `pk3_contents` opens the archive a pack step wrote; `engine_loads` loads it in the
+game itself (`nrc_mcp.engine`, from the profile's `engine:` section) and fails on any line that
+means the game stopped. Both need `--compile`, and `engine_loads` also skips without a game
+install. The ones that need `q3map2` skip cleanly when it is absent and report as
 skipped rather than passed — the same convention `test:diff` uses for its semantic half.
 
 ## Recording instead of writing

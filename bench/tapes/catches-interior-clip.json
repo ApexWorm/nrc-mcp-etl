@@ -20,7 +20,7 @@
       "args": {
         "label": "roof_clip",
         "textures": {
-          "default": "common/playerclip"
+          "default": "{clip_player}"
         },
         "ir": {
           "op": "box",

@@ -1,7 +1,7 @@
 # nrc-mcp
 
 An MCP server for designing, sculpting, optimizing and shipping levels for
-[NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror.
+[NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
 arithmetic, drives `q3map2`, and exposes all of it to an agent as **54 tools, 6 resources and 4 prompts** —
@@ -89,11 +89,13 @@ survive a round-trip. See [Troubleshooting](#troubleshooting).
 Machine-specific paths go in **`mise.local.toml`**, which is gitignored. Nothing in `mise.toml`
 needs editing.
 
+Two game profiles ship: `urt43` (Urban Terror 4.3, the default) and `etl` (ET: Legacy). The
+profile decides the entity rules, the movement constants and the `-game` q3map2 is run with.
+
 ```toml
 [env]
-# Where the game lives. The directory that CONTAINS q3ut4/, not q3ut4 itself.
-URT_BASEPATH = "/mnt/c/Program Files/UrbanTerror43"
-URT_GAMEDIR  = "/mnt/c/Program Files/UrbanTerror43/q3ut4"
+# Urban Terror. The basepath is the directory that CONTAINS q3ut4/, not q3ut4 itself.
+NRC_FS_BASEPATH = "/mnt/c/Program Files/UrbanTerror43"
 
 # The compiler.
 Q3MAP2 = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20240309/q3map2.exe"
@@ -101,23 +103,43 @@ Q3MAP2 = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20240309/q3map2.exe"
 # Set to "windows" when q3map2 is a .exe reached from WSL. Omit on native Linux/macOS.
 NRC_Q3MAP2_MODE = "windows"
 
-# The gamepack .ent files — the only accepted source for the entity ontology.
-URT_GAMEPACK = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20240309/gamepacks/urt.game/q3ut4"
-
 # Your own .map sources. Read-only: corpus:import copies out, never writes back.
-URT_MAPSRC = "/mnt/c/Program Files/UrbanTerror43/q3ut4/maps"
+NRC_MAPSRC = "/mnt/c/Program Files/UrbanTerror43/q3ut4/maps"
+```
+
+```toml
+[env]
+# ET: Legacy. The basepath is the directory that CONTAINS etmain/.
+NRC_PROFILE     = "etl"
+NRC_FS_BASEPATH = "/mnt/c/Program Files (x86)/ETLegacy"
+Q3MAP2          = "/mnt/c/Program Files/NetRadiant/NetRadiant-custom-20260114/q3map2.exe"
+NRC_Q3MAP2_MODE = "windows"
 ```
 
 | Variable | Required for | Notes |
 | --- | --- | --- |
-| `URT_BASEPATH` | compiling, packaging | Passed as `-fs_basepath`. Defaults to a stub in `vendor/`. |
-| `URT_GAMEDIR` | shader auditing | Where `scripts/` and `textures/` are found. |
+| `NRC_PROFILE` | — | Active game profile: `urt43` (default) or `etl`. Set it in `mise.local.toml`, or per command from the shell (`NRC_PROFILE=etl mise run test`); a `mise.local.toml` value wins over the shell. |
+| `NRC_FS_BASEPATH` | compiling, packaging | Passed as `-fs_basepath`. No default; without it q3map2 uses its own. |
+| `NRC_FS_GAME` | mods | Passed as `-fs_game` when set. |
 | `Q3MAP2` | compiling, BSP reports | Defaults to the source build under `vendor/`. |
+| `NRC_Q3MAP2_GAME` | — | Overrides the profile's `-game` (`quake3` for `urt43`, `et` for `etl`). |
 | `NRC_Q3MAP2_MODE` | WSL only | `windows` makes every path translate through `wslpath`. |
-| `URT_GAMEPACK` | re-extracting a profile | Not needed to *use* the shipped profile. |
-| `URT_MAPSRC` | `corpus:import` | Optional. The corpus works without your maps. |
-| `NRC_PROFILE` | — | Active game profile. Defaults to `urt43`. |
+| `NRC_MAPSRC` | `corpus:import` | Optional. The corpus works without your maps. |
 | `NRC_SELFDEV` | — | Set to `1` to allow the opt-in self-tuning loop. Off by default. |
+
+`URT_BASEPATH` and `URT_MAPSRC`, the names these had before there was a second profile, are
+still read when the new names are unset.
+
+**What the ET profile checks.** `validate_profile` runs nine rules (spawn markers, active spawns,
+objective triggers, dangling `target` names) and, when `<map>.script` sits beside the `.map`,
+checks the script against the map: syntax the engine refuses, unknown events and actions, blocks
+no entity runs, and `trigger` / `alertentity` / `setstate` / `setautospawn` arguments that name
+nothing. `balance_report` and `spawn_safety` group ET spawns by their nearest
+`team_WOLF_objective`, read objective ownership from spawnflags, and measure to
+`trigger_objective_info` volumes. `ship_check` looks for the script, objdata, command map,
+tracemap and location file. Run over 47 shipped maps, the checks report one load-time error, a
+misnamed `setautospawn` target in a test build, and otherwise only dead references. Not modelled
+yet: prone clearance, spawn spacing, and the `_lms` script variant.
 
 Check what resolved:
 
@@ -136,6 +158,33 @@ compiling, then results are copied back. You do not have to do anything except s
 
 The consequence to expect: compiling a map under `/home` is slower than compiling one already on
 `/mnt/c`, because of the staging copy.
+
+### Testing an ET map in the engine
+
+`pack_pk3` writes `<map>_autopacked.pk3` next to the folder that holds `maps/`. Put it in an
+`etmain/` under a folder of your choosing and point the server's home there. ET: Legacy's home
+folder is `~/.etlegacy`, not the current directory, so pass `+set fs_homepath`. Pass
+`+set dedicated 1` too: the default, 2, advertises the server to the public master servers.
+
+```sh
+mkdir -p ~/etl-test/etmain && cp mymap_autopacked.pk3 ~/etl-test/etmain/
+etlded +set dedicated 1 +set fs_homepath ~/etl-test +set fs_basepath /path/to/etlegacy \
+       +set sv_pure 0 +set developer 1 +set logfile 2 +devmap mymap
+```
+
+The log is written to `~/etl-test/legacy/etconsole.log`. "Can't find mapscripts/mymap.script" is
+expected: the game looks there first, then in `maps/`.
+
+Or let the repo do it, in a throwaway home folder, and read the log for you:
+
+```sh
+mise run game:smoke -- mymap_autopacked.pk3            # dedicated server: loads, script starts
+mise run game:smoke -- mymap_autopacked.pk3 --client   # also join as a spectator (needs a display or Xvfb)
+```
+
+It fails on any line meaning the game stopped (a `G_Error`, a crash), and lists the game's
+non-fatal complaints. Some errors only happen when a player connects - a map with no
+intermission point runs fine until then - so use `--client` before shipping.
 
 ## Connect an MCP client
 
@@ -290,7 +339,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-55 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+58 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -313,7 +362,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `entity_set_keys` · `entity_remove_keys` | Set or remove keys on any entity, brush entities and worldspawn included. |
 | `brush_geometry` | Exact vertices and derived properties of one brush. |
 | `validate` | Geometry and file-format findings. |
-| `validate_profile` | Entities against the game profile's rules. |
+| `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
+| `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
 **Seeing it**
@@ -375,7 +425,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 
 | Tool | Does |
 | --- | --- |
-| `ship_check` | Naming, levelshot, arena file, package contents. |
+| `ship_check` | Naming, levelshot, arena file, companion files, package contents. |
 | `pack_pk3` | Build the release archive. |
 | `repack_analyze` | Every resource the BSP actually references. |
 
@@ -394,7 +444,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | URI | Contents |
 | --- | --- |
 | `nrc://tasks` | The live mise task list — capability discovery, always current. |
-| `nrc://profile/{id}` | A game profile as YAML. `nrc://profile/urt43` ships. |
+| `nrc://profile/{id}` | A game profile as YAML. `nrc://profile/urt43` and `nrc://profile/etl` ship. |
 | `nrc://conventions` | Representation tiers, caulk, grid discipline, authoring order. |
 | `nrc://corrections` | Claims from the design document that did not survive verification. |
 | `nrc://solid-ir` | The Solid IR operator reference, without spending a tool call. |
@@ -630,7 +680,7 @@ meaningless until you know why.
 | `mise run test:diff` fails on a map | The kernel could not reproduce that file's bytes. Nothing downstream is trustworthy. Run `nrc roundtrip <file>` for the first differing offset. |
 | `semantic: skipped` | No compiler configured. Set `Q3MAP2` in `mise.local.toml`, or `mise run vendor:build`. Not a failure. |
 | q3map2 exits immediately, or complains about the path | Almost always WSL path translation. Set `NRC_Q3MAP2_MODE = "windows"`. UNC paths (`\\wsl$\...`) are rejected by q3map2 itself and staging exists to avoid them. |
-| `-fs_basepath` errors, or no shaders found | `URT_BASEPATH` must be the directory *containing* `q3ut4`, not `q3ut4` itself. |
+| `-fs_basepath` errors, or no shaders found | `NRC_FS_BASEPATH` must be the directory *containing* the game directory (`q3ut4`, `etmain`), not that directory itself. |
 | MCP client shows no tools | The server needs to start in the repo. Set `cwd`, or use `mise -C /path/to/nrc-mcp run mcp:serve`. Check `mise run mcp:tools` works first. |
 | A rule fires that you believe is wrong | Check `nrc://corrections` — some of the design document's rules were wrong. If it is `info`, it is `unverified` by construction and cannot fail a build. |
 | `BRUSH_OFF_GRID` on curves and prisms | Expected. A `.map` stores planes; angled geometry has off-grid vertices necessarily. Judge it only on axis-aligned geometry. |

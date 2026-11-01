@@ -81,13 +81,14 @@ def copy_in(src: Path, dest_dir: Path, source_label: str, out: list[Imported]) -
 
 def import_game_maps(root: Path, out: list[Imported]) -> list[str]:
     notes: list[str] = []
-    raw = os.environ.get("URT_MAPSRC")
+    # URT_MAPSRC is the name this variable had before a second profile existed.
+    raw = os.environ.get("NRC_MAPSRC") or os.environ.get("URT_MAPSRC")
     if not raw:
-        notes.append("URT_MAPSRC is unset — skipping game map sources (set it in mise.local.toml)")
+        notes.append("NRC_MAPSRC is unset — skipping game map sources (set it in mise.local.toml)")
         return notes
     src_dir = Path(raw)
     if not src_dir.is_dir():
-        notes.append(f"URT_MAPSRC={src_dir} is not a directory — skipping")
+        notes.append(f"NRC_MAPSRC={src_dir} is not a directory — skipping")
         return notes
 
     found = sorted(src_dir.glob("*.map"))

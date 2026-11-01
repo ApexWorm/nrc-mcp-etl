@@ -8,6 +8,7 @@ at the end are deliberately cheap; they skip when the corpus has not been import
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -108,7 +109,9 @@ def pid() -> str:
     available = profiles.available()
     if not available:
         pytest.skip("no profiles on disk")
-    return available[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or available[0]
 
 
 @pytest.fixture(scope="module")
@@ -132,12 +135,14 @@ def simple_room(tmp_path, kern, pid) -> analysis.NavGrid:
 # ---------------------------------------------------------------------------
 
 
-def test_movement_constants_are_the_gamepack_figures_not_the_design_document_s(constants):
+def test_movement_constants_are_the_gamepack_figures_not_the_design_document_s(constants, pid):
     """The corrections document's W2: the spec assumed 56 units, the gamepack says 69.375.
 
     Asserted as an exact value because the whole discipline rests on it: a check built on 56
     would pass corridors the player cannot stand up in.
     """
+    if pid != "urt43":
+        pytest.skip("asserts the Urban Terror gamepack's figures")
     assert constants.headroom_stand.value == pytest.approx(69.375)
     assert constants.headroom_stand.value != 56
     assert constants.headroom_stand.confidence == "verified"
@@ -148,10 +153,39 @@ def test_movement_constants_are_the_gamepack_figures_not_the_design_document_s(c
     assert constants.fall_no_damage.value == pytest.approx(200.125)
 
 
-def test_eye_height_is_inferred_and_says_so(constants):
+def test_movement_constants_are_the_engine_source_figures(constants, pid):
+    """ET states no measurements; its figures are literal constants in the engine source.
+
+    The player box is -24..48 (72 tall, 36 wide), and the fall threshold is derived from a
+    damage formula rather than read off, so it must arrive marked unverified.
+    """
+    if pid != "etl":
+        pytest.skip("asserts the ET: Legacy source figures")
+    assert constants.headroom_stand.value == pytest.approx(72)
+    assert constants.headroom_stand.confidence == "verified"
+    assert constants.step_height.value == pytest.approx(18)
+    assert constants.headroom_crouch.value == pytest.approx(48)
+    assert constants.player_width.value == pytest.approx(36)
+    assert constants.ledge_grab_max is None
+    assert constants.fall_no_damage.value == pytest.approx(242)
+    assert not constants.fall_no_damage.verified
+
+
+def test_eye_height_is_inferred_and_says_so(constants, pid):
     """This profile records that the gamepack states no eye height."""
+    if pid != "urt43":
+        pytest.skip("the Urban Terror gamepack is the one that states no eye height")
     assert constants.eye_height_is_inferred is True
     assert constants.eye_height.value == pytest.approx(constants.headroom_stand.value)
+
+
+def test_a_stated_eye_height_is_used_not_inferred(constants, pid):
+    """ET states its view height in source, so the camera goes there, not at the head top."""
+    if pid != "etl":
+        pytest.skip("asserts the ET: Legacy source figures")
+    assert constants.eye_height_is_inferred is False
+    assert constants.eye_height.value == pytest.approx(64)
+    assert profiles.standing_height(pid) == pytest.approx(64)
 
 
 def test_a_profile_without_movement_constants_is_refused_not_guessed(monkeypatch):
@@ -180,11 +214,13 @@ def test_roles_are_discovered_from_profile_data(role_map):
     assert role_map.spawns, "the profile should categorize some classname as a spawn"
     assert role_map.objectives
     assert role_map.spawns.isdisjoint(role_map.objectives)
-    assert role_map.team_key and role_map.group_key
     assert len(role_map.team_labels) >= 2
     # A team taken from a key, and a team taken from the classname, are both understood.
+    # A profile whose spawns carry no team key (ET) names its sides only in classnames.
     label = role_map.team_labels[0]
-    assert role_map.team_of("whatever", {role_map.team_key: label.upper()}) == label
+    if role_map.team_key:
+        assert role_map.group_key
+        assert role_map.team_of("whatever", {role_map.team_key: label.upper()}) == label
     assert role_map.team_of(f"prefix_{label}_suffix", {}) == label
     assert role_map.team_of("nothing", {}) == analysis.UNASSIGNED_TEAM
 
@@ -242,7 +278,8 @@ def test_headroom_is_the_profile_height_rounded_up_to_whole_cells(simple_room, c
     assert grid.headroom_cells == 5
     assert grid.as_dict()["effective_headroom_units"] == 80.0
     assert grid.step_up_cells == 1, "18 units of step is one 16-unit cell"
-    assert grid.fall_cells == 12, "200.125 units of free fall is twelve 16-unit cells"
+    # 200.125 units of free fall is twelve 16-unit cells; a partial cell is not a safe drop.
+    assert grid.fall_cells == math.floor(constants.fall_no_damage.value / 16)
 
 
 def test_a_room_too_low_to_stand_in_is_not_walkable(tmp_path, kern, pid):
@@ -479,7 +516,7 @@ def test_movement_check_reports_a_crouch_height_ceiling_exactly(tmp_path, kern, 
 
     finding = next(f for f in report["findings"] if f["code"] == "MOVE_CROUCH_ONLY_SPACE")
     assert finding["severity"] == "warning", "exact measurement against a verified constant"
-    assert "69.375" in finding["rule_source"]
+    assert f"{constants.headroom_stand.value:g}" in finding["rule_source"]
     assert finding["confidence"] == "verified"
 
 
@@ -504,7 +541,7 @@ def test_movement_check_finds_a_gap_the_player_does_not_fit_through(tmp_path, ke
         f for f in report["findings"] if f["code"] == "MOVE_PASSAGE_NARROWER_THAN_PLAYER"
     )
     assert finding["severity"] == "warning"
-    assert "30.25" in finding["rule_source"]
+    assert f"{constants.player_width.value:g}" in finding["rule_source"]
 
 
 def test_movement_check_says_what_the_profile_cannot_support(tmp_path, kern, pid):
@@ -518,7 +555,7 @@ def test_movement_check_says_what_the_profile_cannot_support(tmp_path, kern, pid
         assert row["reason"], row["check"]
 
 
-def test_every_check_names_the_constant_it_used(tmp_path, kern, pid):
+def test_every_check_names_the_constant_it_used(tmp_path, kern, pid, constants):
     brushes = [
         box((0, 0, -16), (512, 512, 0)),
         box((256, 0, 0), (512, 512, 32)),
@@ -533,7 +570,7 @@ def test_every_check_names_the_constant_it_used(tmp_path, kern, pid):
     step = next(c for c in report["checks"] if c["check"] == "step_height")
     assert step["steps_needing_a_jump"] > 0, "a 32-unit rise is above the 18-unit step limit"
     assert step["steps_needing_a_ledge_grab"] == 0
-    assert step["jump_constant"]["value"] == pytest.approx(66.5)
+    assert step["jump_constant"]["value"] == pytest.approx(constants.jump_up_max.value)
 
 
 def test_a_rise_between_the_jump_and_grab_limits_is_classified_as_a_ledge(
@@ -544,6 +581,8 @@ def test_a_rise_between_the_jump_and_grab_limits_is_classified_as_a_ledge(
     Three profile constants deciding one classification, which is the point: the ladder of
     limits is data, so the report can say "ledge grab" instead of "too high".
     """
+    if constants.ledge_grab_max is None:
+        pytest.skip("this profile states no ledge grab")
     assert constants.jump_up_max.value < 96 < constants.ledge_grab_max.value
     brushes = [
         box((0, 0, -16), (512, 512, 0)),
@@ -581,6 +620,8 @@ def test_sightlines_are_clear_down_an_empty_hall_and_broken_by_a_pillar(tmp_path
 def test_sightline_report_uses_the_profile_eye_height_and_flags_it_as_inferred(
     tmp_path, kern, pid, constants
 ):
+    if not constants.eye_height_is_inferred:
+        pytest.skip("this profile states its eye height")
     path = write_map(tmp_path, room(0, 0, 512, 512))
     report = analysis.sightline_report(path, samples=16, profile_id=pid, cell=16)
     assert report["eye_height"]["value"] == pytest.approx(constants.headroom_stand.value)
@@ -618,6 +659,7 @@ def test_sightline_sampling_is_deterministic_and_capped(tmp_path, kern, pid):
 
 def _two_team_map(tmp_path, role_map, *, name, objective_offset=0.0):
     """A 2048 x 256 hall with a spawn group at each end and one neutral objective."""
+    _needs_team_key(role_map)
     spawn_class = sorted(role_map.spawns)[0]
     neutral = sorted(role_map.objectives)[0]
     red, blue = role_map.team_labels[0], role_map.team_labels[1]
@@ -668,6 +710,7 @@ def test_balance_report_does_not_flag_a_correct_mirrored_objective_pair(
     tmp_path, kern, pid, role_map
 ):
     """Each team being nearer its own flag is CTF working, not CTF broken."""
+    _needs_team_key(role_map)
     red, blue = role_map.team_labels[0], role_map.team_labels[1]
     per_team = {
         team: next(o for o in sorted(role_map.objectives) if team in o.lower())
@@ -701,6 +744,140 @@ def test_balance_report_does_not_flag_a_correct_mirrored_objective_pair(
     assert report["symmetry"]["symmetric"] is True
     assert report["symmetry"]["best"]["transform"] == "mirror_x"
     assert report["symmetry"]["best"]["fraction"] == 1.0
+
+
+def _needs_team_key(role_map) -> None:
+    if not role_map.team_key:
+        pytest.skip("these maps set teams by key; this profile's spawns carry none")
+
+
+class _FakeMap:
+    """Just enough of the kernel's map for `_markers`: entities, and brush bounds."""
+
+    def __init__(self, entities, bounds=None):
+        self._entities = entities
+        self._bounds = bounds or {}
+
+    def entities(self):
+        return self._entities
+
+    def brush_geometry(self, index, primitive):
+        try:
+            lo, hi = self._bounds[index][primitive]
+        except (KeyError, IndexError):
+            raise ValueError(f"entity {index} has no primitive {primitive}") from None
+        return {"usable": True, "bounds": (lo, hi)}
+
+
+def _point(index, classname, origin=None, brushes=0, **keys):
+    return {
+        "index": index,
+        "classname": classname,
+        "origin": list(origin) if origin else None,
+        "brushes": brushes,
+        "patches": 0,
+        "keys": [("classname", classname), *keys.items()],
+    }
+
+
+def test_team_of_reads_spawnflags_for_the_classes_a_profile_lists():
+    r = analysis.Roles(
+        profile="test",
+        spawns=frozenset({"red_spawn"}),
+        objectives=frozenset({"zone"}),
+        team_key="",
+        group_key="",
+        team_labels=("red", "blue"),
+        category_of={},
+        team_flags={"zone": ((1, "red"), (2, "blue"))},
+    )
+    assert r.team_of("zone", {"spawnflags": "2"}) == "blue"
+    assert r.team_of("zone", {"spawnflags": "3"}) == "red", "the first flag set wins"
+    assert r.team_of("zone", {}) == analysis.UNASSIGNED_TEAM, "a listed class never guesses"
+    assert r.team_of("red_spawn", {}) == "red", "unlisted classes still use the classname"
+
+
+def test_markers_group_spawns_by_the_nearest_anchor_and_centre_brush_objectives():
+    r = analysis.Roles(
+        profile="test",
+        spawns=frozenset({"red_spawn", "blue_spawn"}),
+        objectives=frozenset({"zone"}),
+        team_key="",
+        group_key="",
+        team_labels=("red", "blue"),
+        category_of={},
+        team_flags={"zone": ((1, "red"), (2, "blue"))},
+        group_nearest="anchor",
+        group_label_key="description",
+    )
+    game_map = _FakeMap(
+        [
+            _point(0, "anchor", (0, 0, 0), description="West"),
+            _point(1, "anchor", (1000, 0, 0)),
+            _point(2, "red_spawn", (40, 10, 0)),
+            _point(3, "red_spawn", (900, 0, 0)),
+            _point(4, "blue_spawn", (1100, 0, 0)),
+            _point(5, "zone", brushes=2, spawnflags="1"),
+            _point(6, "zone", brushes=1),  # no usable brush: counted as without a position
+        ],
+        {5: [((400, 0, 0), (500, 64, 64)), ((500, 0, 0), (600, 64, 64))]},
+    )
+    spawns, objectives, without = analysis._markers(game_map, r)
+    groups = {m.entity: m.group for m in spawns}
+    assert groups == {2: "West (entity 0)", 3: "entity 1", 4: "entity 1"}
+    assert {m.entity: m.team for m in spawns} == {2: "red", 3: "red", 4: "blue"}
+    (zone,) = objectives
+    assert zone.origin == (500.0, 32.0, 32.0)
+    assert zone.team == "red"
+    assert without == 1, "anchors are not markers, so only the zone without bounds counts"
+
+
+def test_the_etl_profile_groups_spawns_by_marker_and_owns_objectives_by_flag():
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    r = analysis.roles("etl")
+    assert {"team_CTF_redspawn", "team_CTF_bluespawn"} <= r.spawns
+    assert "trigger_objective_info" in r.objectives
+    assert r.category_of["trigger_objective_info"] == "trigger", "still non-solid"
+    assert r.group_nearest == "team_WOLF_objective"
+    assert r.team_of("team_CTF_bluespawn", {}) == "blue"
+    assert r.team_of("trigger_objective_info", {"spawnflags": "1"}) == "red"
+
+
+def test_etl_reports_group_spawns_by_marker_and_centre_a_brush_objective(tmp_path, kern):
+    """The same grouping through the real kernel, which the fake map above only imitates."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    entities = [
+        point_entity("team_WOLF_objective", (128, 128, 8), description="West", spawnflags="1"),
+        point_entity("team_WOLF_objective", (1920, 128, 8), spawnflags="2"),
+    ]
+    for classname, x in (("team_CTF_redspawn", 96), ("team_CTF_bluespawn", 1952)):
+        entities += [point_entity(classname, (x, 64 + i * 32, 8)) for i in range(4)]
+    # A brush entity with no origin key: its position is its brushes' centre.
+    entities.append(
+        '{\n"classname" "trigger_objective_info"\n"spawnflags" "1"\n'
+        + box((992, 96, 0), (1056, 160, 64), "common/trigger")
+        + "}\n"
+    )
+    path = write_map(tmp_path, room(0, 0, 2048, 256), entities, name="et_groups.map")
+
+    report = analysis.balance_report(path, profile_id="etl", cell=16)
+    assert "error" not in report
+    assert report["spawn_count"] == 8
+    assert report["markers_without_origin"] == 0
+    groups = {(g["team"], g["group"]): g["spawns"] for g in report["spawn_groups"]}
+    assert groups == {("red", "West (entity 1)"): 4, ("blue", "entity 2"): 4}
+    (objective,) = report["objectives"]
+    assert objective["origin"] == [1024.0, 128.0, 32.0]
+    assert objective["team"] == "red"
+
+    safety = analysis.spawn_safety(path, profile_id="etl", cell=16)
+    assert safety["spawns_without_origin"] == 0
+    row = next(r for r in safety["spawns"] if r["team"] == "red")
+    assert row["group"] == "West (entity 1)"
+    assert row["nearest_enemy_spawn"]["team"] == "blue"
+    assert row["nearest_enemy_spawn"]["walked_between_teams"]["reachable"] is True
 
 
 def test_symmetry_detection_distinguishes_a_mirror_from_a_rotation():

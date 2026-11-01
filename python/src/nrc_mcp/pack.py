@@ -14,6 +14,15 @@ shape the code:
   single most valuable check here.
 - `repack.exclude` is resolved next to the q3map2 binary, not next to the map, and applies to
   `-repack` only.
+- The archive is written to the engine path, the first base path (`autopk3.cpp:564`,
+  `path_init.cpp:83-84`), which with `-fs_basepath` is the game install. `pack_pk3` moves it
+  out, next to the folder that holds `maps/`.
+
+q3map2 also packs only what it traces: it never adds a map's script, and finds an arena only
+on its own search paths. Without `<game>.exclude` beside the binary it copies base-game
+textures in too. So `pack_pk3` rewrites the archive afterwards, from the profile's
+`packaging` section: the companion files and arena found beside the map go in, and entries the
+base game's own archives already hold at the same path come out.
 
 `ship_check` is driven by the profile's `packaging` section, because naming conventions,
 levelshot sizes and reserved shader prefixes are properties of a game, not of this tool.
@@ -22,6 +31,7 @@ levelshot sizes and reserved shader prefixes are properties of a game, not of th
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -62,12 +72,21 @@ def _q3map2(args: list[str], target: Path, timeout: int = 1800) -> dict[str, Any
     }
 
 
-def pack_pk3(bsp: str | Path, complevel: int | None = None, png: bool = False) -> dict[str, Any]:
-    """Build a pk3 for a compiled BSP with `q3map2 -pk3`.
+def pack_pk3(
+    bsp: str | Path,
+    complevel: int | None = None,
+    png: bool = False,
+    profile_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a pk3 for a compiled BSP with `q3map2 -pk3`, then fix up what it produced.
 
     The packer's own naming is the oracle: if it produces `_FAILEDpack.pk3`, some resource the
     BSP references does not exist on disk, and the map will show missing textures on a server
     even though it compiled. That is reported as a failure regardless of exit code.
+
+    With `profile_id`, the archive also gains the profile's companion files and arena that sit
+    beside the map, and loses what the base game already ships (when `NRC_FS_BASEPATH` is set).
+    Either way it ends up next to the map's folder, never in the game install.
     """
     target = Path(bsp)
     if not target.is_file():
@@ -81,18 +100,44 @@ def pack_pk3(bsp: str | Path, complevel: int | None = None, png: bool = False) -
             raise PackError("complevel must be between -1 and 10")
         flags += ["-complevel", str(complevel)]
 
+    pkg = _packaging(profile_id)
+    base = os.environ.get("NRC_FS_BASEPATH") or ""
+    # q3map2 removes its previous outputs before packing (autopk3.cpp:564-567); do the same where
+    # ours land, or a stale failure marker from an earlier run would read as this run's.
+    for suffix in (SUCCESS_SUFFIX, FAILURE_SUFFIX):
+        _destination(target, f"{target.stem}{suffix}", base).unlink(missing_ok=True)
+
     run = _q3map2(flags, target)
 
     # The packer reports where it wrote the archive; that report is authoritative.
     produced = _find_packages(target, _packer_text(run))
-    failed = [p for p in produced if p.name.endswith(FAILURE_SUFFIX)]
-    good = [p for p in produced if p.name.endswith(SUCCESS_SUFFIX)]
+    basegame = Path(base) / str(pkg["basegame"]) if base and pkg.get("basegame") else None
+
+    moved: list[Path] = []
+    added: list[str] = []
+    dropped: list[str] = []
+    for p in produced:
+        dest = _destination(target, p.name, base)
+        if p.name.endswith(SUCCESS_SUFFIX):
+            a, d = _fix_up(p, dest, target, pkg, basegame)
+            added += a
+            dropped += d
+        elif p.resolve() != dest.resolve():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            p.replace(dest)
+        if p.resolve() != dest.resolve() and p.exists():
+            p.unlink()
+        moved.append(dest)
+    failed = [p for p in moved if p.name.endswith(FAILURE_SUFFIX)]
+    good = [p for p in moved if p.name.endswith(SUCCESS_SUFFIX)]
 
     return {
         "ok": run["ok"] and not failed and bool(good),
         "packages": [str(p) for p in good],
         "failed_packages": [str(p) for p in failed],
         "missing_resources": bool(failed),
+        "added_companions": added,
+        "dropped_basegame": dropped,
         "hint": (
             f"a {FAILURE_SUFFIX} package means the BSP references a resource that is not on "
             "disk; run repack_analyze to see what it asked for"
@@ -102,6 +147,106 @@ def pack_pk3(bsp: str | Path, complevel: int | None = None, png: bool = False) -
         "returncode": run["returncode"],
         "output_tail": run["stdout"][-2000:] or run["stderr"][-2000:],
     }
+
+
+def _packaging(profile_id: str | None) -> dict:
+    if not profile_id:
+        return {}
+    try:
+        pkg = profiles.load(profile_id).get("packaging")
+    except profiles.ProfileError as e:
+        raise PackError(str(e)) from e
+    return pkg if isinstance(pkg, dict) else {}
+
+
+def _map_root(bsp: Path) -> Path:
+    """The folder that holds `maps/`, which the archive's paths are relative to."""
+    return bsp.parent.parent if bsp.parent.name.lower() == "maps" else bsp.parent
+
+
+def _inside(path: Path, root: str) -> bool:
+    if not root:
+        return False
+    try:
+        path.resolve().relative_to(Path(root).resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _destination(bsp: Path, name: str, basepath: str) -> Path:
+    """Next to the map's folder, unless that is inside the game install."""
+    root = _map_root(bsp)
+    if _inside(root, basepath):
+        return repo_root() / "out" / bsp.stem / name
+    return root / name
+
+
+def _companion_paths(stem: str, pkg: dict) -> list[list[str]]:
+    """Archive paths the profile lists for a map, each with the alternatives that satisfy it."""
+    out: list[list[str]] = []
+    for comp in pkg.get("companions") or []:
+        if not isinstance(comp, dict) or not comp.get("path"):
+            continue
+        want = str(comp["path"]).format(map=stem)
+        base = want.rsplit(".", 1)[0]
+        out.append([want] + [f"{base}.{x}" for x in comp.get("any_extension") or []])
+    arena = pkg.get("arena")
+    if isinstance(arena, dict) and arena.get("directory") and arena.get("extension"):
+        out.append([f"{arena['directory']}/{stem}.{arena['extension']}"])
+    return out
+
+
+def basegame_entries(basegame: Path) -> set[str]:
+    """Every path the base game's archives hold, lowercased, as the engine matches them."""
+    names: set[str] = set()
+    if not basegame.is_dir():
+        return names
+    for archive in sorted(basegame.iterdir()):
+        if archive.suffix.lower() != ".pk3" or not archive.is_file():
+            continue
+        try:
+            with zipfile.ZipFile(archive) as z:
+                names.update(n.lower() for n in z.namelist() if not n.endswith("/"))
+        except zipfile.BadZipFile:
+            continue
+    return names
+
+
+def _fix_up(
+    produced: Path, dest: Path, bsp: Path, pkg: dict, basegame: Path | None
+) -> tuple[list[str], list[str]]:
+    """Rewrite the packer's archive at `dest`: companions in, base-game duplicates out."""
+    shipped = basegame_entries(basegame) if basegame else set()
+    root = _map_root(bsp)
+    added: list[str] = []
+    dropped: list[str] = []
+    tmp = dest.with_name(dest.name + ".tmp")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(produced) as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        present: set[str] = set()
+        for info in src.infolist():
+            name = info.filename
+            # The map's own BSP is never dropped, even if a base archive happens to hold one.
+            if name.lower() in shipped and not name.lower().endswith(
+                f"maps/{bsp.stem}.bsp".lower()
+            ):
+                dropped.append(name)
+                continue
+            out.writestr(info, src.read(info))
+            present.add(name.lower())
+        for options in _companion_paths(bsp.stem, pkg):
+            if any(o.lower() in present for o in options):
+                continue
+            for o in options:
+                f = root / o
+                if f.is_file():
+                    out.write(f, o)
+                    present.add(o.lower())
+                    added.append(o)
+                    break
+    tmp.replace(dest)
+    return added, dropped
 
 
 #: q3map2's own report of where it put the archive, e.g. `Saved to /path/to/x_autopacked.pk3`.
@@ -151,7 +296,7 @@ def _find_packages(bsp: Path, output: str = "") -> list[Path]:
         p = Path(m.group(1).strip())
         if p.is_file():
             candidates.append(p)
-    roots = [bsp.parent, repo_root() / "out" / stem, repo_root() / "out"]
+    roots = [bsp.parent, _map_root(bsp), repo_root() / "out" / stem, repo_root() / "out"]
     for root in roots:
         if root.is_dir():
             candidates += list(root.glob(f"{stem}*.pk3"))
@@ -393,6 +538,30 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
                     f"add {d}/{stem}.{ext}",
                 )
             )
+
+    # --- other files the game looks a map up by -------------------------------
+    # Each names a path pattern; a required one missing is a warning, an optional one is noted.
+    for comp in pkg.get("companions") or []:
+        if not isinstance(comp, dict) or not comp.get("path"):
+            continue
+        want = str(comp["path"]).format(map=stem).lower()
+        # An image the renderer finds under any of several extensions.
+        base = want.rsplit(".", 1)[0]
+        accepted = {want} | {f"{base}.{x}".lower() for x in comp.get("any_extension") or []}
+        if accepted & set(lower):
+            continue
+        conf = str(comp.get("confidence", "unverified"))
+        required = bool(comp.get("required"))
+        findings.append(
+            _finding(
+                "SHIP_NO_COMPANION",
+                sev("warning", conf) if required else "info",
+                f"no {want} in {archive.name} ({comp.get('role', 'companion file')}"
+                f"{'' if required else ', optional'})",
+                conf,
+                f"add {want}",
+            )
+        )
 
     # --- reserved shader prefixes -------------------------------------------
     reserved = pkg.get("reserved_shader_prefixes")

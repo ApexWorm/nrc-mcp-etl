@@ -1,0 +1,439 @@
+{
+  "name": "etl-build-from-nothing",
+  "note": "A playable ET: Legacy map built with nothing but tool calls: map_new, solid_commit for the rooms, the player clip and the scripted gate, entity_set_keys for the gate's names, entity_place for both teams' spawns and spawn markers, script_multiplayer, an intermission point and lights, and script_set_event for the whole script. No step writes map or script text by hand, and every entity_place must come back with no notes. It must validate clean under the ET profile; with --compile it compiles, packs with its script inside and nothing the base game ships, passes the pre-ship check, and loads in ET: Legacy with a client joined. Not covered: the .arena file, which no tool writes yet (the pre-ship check notes its absence as info).",
+  "profile": "etl",
+  "steps": [
+    {
+      "tool": "map_new",
+      "as": "new",
+      "args": {
+        "path": "{workspace}/maps/fromnothing.map"
+      },
+      "expect": {
+        "created": true
+      }
+    },
+    {
+      "tool": "solid_commit",
+      "as": "shell",
+      "args": {
+        "label": "shell",
+        "textures": {
+          "default": "bunker_sd/int_wall01"
+        },
+        "ir": {
+          "op": "hollow",
+          "solid": {
+            "op": "box",
+            "min": [
+              -16,
+              -16,
+              -16
+            ],
+            "max": [
+              1040,
+              528,
+              272
+            ]
+          },
+          "thickness": 16
+        }
+      },
+      "expect": {
+        "brushes_created": 6
+      }
+    },
+    {
+      "tool": "solid_commit",
+      "as": "divider",
+      "args": {
+        "label": "divider",
+        "textures": {
+          "default": "bunker_sd/int_wall01"
+        },
+        "ir": {
+          "op": "subtract",
+          "from": {
+            "op": "box",
+            "min": [
+              496,
+              0,
+              0
+            ],
+            "max": [
+              528,
+              512,
+              256
+            ]
+          },
+          "cut": [
+            {
+              "op": "box",
+              "min": [
+                496,
+                192,
+                0
+              ],
+              "max": [
+                528,
+                320,
+                128
+              ]
+            }
+          ]
+        }
+      },
+      "expect": {
+        "brushes_created": 3
+      }
+    },
+    {
+      "tool": "solid_commit",
+      "as": "clip",
+      "args": {
+        "label": "clip_pillar",
+        "textures": {
+          "default": "{clip_player}"
+        },
+        "ir": {
+          "op": "box",
+          "min": [
+            192,
+            192,
+            0
+          ],
+          "max": [
+            256,
+            256,
+            256
+          ]
+        }
+      },
+      "expect": {
+        "brushes_created": 1
+      }
+    },
+    {
+      "tool": "solid_commit",
+      "as": "gate",
+      "args": {
+        "label": "gate",
+        "textures": {
+          "default": "battery_wall/wall02_mid"
+        },
+        "target_classname": "func_explosive",
+        "ir": {
+          "op": "box",
+          "min": [
+            496,
+            192,
+            0
+          ],
+          "max": [
+            528,
+            320,
+            128
+          ]
+        }
+      },
+      "expect": {
+        "created_entity": "func_explosive"
+      }
+    },
+    {
+      "tool": "entity_set_keys",
+      "as": "gate_keys",
+      "args": {
+        "entity": 1,
+        "keys": {
+          "targetname": "gate",
+          "scriptname": "gate"
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "axis_marker",
+      "args": {
+        "classname": "team_WOLF_objective",
+        "origin": [
+          128,
+          128,
+          24
+        ],
+        "keys": {
+          "description": "Axis Bunker",
+          "spawnflags": 1
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "axis_spawn",
+      "args": {
+        "classname": "team_CTF_redspawn",
+        "origin": [
+          96,
+          96,
+          24
+        ],
+        "keys": {
+          "angle": 0,
+          "spawnflags": 3
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "allied_marker",
+      "args": {
+        "classname": "team_WOLF_objective",
+        "origin": [
+          896,
+          128,
+          24
+        ],
+        "keys": {
+          "description": "Allied Bunker",
+          "spawnflags": 2
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "allied_spawn",
+      "args": {
+        "classname": "team_CTF_bluespawn",
+        "origin": [
+          928,
+          96,
+          24
+        ],
+        "keys": {
+          "angle": 180,
+          "spawnflags": 3
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "game_manager",
+      "args": {
+        "classname": "script_multiplayer",
+        "origin": [
+          512,
+          64,
+          64
+        ],
+        "keys": {}
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "intermission",
+      "args": {
+        "classname": "info_player_intermission",
+        "origin": [
+          512,
+          64,
+          200
+        ],
+        "keys": {
+          "angles": [
+            30,
+            90,
+            0
+          ]
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "light_west",
+      "args": {
+        "classname": "light",
+        "origin": [
+          256,
+          256,
+          200
+        ],
+        "keys": {
+          "light": 800
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "light_east",
+      "args": {
+        "classname": "light",
+        "origin": [
+          768,
+          256,
+          200
+        ],
+        "keys": {
+          "light": 800
+        }
+      },
+      "expect": {
+        "notes": []
+      }
+    },
+    {
+      "tool": "script_set_event",
+      "as": "manager_spawn",
+      "args": {
+        "block": "game_manager",
+        "event": "spawn",
+        "actions": [
+          "wm_axis_respawntime 10",
+          "wm_allied_respawntime 10",
+          "wm_set_round_timelimit 10",
+          "wait 50",
+          "setautospawn \"Axis Bunker\" 0",
+          "setautospawn \"Allied Bunker\" 1",
+          "wait 30000",
+          "alertentity gate"
+        ]
+      },
+      "expect": {
+        "did": "created block",
+        "summary.error": 0
+      }
+    },
+    {
+      "tool": "script_set_event",
+      "as": "gate_spawn",
+      "args": {
+        "block": "gate",
+        "event": "spawn",
+        "actions": []
+      },
+      "expect": {
+        "did": "created block"
+      }
+    },
+    {
+      "tool": "script_set_event",
+      "as": "gate_death",
+      "args": {
+        "block": "gate",
+        "event": "death",
+        "actions": [
+          "wm_announce \"The gate between the bunkers is down!\""
+        ]
+      },
+      "expect": {
+        "did": "added event",
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    },
+    {
+      "tool": "map_save",
+      "as": "save",
+      "args": {
+        "allow_non_identical": true
+      },
+      "expect": {
+        "written": true
+      }
+    },
+    {
+      "tool": "validate",
+      "as": "geometry",
+      "expect": {
+        "summary.error": 0
+      }
+    },
+    {
+      "tool": "validate_profile",
+      "as": "entities_and_script",
+      "expect": {
+        "profile": "etl",
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    },
+    {
+      "tool": "compile_map",
+      "as": "compile",
+      "needs_compile": true,
+      "args": {
+        "preset": "iterate",
+        "path": "{workspace}/maps/fromnothing.map"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "tool": "pack_pk3",
+      "as": "pack",
+      "needs_compile": true,
+      "args": {
+        "bsp": "{workspace}/maps/fromnothing.bsp"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "tool": "ship_check",
+      "as": "ship",
+      "needs_compile": true,
+      "args": {
+        "target": "{workspace}/maps/fromnothing.bsp"
+      },
+      "expect": {
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    }
+  ],
+  "invariants": [
+    {
+      "name": "pk3_contents",
+      "args": {
+        "step": "pack",
+        "has": [
+          "maps/fromnothing.bsp",
+          "maps/fromnothing.script"
+        ],
+        "no_basegame": true
+      }
+    },
+    {
+      "name": "engine_loads",
+      "args": {
+        "step": "pack",
+        "client": true
+      }
+    }
+  ]
+}

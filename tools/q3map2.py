@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -177,15 +178,34 @@ def needs_staging(map_path: Path) -> bool:
     return not str(map_path.resolve()).startswith("/mnt/")
 
 
+def profile_q3map2_game() -> str | None:
+    """The active profile's `editor.q3map2_type`, the `-game` its gamepack compiles with.
+
+    Read with a regex rather than a YAML parser for the same reason `seam_lint` does: this
+    tool must run before the Python environment is synced. The key is unique in a profile.
+    """
+    profile = os.environ.get("NRC_PROFILE", "").strip()
+    if not profile:
+        return None
+    path = Path(os.environ.get("NRC_ROOT", ".")) / "profiles" / f"{profile}.yaml"
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    m = re.search(r"^\s*q3map2_type:\s*['\"]?([A-Za-z0-9_]+)", text, re.M)
+    return m.group(1) if m else None
+
+
 def general_flags() -> list[str]:
-    """Build the general flags from environment only.
+    """Build the general flags from the environment and the active profile.
 
     No game name, mod directory or install path is hardcoded here. That is the §7.4 seam:
     this file must stay game-agnostic, and `tools/seam_lint.py` fails the build if a
-    game-specific string appears in it. `NRC_FS_GAME` unset simply means no `-fs_game`,
-    which is the correct game-neutral behaviour rather than a guess.
+    game-specific string appears in it. `-game` comes from `NRC_Q3MAP2_GAME`, then the
+    profile. `NRC_FS_GAME` unset simply means no `-fs_game`, which is the correct
+    game-neutral behaviour rather than a guess.
     """
-    flags = ["-game", os.environ.get("NRC_Q3MAP2_GAME", "quake3")]
+    flags = ["-game", os.environ.get("NRC_Q3MAP2_GAME") or profile_q3map2_game() or "quake3"]
 
     base = os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH")
     if base:

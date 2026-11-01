@@ -100,7 +100,7 @@
     "signature": "(cell: 'float' = 16, profile_id: 'str | None' = None) -> 'dict'"
   },
   "pack_pk3": {
-    "doc": "Build a release archive for a compiled BSP with `q3map2 -pk3` (\u00a76.4).\n\nThe packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a\nresource that is not on disk, so the map would show missing content on a server even\nthough it compiled. That is reported as a failure whatever the exit code.",
+    "doc": "Build a release archive for a compiled BSP with `q3map2 -pk3` (\u00a76.4).\n\nThe packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a\nresource that is not on disk, so the map would show missing content on a server even\nthough it compiled. That is reported as a failure whatever the exit code.\n\nThe archive is then fixed up from the active profile: companion files and the arena that\nsit beside the map are added, files the base game already ships are dropped, and it is\nwritten next to the folder that holds `maps/`, never into the game install.",
     "signature": "(bsp: 'str', complevel: 'int | None' = None, png: 'bool' = False) -> 'dict'"
   },
   "playable_space_diff": {
@@ -138,6 +138,18 @@
   "repack_analyze": {
     "doc": "List every resource a compiled BSP references, via `q3map2 -repack -analyze`.\n\nParsed from the compiler's own dump rather than traced independently \u2014 the compiler's view\nof what a BSP needs is the one that decides whether the map works.",
     "signature": "(bsp: 'str') -> 'dict'"
+  },
+  "script_remove": {
+    "doc": "Remove one event from a block of the open map's script, or the whole block.\n\nWithout `event`, the whole block goes. Everything else in the file is left as it was. The\nscript is written immediately.",
+    "signature": "(block: 'str', event: 'str | None' = None, params: 'list[str] | None' = None) -> 'dict'"
+  },
+  "script_set_event": {
+    "doc": "Set one event's actions in a block of the open map's script, creating what is missing.\n\n`actions` are the event's lines in order, each one action with its arguments, e.g.\n`[\"wait 50\", \"setautospawn \"Axis Bunker\" 0\"]`. They replace the event's current actions;\nthe event, its block and the script file are created if they do not exist. `params` follow\nthe event name, as in `trigger open`. Everything else in the file - comments, layout,\nother blocks - is left exactly as it was.\n\nRefused before anything is written: an event or action the profile does not list, and a\nline the engine would misparse. Written, then reported in `findings`: references that\nresolve to nothing yet, since the entity may be placed next. The script is written\nimmediately; it is a separate file from the `.map`, which still needs `map_save`.",
+    "signature": "(block: 'str', event: 'str', actions: 'list[str]', params: 'list[str] | None' = None) -> 'dict'"
+  },
+  "script_show": {
+    "doc": "The open map's script: its blocks and events, which entities run each block, and findings.\n\nFor a game whose maps carry a script beside the `.map` (the profile's `mapscript:`). A block\nwith an empty `runs_for_entities` never runs: no entity names it. The findings are the same\nones `validate_profile` reports for the script.",
+    "signature": "() -> 'dict'"
   },
   "selfdev_protected": {
     "doc": "List the paths self-modification may never touch, and verify their hash pins.\n\nRead-only, and available whether or not self-dev is enabled: knowing what is frozen is useful\non its own. \u00a711.4 calls this mechanism \"the only thing standing between self-improving and\nself-congratulating\".",
@@ -216,7 +228,7 @@
     "signature": "(grid: 'int | None' = None, severity_min: 'str' = 'warning') -> 'dict'"
   },
   "validate_profile": {
-    "doc": "Validate the open map's entities against the active game profile.\n\nComplements `validate`, which covers game-agnostic geometry. This checks the game's own\nrules: spawn arrangement, objective counts, gametype keys.\n\nEvery rule is data in the profile, and every finding carries a `confidence`. **An\nunverified rule can never produce an error** \u2014 it is downgraded to `info` \u2014 because three\nof the four spawn rules the design document called verified were wrong, and one would have\nfailed correct maps. `nrc://corrections` has the details.",
+    "doc": "Validate the open map's entities against the active game profile.\n\nComplements `validate`, which covers game-agnostic geometry. This checks the game's own\nrules: spawn arrangement, objective counts, gametype keys \u2014 and, for a game whose maps\ncarry a script, that script against the map's entities.\n\nEvery rule is data in the profile, and every finding carries a `confidence`. **An\nunverified rule can never produce an error** \u2014 it is downgraded to `info` \u2014 because three\nof the four spawn rules the design document called verified were wrong, and one would have\nfailed correct maps. `nrc://corrections` has the details.",
     "signature": "(profile_id: 'str | None' = None, severity_min: 'str' = 'info') -> 'dict'"
   }
 }

@@ -34,10 +34,12 @@ Q3MAP2          = "{{config_root}}/vendor/netradiant-custom/install/q3map2"
 # Upstream names this tool `mbspc`, not `bspc` — there is no `bspc` target.
 MBSPC           = "{{config_root}}/vendor/netradiant-custom/install/mbspc"
 MAP_CORPUS      = "{{config_root}}/corpus"
-NRC_PROFILE     = "urt43"
+# Which game to serve: a file in profiles/ (`etl` for ET: Legacy). Taken from the shell, so
+# `NRC_PROFILE=etl mise run test` works; urt43 when unset. A value in mise.local.toml
+# overrides both, shell included.
+NRC_PROFILE     = "{{ get_env(name='NRC_PROFILE', default='urt43') }}"
 NRC_BENCH_OUT   = "{{config_root}}/bench/results"
-# Overridden in mise.local.toml with a real Urban Terror installation.
-URT_BASEPATH    = "{{config_root}}/vendor/urt-basepath"
+# The game install (NRC_FS_BASEPATH) is set in mise.local.toml; there is no default.
 PYTHONPATH      = "{{config_root}}/python/src"
 # Keep uv's venv inside the repo so every task sees the same interpreter.
 UV_PROJECT_ENVIRONMENT = "{{config_root}}/.venv"
@@ -65,7 +67,8 @@ echo "NRC_SRC      = $NRC_SRC          exists=$([ -d "$NRC_SRC" ] && echo yes ||
 echo "Q3MAP2       = $Q3MAP2           exists=$([ -x "$Q3MAP2" ] && echo yes || echo no)"
 echo "MAP_CORPUS   = $MAP_CORPUS       maps=$(ls -1 "$MAP_CORPUS"/**/*.map 2>/dev/null | wc -l)"
 echo "NRC_PROFILE  = $NRC_PROFILE"
-echo "URT_BASEPATH = $URT_BASEPATH     exists=$([ -d "$URT_BASEPATH" ] && echo yes || echo no)"
+BASE="${NRC_FS_BASEPATH:-$URT_BASEPATH}"
+echo "NRC_FS_BASEPATH = $BASE     exists=$([ -n "$BASE" ] && [ -d "$BASE" ] && echo yes || echo no)"
 rustc --version; python --version; uv --version
 """
 
@@ -242,7 +245,7 @@ depends     = ["kernel:build"]
 run         = "uv run pytest python/tests/test_validators.py -q"
 
 [tasks."test:seam"]
-description = "Portability lint: fail if UrT-specific strings leak outside profiles/ + corpus/ (§7.4)"
+description = "Portability lint: fail if game-specific strings leak outside profiles/ + corpus/ (§7.4)"
 run         = "uv run python tools/seam_lint.py"
 
 [tasks."test:tapes"]
@@ -291,6 +294,11 @@ run         = "uv run python tools/q3map2.py --preset final -- {{arg(name='map')
 description = "Dump a .bsp to JSON for BSP introspection (§6.2)"
 usage       = 'arg "<bsp>" help="path to .bsp"'
 run         = "uv run python tools/q3map2.py --json-unpack -- {{arg(name='bsp')}}"
+
+[tasks."game:smoke"]
+description = "Load a packed map in the game's own engine and read its log (needs NRC_FS_BASEPATH)"
+# No usage spec: everything after `--` reaches the script (`-- map.pk3 --client`).
+run         = "uv run python tools/smoke.py"
 
 [tasks."corpus:import"]
 description = "Copy real .map sources (game install + upstream regression tests) into corpus/"

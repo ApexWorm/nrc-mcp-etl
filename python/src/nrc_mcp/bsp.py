@@ -220,6 +220,9 @@ def report(path: str | Path, profile_id: str | None = None) -> dict[str, Any]:
         "lighting_bytes": _byte_len(lumps.get("LightBytes.json")),
         "lightgrid_points": lumps.count("GridPoints.json"),
         "vis_bytes": _byte_len(lumps.get("VisBytes.json")),
+        # Compiled entities, worldspawn included. An upper bound on what the game spawns:
+        # some classes free themselves on spawn.
+        "entities": len(_entity_rows(lumps)),
     }
 
     compiler = {
@@ -316,6 +319,16 @@ def _engine_limits(profile_id: str, counts: dict[str, int]) -> dict[str, Any] | 
     return out
 
 
+def _entity_rows(lumps: Lumps) -> list[dict]:
+    """The entity lump as dicts, whether `-json` wrote it keyed by index or as a list."""
+    ents = lumps.rows("entities.json")
+    if not ents:
+        raw = lumps.get("entities.json")
+        if isinstance(raw, list):
+            ents = [e for e in raw if isinstance(e, dict)]
+    return ents
+
+
 def entity_diff(lumps_path: str | Path, source_map: str | Path) -> dict[str, Any]:
     """Compare the BSP's entity lump against the source `.map`.
 
@@ -326,11 +339,7 @@ def entity_diff(lumps_path: str | Path, source_map: str | Path) -> dict[str, Any
     from .kernel import load_map
 
     lumps = load_lumps(lumps_path)
-    ents = lumps.rows("entities.json")
-    if not ents:
-        raw = lumps.get("entities.json")
-        if isinstance(raw, list):
-            ents = [e for e in raw if isinstance(e, dict)]
+    ents = _entity_rows(lumps)
 
     def classname(d: dict) -> str:
         for k in ("classname", "Classname"):

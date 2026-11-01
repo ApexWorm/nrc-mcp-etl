@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -254,6 +255,151 @@ def test_a_broken_message_template_still_reports_the_facts(monkeypatch):
     assert "facts:" in f[0].message, "a profile typo must not hide the finding"
 
 
+def test_spawnflags_parse_the_way_the_engine_does():
+    """`atoi`: a leading integer, whatever follows, and 0 for nothing at all."""
+    assert rules.parse_spawnflags("6") == 6
+    assert rules.parse_spawnflags(" 14 ") == 14
+    assert rules.parse_spawnflags("3abc") == 3
+    assert rules.parse_spawnflags("") == 0
+    assert rules.parse_spawnflags("x") == 0
+    assert rules.parse_spawnflags(None) == 0
+
+
+def test_key_names_match_without_regard_to_case(monkeypatch):
+    """A shipped map writes `Track`; the engine reads it as `track`, so a rule must too."""
+    rule = {
+        "id": "R",
+        "check": "key_required",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "x",
+        "params": {"classname": "zone", "key": "track"},
+    }
+    assert run(rule, [ent(0, "zone", Track="the gate")], monkeypatch) == []
+    assert run(rule, [ent(0, "zone")], monkeypatch)
+
+
+def test_flag_count_min_needs_enough_entities_with_the_flag(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "flag_count_min",
+        "severity": "warning",
+        "confidence": "verified",
+        "message": "{found} of {of}",
+        "params": {"classname": "spawn", "flag": 2, "count": 1},
+    }
+    assert run(rule, [ent(0, "spawn", spawnflags="3"), ent(1, "spawn")], monkeypatch) == []
+    f = run(rule, [ent(0, "spawn", spawnflags="1"), ent(1, "spawn")], monkeypatch)
+    assert f[0].message == "0 of 2"
+    assert f[0].entities == [0, 1]
+
+
+def test_flag_requires_key_accepts_any_of_several_keys(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "flag_requires_key",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "{found} without {key}",
+        "params": {"classname": "zone", "flag": 4, "keys": ["override", "spawnitem"]},
+    }
+    ok = [
+        ent(0, "zone", spawnflags="14", override="text"),
+        ent(1, "zone", spawnflags="4", spawnitem="text"),
+        ent(2, "zone", spawnflags="3"),  # flag not set: nothing required
+    ]
+    assert run(rule, ok, monkeypatch) == []
+    f = run(rule, [ent(5, "zone", spawnflags="4", override="  ")], monkeypatch)
+    assert f[0].message == "1 without override or spawnitem"
+    assert f[0].entities == [5]
+
+
+def test_targets_resolve_reports_names_that_name_nothing(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "targets_resolve",
+        "severity": "warning",
+        "confidence": "verified",
+        "message": "{found}: {detail}",
+        "params": {
+            "keys": ["target"],
+            "list_keys": ["stages"],
+            "separator": ";",
+            "exclude_classnames": ["label_user"],
+        },
+    }
+    good = [
+        ent(0, "door", targetname="d1"),
+        ent(1, "button", target="d1"),
+        ent(2, "builder", stages="d1;d2;"),
+        ent(3, "door", targetname="d2"),
+        ent(4, "label_user", target="not_an_entity"),
+    ]
+    assert run(rule, good, monkeypatch) == []
+    bad = [
+        ent(0, "door", targetname="d1"),
+        ent(1, "button", target="D1"),
+        ent(2, "b", stages="d1;dx"),
+    ]
+    f = run(rule, bad, monkeypatch)
+    assert "2:" in f[0].message, "names are case-sensitive, and each list entry counts"
+    assert f[0].entities == [1, 2]
+
+
+def test_applies_when_flag_present_needs_one_entity_with_the_flag(monkeypatch):
+    rule = {
+        "id": "R",
+        "check": "count_min",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "x",
+        "applies_when": {
+            "flag_present": [{"classname": "red", "flag": 2}, {"classname": "blue", "flag": 2}]
+        },
+        "params": {"classname": "marker", "count": 1},
+    }
+    assert run(rule, [ent(0, "red"), ent(1, "blue", spawnflags="1")], monkeypatch) == []
+    assert run(rule, [ent(0, "red"), ent(1, "blue", spawnflags="3")], monkeypatch)
+    assert run(rule, [ent(0, "red", spawnflags="2"), ent(1, "marker")], monkeypatch) == []
+
+
+def test_the_etl_profile_refuses_a_map_a_spectator_cannot_join():
+    """Found by loading a map in etlded: team spawns alone crash the server on first connect."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    team_spawns = [
+        ent(0, "worldspawn"),
+        ent(1, "team_CTF_redspawn", spawnflags="3"),
+        ent(2, "team_CTF_bluespawn", spawnflags="3"),
+    ]
+
+    def codes(entities):
+        return {f.code: f.severity for f in rules.evaluate("etl", entities)}
+
+    assert codes(team_spawns)["ETL_SPECTATOR_POINT_REQUIRED"] == "error"
+    for fallback in ("info_player_intermission", "info_player_deathmatch", "info_player_start"):
+        assert "ETL_SPECTATOR_POINT_REQUIRED" not in codes([*team_spawns, ent(3, fallback)])
+
+
+def test_the_etl_profile_errors_only_on_the_script_multiplayer_count_the_engine_stops_on():
+    """Checked in etlded: two stop the game at load, none only prints a complaint."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    world = ent(0, "worldspawn")
+    gm = [ent(i, "script_multiplayer") for i in (1, 2)]
+
+    def codes(entities):
+        return {
+            f.code: f.severity
+            for f in rules.evaluate("etl", entities)
+            if f.code.startswith("ETL_SCRIPT_MULTIPLAYER")
+        }
+
+    assert codes([world]) == {"ETL_SCRIPT_MULTIPLAYER_REQUIRED": "warning"}
+    assert codes([world, gm[0]]) == {}
+    assert codes([world, *gm]) == {"ETL_SCRIPT_MULTIPLAYER_AT_MOST_ONE": "error"}
+
+
 # ---------------------------------------------------------------------------
 # The shipped profile's rules, against real maps
 # ---------------------------------------------------------------------------
@@ -264,7 +410,9 @@ def pid() -> str:
     av = profiles.available()
     if not av:
         pytest.skip("no profiles on disk")
-    return av[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or av[0]
 
 
 def test_shipped_rules_are_all_well_formed(pid):
@@ -480,8 +628,10 @@ def test_ship_check_flags_a_bad_map_name(tmp_path: Path, pid):
     pk3 = make_pk3(tmp_path / "MyMap.pk3", ["maps/MyMap.bsp"])
     r = pack.ship_check(tmp_path / "MyMap.bsp", pid, pk3=pk3)
     f = next(x for x in r["findings"] if x["code"] == "SHIP_MAP_NAME")
-    assert f["confidence"] == "verified"
-    assert f["severity"] == "warning"
+    # Only a verified convention may warn; an unverified one is reported as info.
+    conf = profiles.load(pid)["packaging"]["map_name_confidence"]
+    assert f["confidence"] == conf
+    assert f["severity"] == ("warning" if conf == "verified" else "info")
 
 
 def test_ship_check_flags_shadowing_the_base_game(tmp_path: Path, pid):
@@ -521,6 +671,41 @@ def test_ship_check_findings_are_ordered_worst_first(tmp_path: Path, pid):
     sev = [f["severity"] for f in r["findings"]]
     order = {"error": 0, "warning": 1, "info": 2}
     assert sev == sorted(sev, key=lambda s: order[s])
+
+
+def test_ship_check_reports_missing_companion_files(tmp_path: Path, monkeypatch):
+    """A required companion missing warns; an optional one is noted; images match any format."""
+    monkeypatch.setattr(
+        profiles,
+        "load",
+        lambda _pid: {
+            "packaging": {
+                "companions": [
+                    {"path": "maps/{map}.script", "required": True, "confidence": "verified"},
+                    {"path": "maps/{map}.objdata", "required": False, "confidence": "verified"},
+                    {
+                        "path": "levelshots/{map}_cc.tga",
+                        "any_extension": ["jpg", "png"],
+                        "confidence": "verified",
+                    },
+                ]
+            }
+        },
+    )
+    pk3 = make_pk3(tmp_path / "m.pk3", ["maps/m.bsp", "levelshots/m_cc.jpg"])
+    found = {
+        f["message"].split()[1]: f["severity"]
+        for f in pack.ship_check(tmp_path / "m.bsp", "test", pk3=pk3)["findings"]
+        if f["code"] == "SHIP_NO_COMPANION"
+    }
+    assert found == {"maps/m.script": "warning", "maps/m.objdata": "info"}
+
+    full = make_pk3(
+        tmp_path / "m2.pk3",
+        ["maps/m2.bsp", "maps/m2.script", "maps/m2.objdata", "levelshots/m2_cc.tga"],
+    )
+    r = pack.ship_check(tmp_path / "m2.bsp", "test", pk3=full)
+    assert not [f for f in r["findings"] if f["code"] == "SHIP_NO_COMPANION"]
 
 
 def test_pack_pk3_refuses_a_missing_bsp(tmp_path: Path):
@@ -608,3 +793,125 @@ def test_packer_text_survives_output_that_is_not_json():
         {"stdout": "Saved to /tmp/a.pk3\n", "stderr": ""}
     )
     assert pack._packer_text({"stdout": "", "stderr": ""}) == ""
+
+
+# ---------------------------------------------------------------------------
+# Fixing up what the packer wrote
+# ---------------------------------------------------------------------------
+
+_PACKAGING = {
+    "basegame": "basedir",
+    "arena": {"directory": "scripts", "extension": "arena"},
+    "companions": [
+        {"path": "maps/{map}.script", "required": True},
+        {"path": "levelshots/{map}_cc.tga", "any_extension": ["png", "jpg"]},
+        {"path": "maps/{map}.objdata"},
+    ],
+}
+
+
+@pytest.fixture
+def packer(tmp_path, monkeypatch):
+    """A fake game install and a fake q3map2 that, like the real one, packs into the install."""
+    install = tmp_path / "install"
+    (install / "basedir").mkdir(parents=True)
+    make_pk3(
+        install / "basedir" / "pak0.pk3",
+        ["textures/base/wall.TGA", "maps/nrcroom.bsp", "scripts/shared.shader"],
+    )
+    work = tmp_path / "work"
+    (work / "maps").mkdir(parents=True)
+    bsp = work / "maps" / "nrcroom.bsp"
+    bsp.write_bytes(b"IBSP")
+    monkeypatch.setenv("NRC_FS_BASEPATH", str(install))
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": _PACKAGING})
+    packed = ["maps/nrcroom.bsp", "textures/base/wall.tga", "textures/mine/door.tga"]
+
+    def fake_q3map2(args, target, timeout=1800):
+        out = install / f"{target.stem}{pack.SUCCESS_SUFFIX}"
+        make_pk3(out, packed)
+        return {"ok": True, "returncode": 0, "stdout": f"Saved to {out}\n", "stderr": ""}
+
+    monkeypatch.setattr(pack, "_q3map2", fake_q3map2)
+    return {"install": install, "work": work, "bsp": bsp, "packed": packed}
+
+
+def names(pk3) -> list[str]:
+    with zipfile.ZipFile(pk3) as z:
+        return sorted(z.namelist())
+
+
+def test_pack_pk3_lands_next_to_the_maps_folder_never_in_the_install(packer):
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["ok"]
+    assert r["packages"] == [str(packer["work"] / f"nrcroom{pack.SUCCESS_SUFFIX}")]
+    assert not list(packer["install"].glob("*.pk3")), "nothing may be left in the game install"
+
+
+def test_pack_pk3_adds_the_companions_and_arena_beside_the_map(packer):
+    work = packer["work"]
+    (work / "maps" / "nrcroom.script").write_text("game_manager {}")
+    (work / "scripts").mkdir()
+    (work / "scripts" / "nrcroom.arena").write_text("{}")
+    (work / "levelshots").mkdir()
+    (work / "levelshots" / "nrcroom_cc.jpg").write_bytes(b"jpg")  # an accepted alternative
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert sorted(r["added_companions"]) == [
+        "levelshots/nrcroom_cc.jpg",
+        "maps/nrcroom.script",
+        "scripts/nrcroom.arena",
+    ]
+    assert {"maps/nrcroom.script", "scripts/nrcroom.arena"} <= set(names(r["packages"][0]))
+    assert "maps/nrcroom.objdata" not in names(r["packages"][0]), "absent files are not invented"
+
+
+def test_pack_pk3_does_not_add_a_companion_the_packer_already_packed(packer, monkeypatch):
+    packer["packed"].append("Maps/NRCROOM.script")
+    (packer["work"] / "maps" / "nrcroom.script").write_text("x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert "maps/nrcroom.script" not in r["added_companions"]
+    assert [n.lower() for n in names(r["packages"][0])].count("maps/nrcroom.script") == 1
+
+
+def test_pack_pk3_drops_what_the_base_game_ships_and_says_so(packer):
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == ["textures/base/wall.tga"], "matched without regard to case"
+    contents = names(r["packages"][0])
+    assert "textures/mine/door.tga" in contents
+    assert "maps/nrcroom.bsp" in contents, "the map's own BSP always ships"
+
+
+def test_pack_pk3_keeps_base_game_files_when_no_base_path_is_set(packer, monkeypatch):
+    monkeypatch.delenv("NRC_FS_BASEPATH")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+    assert "textures/base/wall.tga" in names(r["packages"][0])
+
+
+def test_pack_pk3_without_a_profile_only_moves_the_archive(packer):
+    (packer["work"] / "maps" / "nrcroom.script").write_text("x")
+    r = pack.pack_pk3(packer["bsp"])
+    assert r["added_companions"] == [] and r["dropped_basegame"] == []
+    assert names(r["packages"][0]) == sorted(packer["packed"])
+    assert not list(packer["install"].glob("*.pk3"))
+
+
+def test_pack_pk3_for_a_map_inside_the_install_goes_to_out(packer, monkeypatch, tmp_path):
+    inside = packer["install"] / "basedir" / "maps"
+    inside.mkdir()
+    bsp = inside / "nrcroom.bsp"
+    bsp.write_bytes(b"IBSP")
+    monkeypatch.setattr(pack, "repo_root", lambda: tmp_path / "repo")
+    r = pack.pack_pk3(bsp, profile_id="test")
+    assert r["packages"] == [
+        str(tmp_path / "repo" / "out" / "nrcroom" / f"nrcroom{pack.SUCCESS_SUFFIX}")
+    ]
+    assert not list(packer["install"].rglob(f"*{pack.SUCCESS_SUFFIX}"))
+
+
+def test_pack_pk3_clears_a_stale_failure_marker_before_packing(packer):
+    stale = packer["work"] / f"nrcroom{pack.FAILURE_SUFFIX}"
+    stale.write_bytes(b"PK\x03\x04")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["ok"] and r["failed_packages"] == []
+    assert not stale.exists()

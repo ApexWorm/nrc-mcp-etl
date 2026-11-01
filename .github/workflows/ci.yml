@@ -97,3 +97,56 @@ jobs:
 
       - name: Python lint
         run: mise run py:check
+
+  etl:
+    # The same tasks again under the ET: Legacy profile. Ubuntu only: what differs between
+    # profiles is data, not platform, and the kernel matrix above already covers the OSes.
+    # mise.toml reads NRC_PROFILE from the environment, so this is the line a developer runs.
+    name: etl profile
+    runs-on: ubuntu-latest
+    env:
+      NRC_PROFILE: etl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+        with:
+          experimental: true
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: etl-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Lint and type-check the kernel
+        run: mise run kernel:check
+
+      - name: Unit tests
+        run: mise run test:unit
+
+      - name: Synthetic corpus
+        run: mise run corpus:gen
+
+      - name: Import upstream regression maps
+        run: mise run corpus:import
+
+      - name: Differential round-trip gate
+        run: mise run test:diff
+
+      - name: Validator precision/recall
+        run: mise run test:validators
+
+      - name: Scenario tapes
+        # No game install here, so the ET tape validates but its compile steps report as
+        # skipped; they run with `-- --compile` on a machine with ET: Legacy and q3map2.
+        run: mise run test:tapes
+
+      - name: Portability seam lint
+        run: mise run test:seam
+
+      - name: Python lint
+        run: mise run py:check

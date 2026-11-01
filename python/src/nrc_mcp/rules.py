@@ -33,14 +33,25 @@ would have failed correct maps (`docs/spec-corrections.md`).
     Entities sharing a `group_key` must be at least `distance` apart.
 `forbid_gametype`
     Entities of `classname` must not list `gametype` in `gametype_key`.
+`flag_count_min`
+    At least `count` entities of `classname` must have spawnflag value `flag` set.
+`flag_requires_key`
+    Entities of `classname` with spawnflag value `flag` set must have `key`.
+`targets_resolve`
+    Every value of each key in `keys` must name an entity's `targetname_key`. Keys in
+    `list_keys` hold several names, split on `separator`. `classname` narrows the entities
+    checked; without it every entity is. `exclude_classnames` skips classes whose key of the
+    same name means something else.
 
 Every check may carry `applies_when: {classname_present: X}` so a rule about one gametype
-stays silent on maps that do not use it.
+stays silent on maps that do not use it. `classname_absent: X` and
+`flag_present: {classname: X, flag: N}` (or a list of those, any matching) narrow it further.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,16 +87,27 @@ class Finding:
 # ---------------------------------------------------------------------------
 
 
-def _keys(entity: dict) -> dict[str, str]:
+class _Keys(dict):
+    """Key names matched without regard to case, as the engines' spawn parsers match them."""
+
+    def get(self, key, default=None):
+        return super().get(str(key).lower(), default)
+
+    def __contains__(self, key) -> bool:
+        return super().__contains__(str(key).lower())
+
+
+def _keys(entity: dict) -> _Keys:
     """Entity keys as a mapping, first occurrence winning.
 
     The kernel hands over ordered pairs because `.map` key order is meaningful and duplicates
     occur; rule evaluation does not care about order, and taking the first duplicate matches
-    what the engine's own lookup does.
+    what the engine's own lookup does. Names compare case-insensitively: a shipped map that
+    writes `Track` for `track` loads fine, so a rule must read it too.
     """
-    out: dict[str, str] = {}
+    out = _Keys()
     for k, v in entity.get("keys") or []:
-        out.setdefault(k, v)
+        out.setdefault(str(k).lower(), v)
     return out
 
 
@@ -132,7 +154,19 @@ def _applies(rule: dict, entities: list[dict]) -> bool:
     if present and not _of_class(entities, str(present)):
         return False
     absent = cond.get("classname_absent")
-    return not (absent and _of_class(entities, str(absent)))
+    if absent and _of_class(entities, str(absent)):
+        return False
+    # `flag_present`: some entity of a class has a spawnflag set. A list means any of them.
+    wanted = cond.get("flag_present")
+    if wanted:
+        options = wanted if isinstance(wanted, list) else [wanted]
+        return any(
+            spawnflags(e) & int(o.get("flag", 0))
+            for o in options
+            if isinstance(o, dict)
+            for e in _of_class(entities, str(o.get("classname", "")))
+        )
+    return True
 
 
 def _check_require_any(p: dict, entities: list[dict]) -> tuple[bool, dict]:
@@ -250,6 +284,83 @@ def _groups(p: dict, entities: list[dict]) -> dict[str, list[dict]]:
     return out
 
 
+def parse_spawnflags(value: str | None) -> int:
+    """A spawnflags value as the engine reads it (`atoi`): a leading integer, else 0."""
+    m = re.match(r"\s*([+-]?\d+)", value or "")
+    return int(m.group(1)) if m else 0
+
+
+def spawnflags(entity: dict) -> int:
+    return parse_spawnflags(_keys(entity).get("spawnflags"))
+
+
+def _check_flag_count_min(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    cls = str(p.get("classname", ""))
+    flag = int(p.get("flag", 0))
+    want = int(p.get("count", 1))
+    members = _of_class(entities, cls)
+    flagged = [e for e in members if spawnflags(e) & flag]
+    return len(flagged) >= want, {
+        "found": len(flagged),
+        "of": len(members),
+        "expected": want,
+        "classname": cls,
+        "flag": flag,
+        "entities": [e["index"] for e in members][:64],
+    }
+
+
+def _check_flag_requires_key(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    cls = str(p.get("classname", ""))
+    flag = int(p.get("flag", 0))
+    # Several key names can fill the same field; any one of them satisfies the rule.
+    keys = [str(k) for k in p.get("keys") or [p.get("key", "")]]
+    missing = [
+        e["index"]
+        for e in _of_class(entities, cls)
+        if spawnflags(e) & flag and not any(_keys(e).get(k, "").strip() for k in keys)
+    ]
+    return not missing, {
+        "found": len(missing),
+        "classname": cls,
+        "flag": flag,
+        "key": " or ".join(keys),
+        "entities": missing,
+    }
+
+
+def _check_targets_resolve(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    """References by name that name nothing.
+
+    The engine looks a target up when it fires, not when the map loads, so a dangling name is
+    silent until the moment it was meant to do something.
+    """
+    name_key = str(p.get("targetname_key", "targetname"))
+    names = {v for e in entities if (v := _keys(e).get(name_key, "").strip())}
+    single = [str(k) for k in p.get("keys") or []]
+    lists = [str(k) for k in p.get("list_keys") or []]
+    sep = str(p.get("separator", ";"))
+    cls = p.get("classname")
+    # Classes whose key of the same name means something else, such as a script event label.
+    excluded = {str(c) for c in p.get("exclude_classnames") or []}
+    dangling: list[tuple[int, str, str]] = []
+    for e in entities:
+        if (cls and e.get("classname") != cls) or e.get("classname") in excluded:
+            continue
+        k = _keys(e)
+        for key in single + lists:
+            raw = k.get(key, "")
+            values = raw.split(sep) if key in lists else [raw]
+            for v in (v.strip() for v in values):
+                if v and v not in names:
+                    dangling.append((e["index"], key, v))
+    return not dangling, {
+        "found": len(dangling),
+        "detail": [f"entity {i} {key} {v!r}" for i, key, v in dangling[:8]],
+        "entities": sorted({i for i, _, _ in dangling}),
+    }
+
+
 def _check_group_size(p: dict, entities: list[dict]) -> tuple[bool, dict]:
     want = int(p.get("count", 0))
     sizes = {g: len(es) for g, es in _groups(p, entities).items()}
@@ -293,6 +404,9 @@ CHECKS = {
     "forbid_gametype": lambda p, e: _check_forbid_gametype(p, e),
     "group_size": lambda p, e: _check_group_size(p, e),
     "min_spacing": lambda p, e: _check_min_spacing(p, e),
+    "flag_count_min": lambda p, e: _check_flag_count_min(p, e),
+    "flag_requires_key": lambda p, e: _check_flag_requires_key(p, e),
+    "targets_resolve": lambda p, e: _check_targets_resolve(p, e),
 }
 
 

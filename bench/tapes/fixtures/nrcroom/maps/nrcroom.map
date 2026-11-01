@@ -1,0 +1,168 @@
+{
+"classname" "worldspawn"
+// nrc-mcp hollow (6 brushes)
+{
+( -16 528 272 ) ( -16 -16 -16 ) ( -16 528 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 -16 -16 ) ( -16 -16 272 ) ( 0 -16 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 528 272 ) ( -16 528 -16 ) ( 0 528 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 528 -16 ) ( -16 -16 -16 ) ( 0 -16 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 -16 272 ) ( -16 528 272 ) ( 0 528 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 528 -16 ) ( 0 -16 272 ) ( 0 528 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+{
+( 1040 528 -16 ) ( 1040 -16 272 ) ( 1040 528 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1040 -16 -16 ) ( 1024 -16 272 ) ( 1040 -16 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1040 528 272 ) ( 1024 528 -16 ) ( 1040 528 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1040 528 -16 ) ( 1024 -16 -16 ) ( 1040 -16 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1040 -16 272 ) ( 1024 528 272 ) ( 1040 528 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 528 272 ) ( 1024 -16 -16 ) ( 1024 528 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+{
+( 1024 -16 -16 ) ( 0 -16 272 ) ( 1024 -16 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 0 -16 ) ( 0 -16 -16 ) ( 1024 -16 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 -16 272 ) ( 0 0 272 ) ( 1024 0 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 0 272 ) ( 0 -16 -16 ) ( 0 0 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 0 -16 ) ( 1024 -16 272 ) ( 1024 0 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 0 272 ) ( 0 0 -16 ) ( 1024 0 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+{
+( 1024 528 272 ) ( 0 528 -16 ) ( 1024 528 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 528 -16 ) ( 0 512 -16 ) ( 1024 512 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 512 272 ) ( 0 528 272 ) ( 1024 528 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 528 272 ) ( 0 512 -16 ) ( 0 528 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 528 -16 ) ( 1024 512 272 ) ( 1024 528 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 512 -16 ) ( 0 512 272 ) ( 1024 512 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+{
+( 1024 512 -16 ) ( 0 0 -16 ) ( 1024 0 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 512 0 ) ( 0 0 -16 ) ( 0 512 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 512 -16 ) ( 1024 0 0 ) ( 1024 512 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 0 -16 ) ( 0 0 0 ) ( 1024 0 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 512 0 ) ( 0 512 -16 ) ( 1024 512 -16 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 0 0 ) ( 0 512 0 ) ( 1024 512 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+{
+( 1024 0 272 ) ( 0 512 272 ) ( 1024 512 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 0 512 272 ) ( 0 0 256 ) ( 0 512 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 512 256 ) ( 1024 0 272 ) ( 1024 512 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 0 256 ) ( 0 0 272 ) ( 1024 0 272 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 512 272 ) ( 0 512 256 ) ( 1024 512 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 1024 512 256 ) ( 0 0 256 ) ( 1024 0 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+// nrc-mcp subtract (3 brushes)
+{
+( 496 192 256 ) ( 496 0 0 ) ( 496 192 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 192 0 ) ( 528 0 256 ) ( 528 192 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 0 0 ) ( 496 0 256 ) ( 528 0 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 192 0 ) ( 496 0 0 ) ( 528 0 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 0 256 ) ( 496 192 256 ) ( 528 192 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 192 256 ) ( 496 192 0 ) ( 528 192 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+{
+( 496 512 256 ) ( 496 320 0 ) ( 496 512 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 512 0 ) ( 528 320 256 ) ( 528 512 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 512 256 ) ( 496 512 0 ) ( 528 512 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 512 0 ) ( 496 320 0 ) ( 528 320 0 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 320 256 ) ( 496 512 256 ) ( 528 512 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 320 0 ) ( 496 320 256 ) ( 528 320 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+{
+( 496 320 256 ) ( 496 192 128 ) ( 496 320 128 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 320 128 ) ( 528 192 256 ) ( 528 320 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 192 256 ) ( 496 320 256 ) ( 528 320 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 192 128 ) ( 496 192 256 ) ( 528 192 256 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 320 256 ) ( 496 320 128 ) ( 528 320 128 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+( 528 320 128 ) ( 496 192 128 ) ( 528 192 128 ) bunker_sd/int_wall01 0 0 0 0.5 0.5 0 0 0
+}
+// nrc-mcp box (1 brushes)
+{
+( 192 256 256 ) ( 192 192 0 ) ( 192 256 0 ) common/clip 0 0 0 0.5 0.5 0 0 0
+( 256 256 0 ) ( 256 192 256 ) ( 256 256 256 ) common/clip 0 0 0 0.5 0.5 0 0 0
+( 256 192 0 ) ( 192 192 256 ) ( 256 192 256 ) common/clip 0 0 0 0.5 0.5 0 0 0
+( 256 256 256 ) ( 192 256 0 ) ( 256 256 0 ) common/clip 0 0 0 0.5 0.5 0 0 0
+( 256 256 0 ) ( 192 192 0 ) ( 256 192 0 ) common/clip 0 0 0 0.5 0.5 0 0 0
+( 256 192 256 ) ( 192 256 256 ) ( 256 256 256 ) common/clip 0 0 0 0.5 0.5 0 0 0
+}
+}
+{
+"classname" "func_explosive"
+"targetname" "gate"
+"scriptname" "gate"
+// nrc-mcp box (1 brushes)
+{
+( 496 320 128 ) ( 496 192 0 ) ( 496 320 0 ) battery_wall/wall02_mid 0 0 0 0.5 0.5 0 0 0
+( 528 320 0 ) ( 528 192 128 ) ( 528 320 128 ) battery_wall/wall02_mid 0 0 0 0.5 0.5 0 0 0
+( 528 192 0 ) ( 496 192 128 ) ( 528 192 128 ) battery_wall/wall02_mid 0 0 0 0.5 0.5 0 0 0
+( 528 320 128 ) ( 496 320 0 ) ( 528 320 0 ) battery_wall/wall02_mid 0 0 0 0.5 0.5 0 0 0
+( 528 320 0 ) ( 496 192 0 ) ( 528 192 0 ) battery_wall/wall02_mid 0 0 0 0.5 0.5 0 0 0
+( 528 192 128 ) ( 496 320 128 ) ( 528 320 128 ) battery_wall/wall02_mid 0 0 0 0.5 0.5 0 0 0
+}
+}
+{
+"classname" "team_WOLF_objective"
+"origin" "128 128 24"
+"description" "Axis Bunker"
+"spawnflags" "1"
+}
+{
+"classname" "team_CTF_redspawn"
+"origin" "96 96 24"
+"angle" "0"
+"spawnflags" "3"
+}
+{
+"classname" "team_WOLF_objective"
+"origin" "896 128 24"
+"description" "Allied Bunker"
+"spawnflags" "2"
+}
+{
+"classname" "team_CTF_bluespawn"
+"origin" "928 96 24"
+"angle" "180"
+"spawnflags" "3"
+}
+{
+"classname" "script_multiplayer"
+"origin" "512 64 64"
+"scriptname" "game_manager"
+}
+{
+"classname" "light"
+"origin" "256 256 200"
+"light" "800"
+}
+{
+"classname" "light"
+"origin" "768 256 200"
+"light" "800"
+}
+{
+"classname" "info_player_intermission"
+"origin" "512 64 200"
+"angles" "30 90 0"
+}
+{
+"classname" "team_WOLF_objective"
+"origin" "400 440 24"
+"description" "Axis Annex"
+"spawnflags" "1"
+}
+{
+"classname" "team_CTF_redspawn"
+"origin" "420 460 24"
+"angle" "0"
+"spawnflags" "3"
+}
+{
+"classname" "team_WOLF_objective"
+"origin" "624 440 24"
+"description" "Allied Annex"
+"spawnflags" "2"
+}
+{
+"classname" "team_CTF_bluespawn"
+"origin" "604 460 24"
+"angle" "180"
+"spawnflags" "3"
+}

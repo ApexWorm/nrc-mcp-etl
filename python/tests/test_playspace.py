@@ -13,6 +13,7 @@ missing the disaster, or blocking ordinary work. Both are represented.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -55,7 +56,9 @@ def _profile() -> str:
     available = profiles.available()
     if not available:
         pytest.skip("no profile on disk")
-    return available[0]
+    # The profile the suite runs against; mise sets it, so a second profile on disk
+    # does not silently change which one is tested.
+    return os.environ.get("NRC_PROFILE") or available[0]
 
 
 # ---------------------------------------------------------------------------
@@ -485,3 +488,78 @@ def test_the_regression_tape_expects_a_refusal():
     assert "PLAYSPACE_INTERIOR_SEALED_BY_CLIP" in expected
     assert "PLAYSPACE_CLIP_SURFACE_WALKABLE" in expected
     assert any("refusing to write" in frag for frag in expected)
+
+
+def test_pk3_contents_checks_what_the_pack_step_wrote(tmp_path, monkeypatch):
+    import zipfile
+
+    from nrc_mcp import pack, profiles
+
+    archive = tmp_path / "m_autopacked.pk3"
+    with zipfile.ZipFile(archive, "w") as z:
+        for n in ("maps/m.bsp", "Maps/M.script", "textures/base/wall.tga"):
+            z.writestr(n, b"x")
+    (tmp_path / "install" / "basedir").mkdir(parents=True)
+    with zipfile.ZipFile(tmp_path / "install" / "basedir" / "pak0.pk3", "w") as z:
+        z.writestr("TEXTURES/base/wall.tga", b"x")
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": {"basegame": "basedir"}})
+    check = playspace.Check(
+        workspace=tmp_path,
+        results={"pack": {"packages": [str(archive)]}},
+        profile_id="test",
+        allow_compile=True,
+    )
+
+    ok = playspace.run_invariant("pk3_contents", check, step="pack", has=["maps/m.script"])
+    assert ok.ok, "paths compare without regard to case"
+    missing = playspace.run_invariant("pk3_contents", check, step="pack", has=["scripts/m.arena"])
+    assert not missing.ok and "missing scripts/m.arena" in missing.detail
+
+    monkeypatch.delenv("NRC_FS_BASEPATH", raising=False)
+    assert playspace.run_invariant("pk3_contents", check, step="pack", no_basegame=True).skipped
+    monkeypatch.setenv("NRC_FS_BASEPATH", str(tmp_path / "install"))
+    shipped = playspace.run_invariant("pk3_contents", check, step="pack", no_basegame=True)
+    assert not shipped.ok and "base-game file textures/base/wall.tga" in shipped.detail
+    assert pack.basegame_entries(tmp_path / "nowhere") == set()
+
+    check.allow_compile = False
+    assert playspace.run_invariant("pk3_contents", check, step="pack").skipped
+
+
+def _load_tapes_module():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[2] / "tools" / "tapes.py"
+    spec = importlib.util.spec_from_file_location("_tool_tapes", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_fixture_tree_tape_runs_under_its_own_profile_and_skips_compile_steps(
+    tmp_path, monkeypatch
+):
+    """The ET tape needs its script beside the map under the map's name, and the ET profile."""
+    from nrc_mcp import profiles
+
+    tapes = _load_tapes_module()
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    monkeypatch.setenv("NRC_PROFILE", "urt43")
+    tape = {
+        "name": "t",
+        "profile": "etl",
+        "fixture_dir": "bench/tapes/fixtures/nrcroom",
+        "map": "maps/nrcroom.map",
+        "steps": [
+            {"tool": "map_open", "args": {"path": "{work}"}},
+            {"tool": "validate_profile", "as": "v", "expect": {"profile": "etl"}},
+            {"tool": "compile_map", "as": "c", "needs_compile": True, "args": {"path": "{work}"}},
+        ],
+    }
+    r = tapes.run_tape(tape, workspace=tmp_path, allow_compile=False)
+    assert r["ok"], r["steps"]
+    assert (tmp_path / "maps" / "nrcroom.script").is_file(), "the tree is copied, names kept"
+    assert (tmp_path / "scripts" / "nrcroom.arena").is_file()
+    assert r["steps"][-1] == {"step": "c", "ok": True, "skipped": "compiling not enabled"}
+    assert os.environ["NRC_PROFILE"] == "urt43", "the tape's profile does not outlive it"
