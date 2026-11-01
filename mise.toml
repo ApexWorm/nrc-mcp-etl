@@ -213,10 +213,6 @@ sources     = ["tools/gen_corpus.py"]
 outputs     = ["{{env.MAP_CORPUS}}/synthetic/.stamp"]
 run         = "uv run python tools/gen_corpus.py --out $MAP_CORPUS/synthetic"
 
-[tasks."corpus:fetch"]
-description = "Fetch released UrT .map sources into corpus/real (requires corpus/sources.txt)"
-run         = "uv run python tools/fetch_corpus.py --out $MAP_CORPUS/real"
-
 [tasks."corpus:stats"]
 description = "Summarize the corpus: map count, brush/patch/entity totals, formats seen"
 depends     = ["kernel:build"]

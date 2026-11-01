@@ -1005,3 +1005,32 @@ def test_the_etl_profile_knows_what_stops_an_objective():
     many = [ent(i, "trigger_objective_info", track=str(i)) for i in range(1, 20)]
     assert "ETL_OBJECTIVE_INFO_LIMIT" in codes(*many)
     assert "ETL_CHECKPOINT_SCRIPTNAME" in codes(ent(1, "team_WOLF_checkpoint"))
+
+
+def test_pack_pk3_moves_a_failed_package_out_across_devices_and_fixes_it_up(packer, monkeypatch):
+    """The install and the map often sit on different filesystems, where rename fails."""
+    import errno
+    import os as _os
+
+    install = packer["install"]
+
+    def failing_q3map2(args, target, timeout=1800):
+        out = install / f"{target.stem}{pack.FAILURE_SUFFIX}"
+        make_pk3(out, ["maps/nrcroom.bsp"])
+        return {"ok": True, "returncode": 0, "stdout": f"Saved to {out}\n", "stderr": ""}
+
+    real_rename = _os.rename
+
+    def cross_device(src, dst, *a, **k):
+        if str(src).startswith(str(install)):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst, *a, **k)
+
+    monkeypatch.setattr(pack, "_q3map2", failing_q3map2)
+    monkeypatch.setattr(_os, "rename", cross_device)
+    (packer["work"] / "maps" / "nrcroom.script").write_text("x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["missing_resources"] and not r["ok"]
+    (failed,) = r["failed_packages"]
+    assert "maps/nrcroom.script" in names(failed), "fixed up like a good package"
+    assert not list(install.glob("*.pk3")), "nothing left in the install"

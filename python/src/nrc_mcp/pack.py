@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -118,13 +119,16 @@ def pack_pk3(
     dropped: list[str] = []
     for p in produced:
         dest = _destination(target, p.name, base)
-        if p.name.endswith(SUCCESS_SUFFIX):
+        # A failed package is fixed up too: it is still the map, missing only what the packer
+        # could not find, and testing it should not also lose its script.
+        if zipfile.is_zipfile(p):
             a, d = _fix_up(p, dest, target, pkg, basegame)
             added += a
             dropped += d
         elif p.resolve() != dest.resolve():
             dest.parent.mkdir(parents=True, exist_ok=True)
-            p.replace(dest)
+            # A move, not a rename: the install and the map are often on different devices.
+            shutil.move(p, dest)
         if p.resolve() != dest.resolve() and p.exists():
             p.unlink()
         moved.append(dest)

@@ -32,6 +32,7 @@ import argparse
 import contextlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -58,6 +59,10 @@ def make_read_only(p: Path) -> None:
     """Drop write bits. Best-effort: a DrvFs mount may not honour chmod."""
     with contextlib.suppress(OSError):
         p.chmod(p.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
+#: The keys q3map2 reads a terrain's index image from (map.cpp:1337-1338).
+INDEXMAP_RE = re.compile(r'^"(?:_indexmap|alphamap)" "([^"/\\]+)"', re.M | re.I)
 
 
 def copy_in(src: Path, dest_dir: Path, source_label: str, out: list[Imported]) -> None:
@@ -96,6 +101,12 @@ def import_game_maps(root: Path, out: list[Imported]) -> list[str]:
         if any(m.name.endswith(s) for s in SKIP_SUFFIXES):
             continue
         copy_in(m, root / "corpus" / "real", "game-install", out)
+        # A terrain's index image is read through q3map2's search paths, which the compile
+        # wrapper extends with the map's own folder - so it has to come along beside the map.
+        for name in sorted(set(INDEXMAP_RE.findall(m.read_text(errors="replace")))):
+            image = src_dir / name
+            if image.is_file() and image.parent == src_dir:
+                copy_in(image, root / "corpus" / "real", "game-install", out)
     notes.append(f"scanned {src_dir} ({len(found)} .map files present)")
     return notes
 
