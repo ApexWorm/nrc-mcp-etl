@@ -23,6 +23,10 @@
     "doc": "Exact vertices and derived properties of one brush.\n\nVertices are computed with exact integer arithmetic. When a brush cannot be evaluated\nexactly \u2014 off-grid plane points, too few faces \u2014 this reports `usable: false` with a\nreason rather than returning approximate numbers that look authoritative.",
     "signature": "(entity: 'int', primitive: 'int') -> 'dict'"
   },
+  "brush_set_detail": {
+    "doc": "Mark existing brushes detail (or structural again with `detail=false`).\n\nA detail brush still blocks players and shots but no longer splits the vis tree, which is\nthe biggest lever on vis cost: trim, pillars, props and anything that does not seal the map\nshould be detail. `brushes` is a list of `[entity, primitive]` pairs, or the findings\n`structural_audit` returns (each carries its entity and primitive), passed straight in.\n\nEvery brush is checked before any is changed; a patch or a missing primitive refuses the\nwhole call. Nothing reaches disk until `map_save`. New geometry can be made detail as it is\nbuilt: `solid_commit(textures={\"detail\": true, ...})`.",
+    "signature": "(brushes: 'list', detail: 'bool' = True) -> 'dict'"
+  },
   "bsp_entity_diff": {
     "doc": "Compare a compiled BSP's entity lump against the source `.map`.\n\nEntities can be dropped silently at compile time \u2014 the editor's writer discards empty\ngroup entities and q3map2 drops what it cannot place \u2014 so a count that quietly changed is\na real bug this catches.",
     "signature": "(lumps_path: 'str', source_map: 'str | None' = None) -> 'dict'"
@@ -168,7 +172,7 @@
     "signature": "(samples: 'int' = 200, cell: 'float' = 16, profile_id: 'str | None' = None) -> 'dict'"
   },
   "solid_commit": {
-    "doc": "Compile a Solid IR tree and add the brushes to the open map.\n\nNothing is written to disk: call `map_save` for that. The brushes are tagged with a comment\nnaming `label`, so a human reading the `.map` can see where they came from and delete them\nas a unit.\n\nWith `remember`, the IR is recorded in a `<map>.solids.json` sidecar under `label`, so the\nshape can be re-parameterized later with `solid_edit_param` \u2014 \"make that corridor 32 units\nwider\" instead of moving faces by hand. The `.map` stays canonical; the sidecar is\nadvisory and re-derivable.",
+    "doc": "Compile a Solid IR tree and add the brushes to the open map.\n\n`textures` picks shaders per face direction and can make the brushes detail; `solid_help`\nlists its keys (`default`, `top`, `bottom`, `north`/`south`/`east`/`west`, `scale`,\n`offset`, `rotate`, `detail`).\n\nNothing is written to disk: call `map_save` for that. The brushes are tagged with a comment\nnaming `label`, so a human reading the `.map` can see where they came from and delete them\nas a unit.\n\nWith `remember`, the IR is recorded in a `<map>.solids.json` sidecar under `label`, so the\nshape can be re-parameterized later with `solid_edit_param` \u2014 \"make that corridor 32 units\nwider\" instead of moving faces by hand. The `.map` stays canonical; the sidecar is\nadvisory and re-derivable.",
     "signature": "(ir: 'dict', label: 'str', textures: 'dict | None' = None, grid: 'int | None' = None, target_classname: 'str' = 'worldspawn', remember: 'bool' = True) -> 'dict'"
   },
   "solid_compile": {

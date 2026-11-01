@@ -350,3 +350,57 @@ def test_describe_outlines_the_tree_with_editable_paths():
     assert "hollow" in text
     assert "thickness=16" in text
     assert "cut[0]" in text
+
+
+# ---------------------------------------------------------------------------
+# Textures and detail
+# ---------------------------------------------------------------------------
+
+
+def test_an_unknown_texture_key_is_refused_not_ignored(k):
+    with pytest.raises(ValueError, match='unknown texture key "nort"'):
+        k.solid_compile(ROOM, {"default": "t/wall", "nort": "t/n"}, 8)
+    with pytest.raises(ValueError, match="offset"):
+        k.solid_compile(ROOM, {"offset": 3}, 8)
+
+
+def _faces(path: Path) -> list[str]:
+    return [ln for ln in path.read_text().splitlines() if ln.startswith("(")]
+
+
+def test_brush_set_detail_marks_existing_brushes_and_keeps_other_bits(k, tmp_path):
+    from mcp.server.mcpserver.exceptions import ToolError
+    from nrc_mcp import server as srv
+
+    path = tmp_path / "d.map"
+    srv.map_new(str(path))
+    try:
+        srv.solid_commit(ROOM, label="room", textures={"default": "t/wall"})
+        srv.solid_commit(
+            {"op": "box", "min": [200, 200, 0], "max": [232, 232, 128]},
+            label="pillar",
+            textures={"default": "t/pillar", "north": "t/n"},
+        )
+        r = srv.brush_set_detail([[0, 6]])
+        assert r["brushes"] == [{"entity": 0, "primitive": 6, "was_detail": False, "faces": 6}]
+        assert srv.brush_geometry(0, 6)["detail"] is True
+        assert srv.brush_geometry(0, 0)["detail"] is False, "only the brush named"
+
+        # A structural_audit finding goes straight in, and a second call changes nothing.
+        again = srv.brush_set_detail([{"detail": {"entity": 0, "primitive": 6}}])
+        assert again["already"] == 1
+        srv.brush_set_detail([[0, 6]], detail=False)
+        assert srv.brush_geometry(0, 6)["detail"] is False
+
+        with pytest.raises(ToolError, match="nothing changed: entity 0 has no primitive 99"):
+            srv.brush_set_detail([[0, 0], [0, 99]])
+        assert srv.brush_geometry(0, 0)["detail"] is False, "a refusal changes nothing"
+
+        srv.brush_set_detail([[0, 6]])
+        srv.map_save(allow_non_identical=True)
+        pillar = [ln for ln in _faces(path) if "t/pillar" in ln or "t/n" in ln]
+        assert len(pillar) == 6 and all(ln.endswith("134217728 0 0") for ln in pillar)
+        assert sum("t/n " in ln for ln in pillar) == 1, "the north wall got its own shader"
+    finally:
+        srv.SESSION.map = None
+        srv.SESSION.path = None

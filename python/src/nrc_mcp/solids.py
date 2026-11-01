@@ -244,6 +244,20 @@ mirror, array.
      "segments": 8, "axis": "z"}
     {"op": "array", "node": {...}, "count": 4, "offset": [64,0,0]}
 
+Textures are a separate argument of solid_compile/solid_preview/solid_commit, not part of the
+tree. Every key is optional; an unknown key is refused:
+
+    {"default": "egypt_floor_sd/sandfloor", "top": "...", "bottom": "...",
+     "north": "...", "south": "...", "east": "...", "west": "...",
+     "scale": 0.5, "offset": [0, 0], "rotate": 0, "detail": false}
+
+`top`/`bottom` go on faces pointing mostly up/down; `north`/`south`/`east`/`west` on walls
+facing +Y/-Y/+X/-X; anything unassigned gets `default` (itself `common/caulk` if omitted).
+`scale`, `offset` (s, t) and `rotate` (degrees) are written into every face's texdef.
+`"detail": true` makes the brushes detail: they still block players and shots, but do not
+split the vis tree. Use it for trim, pillars and props; never for walls that seal the map.
+`brush_set_detail` does the same to brushes already in the map.
+
 All coordinates are whole numbers. A room with a door is `hollow` then `carve_opening`; that
 composition yields exactly the brushes a mapper would draw by hand — three for a doorway.
 

@@ -343,6 +343,75 @@ impl PyMap {
         Ok(out)
     }
 
+    /// Set or clear the detail contents bit on whole brushes, leaving every other bit alone.
+    ///
+    /// Every brush is checked before any is changed, so a refusal leaves the map as it was. The
+    /// engine treats a brush as detail if any face carries the bit, so it is set or cleared on
+    /// all of them. A face with no contents trio (Valve 220 may omit it) gains one. Returns one
+    /// dict per brush: `entity`, `primitive`, `was_detail`, `faces`.
+    fn set_brush_detail<'py>(
+        &mut self,
+        py: Python<'py>,
+        primitives: Vec<(usize, usize)>,
+        detail: bool,
+    ) -> PyResult<Bound<'py, PyList>> {
+        use nrc_core::model::SurfaceFlags;
+        use nrc_core::num::Num;
+        use nrc_core::stats::BRUSH_DETAIL_MASK;
+        for &(ei, pi) in &primitives {
+            self.entity_index(ei)?;
+            match self.inner.entities[ei].prims.get(pi) {
+                Some(Primitive::Brush(_)) => {}
+                Some(Primitive::Patch(_)) => {
+                    return Err(err(format!(
+                        "entity {ei} primitive {pi} is a patch; patches carry no brush contents"
+                    )))
+                }
+                Some(Primitive::Raw(r)) => {
+                    return Err(err(format!(
+                        "entity {ei} primitive {pi} is an unrecognized `{}` block",
+                        r.keyword
+                    )))
+                }
+                None => return Err(err(format!("entity {ei} has no primitive {pi}"))),
+            }
+        }
+        let out = PyList::empty(py);
+        for (ei, pi) in primitives {
+            let Some(Primitive::Brush(b)) = self.inner.entities[ei].prims.get_mut(pi) else {
+                unreachable!("checked above")
+            };
+            let was = b.faces.iter().any(|f| {
+                f.surface
+                    .as_ref()
+                    .is_some_and(|s| s.contents.value() as i64 & BRUSH_DETAIL_MASK != 0)
+            });
+            for f in &mut b.faces {
+                let s = f.surface.get_or_insert(SurfaceFlags {
+                    contents: Num::new(0.0),
+                    flags: Num::new(0.0),
+                    value: Num::new(0.0),
+                });
+                let c = s.contents.value() as i64;
+                let c = if detail {
+                    c | BRUSH_DETAIL_MASK
+                } else {
+                    c & !BRUSH_DETAIL_MASK
+                };
+                if c != s.contents.value() as i64 {
+                    s.contents = Num::new(c as f64);
+                }
+            }
+            let d = PyDict::new(py);
+            d.set_item("entity", ei)?;
+            d.set_item("primitive", pi)?;
+            d.set_item("was_detail", was)?;
+            d.set_item("faces", b.faces.len())?;
+            out.append(d)?;
+        }
+        Ok(out)
+    }
+
     /// Remove keys from one entity, every occurrence of each. Returns `(key, removed)` pairs.
     fn remove_keys(&mut self, entity: usize, keys: Vec<String>) -> PyResult<Vec<(String, bool)>> {
         self.entity_index(entity)?;
@@ -977,6 +1046,46 @@ fn node_from_dict(d: &Bound<'_, PyDict>, depth: usize) -> PyResult<Node> {
 fn texture_spec_from(d: Option<&Bound<'_, PyDict>>) -> PyResult<nrc_solid::emit::TextureSpec> {
     let mut spec = nrc_solid::emit::TextureSpec::default();
     let Some(d) = d else { return Ok(spec) };
+    // A misspelt key ("nort") would otherwise be dropped in silence and the face left on the
+    // default shader, which is exactly the kind of quiet wrongness this layer exists to stop.
+    const KNOWN: [&str; 11] = [
+        "default", "top", "bottom", "north", "south", "east", "west", "scale", "offset", "rotate",
+        "detail",
+    ];
+    for key in d.keys() {
+        let k: String = key
+            .extract()
+            .map_err(|_| err("texture keys must be strings"))?;
+        if !KNOWN.contains(&k.as_str()) {
+            return Err(err(format!(
+                "unknown texture key {k:?}; known: {}",
+                KNOWN.join(", ")
+            )));
+        }
+    }
+    for (key, slot) in [
+        ("north", &mut spec.north),
+        ("south", &mut spec.south),
+        ("east", &mut spec.east),
+        ("west", &mut spec.west),
+    ] {
+        if let Some(v) = d.get_item(key)? {
+            *slot = Some(
+                v.extract()
+                    .map_err(|_| err(format!("{key} texture must be a string")))?,
+            );
+        }
+    }
+    if let Some(v) = d.get_item("offset")? {
+        spec.offset = v
+            .extract()
+            .map_err(|_| err("texture offset must be two numbers [s, t]"))?;
+    }
+    if let Some(v) = d.get_item("rotate")? {
+        spec.rotate = v
+            .extract()
+            .map_err(|_| err("texture rotate must be a number of degrees"))?;
+    }
     if let Some(v) = d.get_item("default")? {
         spec.default = v
             .extract()

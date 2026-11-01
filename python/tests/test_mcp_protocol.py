@@ -142,6 +142,7 @@ WRITERS = {
     "script_set_event",
     "script_remove",
     "solid_commit",
+    "brush_set_detail",
     "solid_edit_param",
     "model_place",
     "pack_pk3",
