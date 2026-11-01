@@ -339,7 +339,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-64 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+66 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -385,6 +385,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `solid_preview` | Compile and render, without committing. |
 | `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail; `new_entity` makes a second door or trigger of a class. |
 | `brush_set_detail` | Mark existing brushes detail (or structural again); takes `structural_audit` findings directly. |
+| `patch_commit` | Curved surfaces as patches: a column, an arch, a quarter-round bevel. |
 | `solid_inspect` · `solid_list` | Structure of a recorded shape; everything recorded. |
 | `solid_param_preview` | Show what changing one parameter would produce. |
 | `solid_edit_param` | Change one parameter and record the edited tree. |
@@ -421,6 +422,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `sightline_report` | Sightline length distribution and power positions. |
 | `movement_check` | Clearances against verified movement constants. |
 | `spawn_safety` | Exits per spawn, and distance to the nearest enemy spawn. |
+| `lighting_report` | Lights, ambient and minimum light as q3map2 reads them; warns on a map that would compile black, notes walkable areas far from any light. |
 | `playable_space_diff` | What an edit did to the space a player can stand in. |
 
 **Shipping**
@@ -640,8 +642,9 @@ rotated geometry, and every report says which it is looking at. Closing the gap 
 input — which changes the map — or adaptive floating-point predicates. `crates/nrc-core/src/exact.rs`
 explains why the integer route came first.
 
-**No patch authoring.** Patches are parsed, validated, tessellated and rendered, but cannot be
-created. Curved geometry is editor work.
+**Limited patch authoring.** `patch_commit` makes cylinders, arches and quarter-round bevels as
+`patchDef2`; free-form curves and terrain are still editor work. A patch is a surface, not a solid,
+so it needs a clip brush behind it to stop players.
 
 **No measured reference dimensions.** There is no corpus of width/height/length distributions per
 space category, so sizing comes from the profile's verified constants. Related: no cover density or

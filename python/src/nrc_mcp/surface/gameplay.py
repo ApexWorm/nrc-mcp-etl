@@ -6,6 +6,7 @@ annotations. See `nrc_mcp.server` for how the surface is assembled and scoped.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -114,6 +115,98 @@ def spawn_safety(cell: float = 16, profile_id: str | None = None) -> dict:
         return anamod.spawn_safety(map_path, pid, cell=cell)
     except (OSError, ValueError, MemoryError) as e:
         raise ToolError(str(e)) from e
+
+
+@tool("gameplay", "Lighting report")
+def lighting_report(reach: float = 512, cell: float = 32, profile_id: str | None = None) -> dict:
+    """What lights the map, and where players stand far from any light.
+
+    Read the way q3map2 reads it: an entity whose classname starts with `light` is a light, at
+    intensity 300 unless its `light`/`_light` key says otherwise (light.cpp:330, :439-442);
+    the worldspawn's `_ambient` (or `ambient`) lights everything evenly, and `_minlight` sets a
+    floor (light.cpp:1946, :1959). A map with none of these compiles black. Sky shaders that
+    emit light are not read here.
+
+    `reach` is a heuristic, not q3map2's falloff: walkable areas farther than that from every
+    light are listed as possibly dim. With ambient or minimum light set they are lit anyway.
+    """
+    map_path = _require_path()
+    pid = _require_profile(profile_id)
+    m = SESSION.require()
+    ents = m.entities()
+    world = {k.lower(): v for k, v in ents[0]["keys"]} if ents else {}
+    lights = []
+    for e in ents:
+        if not str(e["classname"]).lower().startswith("light") or not e.get("origin"):
+            continue
+        k = {a.lower(): b for a, b in e["keys"]}
+        try:
+            value = float(k.get("_light") or k.get("light") or 300)
+        except ValueError:
+            value = 300.0
+        lights.append({"entity": e["index"], "origin": list(e["origin"]), "intensity": value})
+
+    def number(*keys: str) -> float:
+        for key in keys:
+            try:
+                return float(world[key])
+            except (KeyError, ValueError):
+                continue
+        return 0.0
+
+    ambient, minlight = number("_ambient", "ambient"), number("_minlight")
+    findings = []
+    if not lights and ambient <= 0 and minlight <= 0:
+        findings.append(
+            {
+                "code": "LIGHT_NONE",
+                "severity": "warning",
+                "confidence": "verified",
+                "message": "no light entity, no _ambient and no _minlight: q3map2 -light will leave "
+                "the map black unless a sky shader emits light",
+                "rule_source": "q3map2 light.cpp:330, :439-442, :1946, :1959",
+                "fix_hint": "place light entities (entity_place classname light), or set _ambient on the worldspawn",
+            }
+        )
+    dim: list[list[float]] = []
+    if lights and ambient <= 0 and minlight <= 0:
+        try:
+            grid = anamod.cached_navgrid(map_path, cell=cell, profile_id=pid)
+        except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
+            raise ToolError(str(e)) from e
+        points = [tuple(lt["origin"]) for lt in lights]
+        for c in grid.walkable_cells():
+            p = grid.centre(c)
+            if all(math.dist(p, q) > reach for q in points):
+                dim.append([round(v) for v in p])
+        if dim:
+            findings.append(
+                {
+                    "code": "LIGHT_DIM_AREA",
+                    "severity": "info",
+                    "confidence": "unverified",
+                    "message": f"{len(dim)} walkable cell(s) of {cell:g} units are farther than "
+                    f"{reach:g} from every light (for example {dim[0]}); they may compile dark",
+                    "rule_source": "heuristic distance, not q3map2's falloff",
+                    "fix_hint": "add a light near them, or set _minlight on the worldspawn",
+                }
+            )
+    return {
+        "lights": len(lights),
+        "intensity": {
+            "min": min((lt["intensity"] for lt in lights), default=None),
+            "max": max((lt["intensity"] for lt in lights), default=None),
+        },
+        "ambient": ambient,
+        "minlight": minlight,
+        "dim_cells": len(dim),
+        "dim_examples": dim[:10],
+        "findings": findings,
+        "summary": {
+            s_: sum(1 for f in findings if f["severity"] == s_)
+            for s_ in ("error", "warning", "info")
+        },
+    }
 
 
 @tool("gameplay", "Compare playable space")

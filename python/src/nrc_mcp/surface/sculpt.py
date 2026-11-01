@@ -141,6 +141,56 @@ def solid_commit(
     return result
 
 
+@tool("sculpt", "Add a curved surface", writes=True)
+def patch_commit(
+    kind: str,
+    centre: list[float],
+    radius: float,
+    length: float,
+    shader: str,
+    axis: str = "z",
+    facing: str | None = None,
+    start_deg: float = 0.0,
+    target_classname: str = "worldspawn",
+    new_entity: bool = False,
+    target_entity: int | None = None,
+    label: str | None = None,
+) -> dict:
+    """Add a curved surface - brushes cannot curve, so the engine draws curves from patches.
+
+    Kinds:
+      - `cylinder`: a vertical column. `centre` is the middle of its base, `length` its height.
+      - `arch`: a half-round vault spanning a doorway or corridor, running along `axis`
+        (`x` or `y`). `centre` is the middle of the circle at one end, on the springing line;
+        `length` is the depth along the axis.
+      - `bevel`: a quarter-round, vertical, for softening a corner. `start_deg` (0, 90, 180,
+        270) picks the quarter; `centre` and `length` as for a cylinder.
+
+    `facing` is the side that is drawn: `out` (default for cylinder and bevel) or `in` (default
+    for an arch, seen from below). A patch is a surface, not a solid: it does not seal the map
+    and players walk through it unless something solid - usually a clip brush - stands behind
+    it. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    k = _kernel()
+    spec = {
+        "kind": kind,
+        "centre": centre,
+        "radius": radius,
+        "length": length,
+        "axis": axis,
+        "start_deg": start_deg,
+    }
+    if facing is not None:
+        spec["facing"] = facing
+    try:
+        result = k.patch_commit(m, spec, shader, target_classname, new_entity, target_entity, label)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    result["next"] = "map_save to write it; a clip brush behind it makes it solid to players"
+    return result
+
+
 @tool("sculpt", "Mark brushes detail", writes=True, idempotent=True)
 def brush_set_detail(brushes: list, detail: bool = True) -> dict:
     """Mark existing brushes detail (or structural again with `detail=false`).

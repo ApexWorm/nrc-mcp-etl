@@ -144,6 +144,7 @@ WRITERS = {
     "objective_place",
     "solid_commit",
     "brush_set_detail",
+    "patch_commit",
     "solid_edit_param",
     "model_place",
     "pack_pk3",
