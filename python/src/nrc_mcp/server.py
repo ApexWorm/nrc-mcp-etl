@@ -213,6 +213,7 @@ def resource_current_map() -> str:
 
 TOOL_NAMES = (
     "map_open",
+    "map_new",
     "map_stats",
     "map_save",
     "query_entities",

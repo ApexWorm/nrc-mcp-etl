@@ -134,6 +134,7 @@ def test_reading_a_resource_returns_content():
 
 #: Tools that change something. Everything else must arrive as read-only.
 WRITERS = {
+    "map_new",
     "map_save",
     "entity_place",
     "entity_set_keys",

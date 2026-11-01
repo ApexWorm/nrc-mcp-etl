@@ -59,6 +59,10 @@
     "doc": "Read a leak pointfile and report the path out of the map.\n\nq3map2 writes a `.lin` beside the map when the world is not sealed. The path runs from the\nentity that leaked to the void, so the first point is inside the map and the last is outside;\nthe gap is somewhere along it.\n\nDefaults to the `.lin` beside the open map.",
     "signature": "(lin_path: 'str | None' = None) -> 'dict'"
   },
+  "map_new": {
+    "doc": "Create an empty `.map` holding only a worldspawn, and open it.\n\nThe start of a map built from nothing: then `solid_commit` for geometry, `entity_place`\nfor point entities, `map_save` to write. An existing file is never overwritten \u2014 open it\nwith `map_open` instead. Missing parent folders are created.\n\nArgs:\n    path: where to create it, ending in `.map`. Relative paths resolve against the repo root.\n    grid: authoring grid, as for `map_open`.",
+    "signature": "(path: 'str', grid: 'int' = 8) -> 'dict'"
+  },
   "map_open": {
     "doc": "Open a `.map` file for analysis.\n\nArgs:\n    path: path to the `.map`. Relative paths resolve against the repo root.\n    grid: authoring grid that off-grid geometry is measured against.\n\nReturns a summary plus a round-trip check. If `round_trip.identical` is false, treat\nevery later answer about this map with suspicion and report it \u2014 that is the \u00a73.2 gate\nfailing on a real file, which is a kernel bug worth fixing before anything else.",
     "signature": "(path: 'str', grid: 'int' = 8) -> 'dict'"

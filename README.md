@@ -290,7 +290,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-54 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+55 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -305,6 +305,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | Tool | Does |
 | --- | --- |
 | `map_open` | Open a `.map` for analysis. Everything else works on it. |
+| `map_new` | Create an empty `.map` (just a worldspawn) and open it. Never overwrites an existing file. |
 | `map_stats` | Counts, bounds, shader histogram, grid alignment. |
 | `map_save` | Write it back. Refuses if the map did not round-trip when opened, or if the write would destroy playable space. |
 | `query_entities` | Entities, filterable by classname. |

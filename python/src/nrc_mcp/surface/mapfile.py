@@ -69,6 +69,43 @@ def map_open(path: str, grid: int = 8) -> dict:
     }
 
 
+#: An empty map: the worldspawn every map starts with, and nothing else.
+EMPTY_MAP = '{\n"classname" "worldspawn"\n}\n'
+
+
+@tool("map", "Create a new map", writes=True)
+def map_new(path: str, grid: int = 8) -> dict:
+    """Create an empty `.map` holding only a worldspawn, and open it.
+
+    The start of a map built from nothing: then `solid_commit` for geometry, `entity_place`
+    for point entities, `map_save` to write. An existing file is never overwritten — open it
+    with `map_open` instead. Missing parent folders are created.
+
+    Args:
+        path: where to create it, ending in `.map`. Relative paths resolve against the repo root.
+        grid: authoring grid, as for `map_open`.
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        p = repo_root() / p
+    if p.suffix.lower() != ".map":
+        raise ToolError(f"{p} does not end in .map")
+    if p.exists():
+        raise ToolError(f"{p} already exists; map_new never overwrites — open it with map_open")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Exclusive creation, so a file that appears between the check and the write is not
+        # overwritten either.
+        with p.open("x", encoding="utf-8", newline="\n") as f:
+            f.write(EMPTY_MAP)
+    except FileExistsError as e:
+        raise ToolError(f"{p} already exists; map_new never overwrites") from e
+    result = map_open(str(p), grid=grid)
+    result["created"] = True
+    result["next"] = "solid_commit for geometry, entity_place for point entities, then map_save"
+    return result
+
+
 @tool("map", "Map statistics")
 def map_stats(grid: int | None = None) -> dict:
     """Statistics for the open map: counts, bounds, shader histogram, grid alignment.

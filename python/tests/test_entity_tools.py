@@ -320,3 +320,47 @@ def test_no_urt43_entity_gains_keys_from_an_applies_to_all_block():
         pytest.skip("no urt43 profile on disk")
     blocks = profiles.load("urt43").get("key_blocks") or {}
     assert not any(b.get("applies_to_all") for b in blocks.values() if isinstance(b, dict))
+
+
+# ---------------------------------------------------------------------------
+# map_new
+# ---------------------------------------------------------------------------
+
+
+def test_map_new_creates_a_worldspawn_only_map_and_opens_it(tmp_path):
+    path = tmp_path / "fresh" / "m.map"
+    r = srv.map_new(str(path))
+    assert r["created"] is True
+    assert path.read_text() == '{\n"classname" "worldspawn"\n}\n'
+    assert r["round_trip"]["identical"], "what it writes is what the kernel writes back"
+    assert srv.SESSION.path == path
+    assert [e["classname"] for e in srv.query_entities()["entities"]] == ["worldspawn"]
+
+
+def test_map_new_never_overwrites(tmp_path):
+    path = tmp_path / "taken.map"
+    path.write_text("// somebody's work\n")
+    with pytest.raises(ToolError, match="already exists"):
+        srv.map_new(str(path))
+    assert path.read_text() == "// somebody's work\n"
+    assert srv.SESSION.path is None, "nothing was opened"
+    with pytest.raises(ToolError, match=r"\.map"):
+        srv.map_new(str(tmp_path / "notes.txt"))
+
+
+def test_a_map_built_from_map_new_saves_where_it_was_created(pid, tmp_path):
+    path = tmp_path / "built.map"
+    srv.map_new(str(path))
+    srv.solid_commit(
+        {
+            "op": "hollow",
+            "solid": {"op": "box", "min": [0, 0, 0], "max": [512, 512, 256]},
+            "thickness": 16,
+        },
+        label="room",
+    )
+    point = _point(pid)
+    srv.entity_place(point["classname"], INSIDE)
+    saved = srv.map_save(allow_non_identical=True)
+    assert saved["written"]
+    assert [e["classname"] for e in kernel.load_map(path).entities()][-1] == point["classname"]
