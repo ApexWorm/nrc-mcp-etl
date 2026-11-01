@@ -230,6 +230,7 @@ TOOL_NAMES = (
     "script_show",
     "script_set_event",
     "script_remove",
+    "objective_place",
     "bsp_report",
     "bsp_entity_diff",
     "pack_pk3",

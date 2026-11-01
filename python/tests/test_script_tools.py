@@ -42,7 +42,7 @@ def test_script_show_says_which_entities_run_each_block(nrcroom):
     assert blocks["game_manager"]["runs_for_entities"], "script_multiplayer runs it implicitly"
     assert blocks["gate"]["runs_for_entities"], "the func_explosive's scriptname names it"
     spawn = blocks["game_manager"]["events"][0]
-    assert spawn["event"] == "spawn" and "setautospawn Axis Bunker 0" in spawn["actions"]
+    assert spawn["event"] == "spawn" and 'setautospawn "Axis Bunker" 0' in spawn["actions"]
     assert r["summary"]["error"] == 0
 
 
@@ -80,7 +80,7 @@ def test_a_map_built_from_nothing_gets_its_script_through_the_tools(tmp_path):
     srv.map_new(str(tmp_path / "maps" / "fresh.map"))
     srv.entity_place("script_multiplayer", [0, 0, 64])
     assert srv.script_show()["exists"] is False
-    r = srv.script_set_event("game_manager", "spawn", ["wm_axis_respawntime 10", "wait 50"])
+    r = srv.script_set_event("game_manager", "spawn", ["wm_axis_respawntime 10", "wm_setwinner 0", "wait 50"])
     assert r["did"] == "created block"
     assert (tmp_path / "maps" / "fresh.script").read_text().startswith("game_manager\n{\n\tspawn")
     assert r["summary"] == {"error": 0, "warning": 0, "info": 0}
@@ -92,3 +92,59 @@ def test_a_profile_without_map_scripts_says_so(nrcroom, monkeypatch):
     monkeypatch.setenv("NRC_PROFILE", "urt43")
     with pytest.raises(ToolError, match="describes no map script"):
         srv.script_show()
+
+
+def test_script_show_quotes_arguments_so_actions_can_be_written_back(nrcroom):
+    spawn = srv.script_show()["blocks"][0]["events"][0]["actions"]
+    assert 'setautospawn "Axis Bunker" 0' in spawn
+    srv.script_set_event("game_manager", "spawn", spawn)
+    assert srv.validate_profile()["summary"]["error"] == 0, "round-trips without breaking names"
+
+
+def test_objective_place_builds_each_kind_that_validates_clean(nrcroom):
+    r = srv.objective_place(
+        "dynamite",
+        "radio",
+        "the Allied Radio",
+        "allies",
+        objective={"min": [800, 400, 0], "max": [864, 464, 64]},
+        trigger={"min": [768, 368, 0], "max": [896, 496, 128]},
+    )
+    assert [e["classname"] for e in r["entities"]] == ["trigger_objective_info", "func_explosive"]
+    assert r["summary"]["error"] == 0 and r["summary"]["warning"] == 0
+    toi, boom = (srv.query_entities()["entities"][e["entity"]] for e in r["entities"])
+    assert dict(toi["keys"])["target"] == "radio" and dict(toi["keys"])["spawnflags"] == "2"
+    assert dict(boom["keys"])["constructible_class"] == "3"
+
+    c = srv.objective_place(
+        "constructible",
+        "barrier",
+        "the Axis Barrier",
+        "axis",
+        objective={"min": [300, 16, 0], "max": [316, 160, 96]},
+        trigger={"min": [256, 16, 0], "max": [384, 208, 128]},
+    )
+    assert c["summary"]["error"] == 0
+    text = nrcroom.read_text()
+    assert "built final" in text and "decayed final" in text
+
+
+def test_objective_place_refuses_before_changing_anything(nrcroom):
+    before = (len(srv.query_entities()["entities"]), nrcroom.read_text())
+    for kwargs, msg in [
+        ({"kind": "flag"}, "unknown objective kind"),
+        ({"team": "red"}, "team must be one of"),
+        ({"name": "gate"}, "already uses the name 'gate'"),
+        ({"track": 'say "hi"'}, "no double quotes"),
+    ]:
+        args = {
+            "kind": "dynamite",
+            "name": "radio",
+            "track": "x",
+            "team": "allies",
+            "objective": {"min": [0, 0, 0], "max": [8, 8, 8]},
+            "trigger": {"min": [0, 0, 0], "max": [8, 8, 8]},
+        }
+        with pytest.raises(ToolError, match=msg):
+            srv.objective_place(**{**args, **kwargs})
+    assert (len(srv.query_entities()["entities"]), nrcroom.read_text()) == before

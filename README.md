@@ -339,7 +339,7 @@ structural brushes generate portals, and most brushes do not need to be structur
 
 ## Tool reference
 
-59 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+60 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -364,6 +364,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `validate` | Geometry and file-format findings. |
 | `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
 | `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
+| `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite` and `constructible`). |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
 **Seeing it**
@@ -382,7 +383,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `solid_help` | Every operator, its fields, and the on-grid caveat. |
 | `solid_compile` | Compile geometry and report it, touching nothing. |
 | `solid_preview` | Compile and render, without committing. |
-| `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail. |
+| `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail; `new_entity` makes a second door or trigger of a class. |
 | `brush_set_detail` | Mark existing brushes detail (or structural again); takes `structural_audit` findings directly. |
 | `solid_inspect` · `solid_list` | Structure of a recorded shape; everything recorded. |
 | `solid_param_preview` | Show what changing one parameter would produce. |

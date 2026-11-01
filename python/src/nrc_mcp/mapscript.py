@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import profiles
-from .rules import Finding
+from .rules import Finding, parse_spawnflags
 
 
 class ScriptSyntaxError(ValueError):
@@ -318,7 +318,136 @@ def check(
     live = {n for n in by_name if n in named}
     out += _references(spec, live, entities, by_name, path.name, finding)
     out += _entity_events(spec, entities, by_name, path.name, finding)
+    out += _arg_ranges(spec, live, by_name, path.name, finding)
+    out += _required_actions(spec, live, by_name, path.name, finding)
+    out += _objective_requirements(spec, entities, by_name, finding)
     return out
+
+
+def _arg_ranges(spec, live, by_name, filename, finding) -> list[Finding]:
+    """Numeric action arguments the engine refuses outside a range, when the action runs."""
+    out: list[Finding] = []
+    for rule in spec.get("arg_ranges") or []:
+        if not isinstance(rule, dict):
+            continue
+        name, arg = str(rule.get("action", "")).lower(), int(rule.get("arg", 0))
+        lo, hi = float(rule.get("min", float("-inf"))), float(rule.get("max", float("inf")))
+        for b in by_name.values():
+            for ev in b.events:
+                for act in ev.actions:
+                    if act.name != name or len(act.args) <= arg:
+                        continue
+                    try:
+                        v = float(act.args[arg])
+                    except ValueError:
+                        v = 0.0  # the engine reads it with atoi: anything else is 0
+                    if lo <= v <= hi:
+                        continue
+                    sev = str(rule.get("severity", "warning"))
+                    out.append(
+                        finding(
+                            "MAPSCRIPT_ARGUMENT_RANGE",
+                            sev if b.name.lower() in live else _milder(sev),
+                            f"{filename} line {act.line}: {name} {act.args[arg]!r} is outside "
+                            f"{rule.get('min', '')}..{rule.get('max', '')}; "
+                            f"{rule.get('consequence', '')}".rstrip("; "),
+                        )
+                    )
+    return out
+
+
+def _required_actions(spec, live, by_name, filename, finding) -> list[Finding]:
+    """Actions a running block should call, such as a win condition in the manager's spawn."""
+    out: list[Finding] = []
+    for rule in spec.get("required_actions") or []:
+        if not isinstance(rule, dict):
+            continue
+        block = str(rule.get("block", "")).lower()
+        b = by_name.get(block)
+        if b is None or block not in live:
+            continue  # a missing or dead block is reported elsewhere
+        event = str(rule.get("event", "")).lower()
+        action = str(rule.get("action", "")).lower()
+        if any(e.name == event and any(a.name == action for a in e.actions) for e in b.events):
+            continue
+        out.append(
+            finding(
+                "MAPSCRIPT_REQUIRED_ACTION",
+                str(rule.get("severity", "info")),
+                f"{filename}: block {b.name!r} never calls {action} in its {event} event; "
+                f"{rule.get('consequence', '')}".rstrip("; "),
+                hint=str(rule.get("fix_hint", "")),
+            )
+        )
+    return out
+
+
+def _objective_requirements(spec, entities, by_name, finding) -> list[Finding]:
+    """An objective entity that needs a key value - or a script action setting it - to work.
+
+    For example a dynamite target whose weapon class is never raised: dynamite can be planted
+    at it and counts down, and the objective survives.
+    """
+    out: list[Finding] = []
+    block_key = str(spec.get("block_key", "scriptname")).lower()
+    for rule in spec.get("objective_requirements") or []:
+        if not isinstance(rule, dict):
+            continue
+        by = rule.get("targeted_by") or {}
+        flags_any = [int(f) for f in by.get("flags_any") or []]
+        wanted = set()
+        for e in entities:
+            if e.get("classname") != by.get("classname"):
+                continue
+            k = _keys(e)
+            if flags_any and not any(parse_spawnflags(k.get("spawnflags")) & f for f in flags_any):
+                continue
+            if v := k.get(str(by.get("key", "target")).lower(), "").strip():
+                wanted.add(v.lower())
+        for e in entities:
+            k = _keys(e)
+            if (
+                e.get("classname") != rule.get("classname")
+                or k.get("targetname", "").strip().lower() not in wanted
+            ):
+                continue
+            if any(
+                _int(k.get(str(key).lower())) >= int(low)
+                for key, low in (rule.get("key_min") or {}).items()
+            ):
+                continue
+            action = str(rule.get("action", "")).lower()
+            block = by_name.get(k.get(block_key, "").strip().lower())
+            if (
+                action
+                and block is not None
+                and any(
+                    a.name == action
+                    and a.args
+                    and _int(a.args[0]) >= int(rule.get("action_min", 0))
+                    for ev in block.events
+                    for a in ev.actions
+                )
+            ):
+                continue
+            out.append(
+                finding(
+                    "MAPSCRIPT_OBJECTIVE_UNMET",
+                    str(rule.get("severity", "warning")),
+                    f"{e.get('classname')} {k.get('targetname')!r} (entity {e['index']}): "
+                    f"{rule.get('message', 'a requirement is not met')}",
+                    [int(e["index"])],
+                    hint=str(rule.get("fix_hint", "")),
+                )
+            )
+    return out
+
+
+def _int(value) -> int:
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _spawned(spec: dict, blocks: list[Block]) -> list[dict]:

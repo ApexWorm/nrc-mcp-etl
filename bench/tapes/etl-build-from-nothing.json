@@ -314,6 +314,7 @@
           "wm_axis_respawntime 10",
           "wm_allied_respawntime 10",
           "wm_set_round_timelimit 10",
+          "wm_setwinner 0",
           "wait 50",
           "setautospawn \"Axis Bunker\" 0",
           "setautospawn \"Allied Bunker\" 1",

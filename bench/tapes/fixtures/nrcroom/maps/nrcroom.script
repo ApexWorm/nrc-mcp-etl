@@ -6,6 +6,7 @@ game_manager
 		wm_allied_respawntime 10
 		wm_set_round_timelimit 10
 		wm_number_of_objectives 1
+		wm_setwinner 0
 
 		wait 50
 		setautospawn "Axis Bunker" 0

@@ -141,6 +141,7 @@ WRITERS = {
     "entity_remove_keys",
     "script_set_event",
     "script_remove",
+    "objective_place",
     "solid_commit",
     "brush_set_detail",
     "solid_edit_param",

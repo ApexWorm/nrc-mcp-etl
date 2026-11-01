@@ -1,0 +1,168 @@
+{
+  "name": "etl-objectives",
+  "note": "ET gameplay as a unit: objective_place adds a dynamite objective (an Allied radio the Axis blow up) and a constructible (an Axis barrier their engineers build) to nrcroom. Each comes with its trigger, the links between them, the weapon class dynamite needs and its script events. Both must validate with no errors or warnings; with --compile the map is packed and loaded in ET: Legacy with a client joined. Checked by hand once: standing in each trigger shows 'You are near the Allied Radio' / 'the Axis Barrier', and the unbuilt barrier is invisible. Not covered: planting dynamite or building, which need a player.",
+  "profile": "etl",
+  "fixture_dir": "bench/tapes/fixtures/nrcroom",
+  "map": "maps/nrcroom.map",
+  "steps": [
+    {
+      "tool": "map_open",
+      "as": "open",
+      "args": {
+        "path": "{work}"
+      }
+    },
+    {
+      "tool": "objective_place",
+      "as": "radio",
+      "args": {
+        "kind": "dynamite",
+        "name": "radio",
+        "track": "the Allied Radio",
+        "team": "allies",
+        "objective": {
+          "min": [
+            800,
+            400,
+            0
+          ],
+          "max": [
+            864,
+            464,
+            64
+          ]
+        },
+        "trigger": {
+          "min": [
+            768,
+            368,
+            0
+          ],
+          "max": [
+            896,
+            496,
+            128
+          ]
+        },
+        "texture": "battery_wall/wall02_mid"
+      },
+      "expect": {
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    },
+    {
+      "tool": "objective_place",
+      "as": "barrier",
+      "args": {
+        "kind": "constructible",
+        "name": "barrier",
+        "track": "the Axis Barrier",
+        "team": "axis",
+        "objective": {
+          "min": [
+            300,
+            16,
+            0
+          ],
+          "max": [
+            316,
+            160,
+            96
+          ]
+        },
+        "trigger": {
+          "min": [
+            256,
+            16,
+            0
+          ],
+          "max": [
+            384,
+            208,
+            128
+          ]
+        },
+        "texture": "battery_wall/wall02_mid"
+      },
+      "expect": {
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    },
+    {
+      "tool": "map_save",
+      "as": "save",
+      "args": {
+        "allow_non_identical": true
+      },
+      "expect": {
+        "written": true
+      }
+    },
+    {
+      "tool": "validate_profile",
+      "as": "entities_and_script",
+      "expect": {
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    },
+    {
+      "tool": "compile_map",
+      "as": "compile",
+      "needs_compile": true,
+      "args": {
+        "preset": "iterate",
+        "path": "{work}"
+      },
+      "expect": {
+        "ok": true,
+        "leaked": false
+      }
+    },
+    {
+      "tool": "pack_pk3",
+      "as": "pack",
+      "needs_compile": true,
+      "args": {
+        "bsp": "{workspace}/maps/nrcroom.bsp"
+      },
+      "expect": {
+        "ok": true
+      }
+    },
+    {
+      "tool": "ship_check",
+      "as": "ship",
+      "needs_compile": true,
+      "args": {
+        "target": "{workspace}/maps/nrcroom.bsp"
+      },
+      "expect": {
+        "summary.error": 0,
+        "summary.warning": 0
+      }
+    }
+  ],
+  "invariants": [
+    {
+      "name": "pk3_contents",
+      "args": {
+        "step": "pack",
+        "has": [
+          "maps/nrcroom.bsp",
+          "maps/nrcroom.script"
+        ],
+        "no_basegame": true
+      }
+    },
+    {
+      "name": "engine_loads",
+      "args": {
+        "step": "pack",
+        "client": true
+      }
+    }
+  ]
+}

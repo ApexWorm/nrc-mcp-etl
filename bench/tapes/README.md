@@ -33,6 +33,7 @@ not be described as if they were.
 | `refactor-one-region` | `solid_edit_param` — change one parameter, leave the rest alone. |
 | `improve-engine-performance` | The optimisation pass on a real map: audit, mark detail, measure. |
 | `catches-interior-clip` | The `ut4_dofa` failure, small. Expects `map_save` to **refuse**. |
+| `etl-objectives` | `objective_place` adds a dynamite objective and a constructible to nrcroom; validates clean, packs, loads with a client. |
 | `detail-pass` | Audit, mark detail, save beside, `compile_ab`: leafs and vis clusters must fall. |
 | `etl-ships-a-loadable-map` | An ET: Legacy map that loads and plays in etlded. Validates clean; with `--compile`, compiles, packs (script and arena in, base-game files out), passes the pre-ship check and loads in the engine with a client joined. |
 | `etl-build-from-nothing` | A playable ET map made with tool calls only, script included: `map_new` → geometry → entities and keys → `script_set_event`. Same checks, same engine load. |
