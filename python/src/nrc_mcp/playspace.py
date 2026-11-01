@@ -824,6 +824,41 @@ def _map_seals(check: Check, preset: str = "draft") -> Outcome:
     return Outcome("map_seals", leak is None, "sealed" if leak is None else f"leaked: {leak}")
 
 
+@invariant("pk3_contents")
+def _pk3_contents(
+    check: Check, step: str = "", has: list[str] | None = None, no_basegame: bool = False
+) -> Outcome:
+    """The archive a pack step wrote holds `has`, and with `no_basegame` nothing the base game
+    ships. Paths compare without regard to case, as the engine's do."""
+    if not check.allow_compile:
+        return Outcome("pk3_contents", True, "compiling not enabled for this run", skipped=True)
+    import os  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    from . import pack  # noqa: PLC0415
+
+    packages = (check.results.get(step) or {}).get("packages") or []
+    if not packages:
+        return Outcome("pk3_contents", False, f"step {step!r} produced no package")
+    with zipfile.ZipFile(packages[0]) as z:
+        names = {n.lower() for n in z.namelist() if not n.endswith("/")}
+    problems = [f"missing {h}" for h in has or [] if h.lower() not in names]
+    if no_basegame:
+        base = os.environ.get("NRC_FS_BASEPATH")
+        pkg = profiles.load(resolve_profile(check.profile_id)).get("packaging") or {}
+        if not base or not pkg.get("basegame"):
+            return Outcome(
+                "pk3_contents",
+                True,
+                "no base game to compare against (NRC_FS_BASEPATH)",
+                skipped=True,
+            )
+        shipped = pack.basegame_entries(Path(base) / str(pkg["basegame"]))
+        problems += [f"base-game file {n}" for n in sorted(names & shipped)]
+    detail = "; ".join(problems) or f"{len(names)} entries, as required"
+    return Outcome("pk3_contents", not problems, detail)
+
+
 @invariant("tool_result")
 def _tool_result(check: Check, step: str = "", path: str = "", equals: Any = None) -> Outcome:
     """A recorded step's report matches. For asserting on a tool's own answer, not the map."""

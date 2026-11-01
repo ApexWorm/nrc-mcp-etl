@@ -1,0 +1,11 @@
+{
+	map			"nrcroom"
+	longname	"NRC Room"
+	type		"wolfmp wolfsw"
+	briefing	"Two bunkers and a scripted gate."
+	axisRespawnTime		10
+	alliedRespawnTime	10
+	timelimit	10
+	mapposition_x		200
+	mapposition_y		200
+}

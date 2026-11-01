@@ -105,11 +105,39 @@ def _reset_session() -> None:
 
 
 def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dict:
-    """Replay one tape and check its invariants. Never raises for a *tape* failure."""
+    """Replay one tape and check its invariants. Never raises for a *tape* failure.
+
+    A tape's `profile` is the active profile for its whole run, tools included: the tools read
+    `NRC_PROFILE`, so without this an ET tape would be validated against whatever the suite
+    happens to run under.
+    """
+    profile = tape.get("profile")
+    saved = os.environ.get("NRC_PROFILE")
+    if profile:
+        os.environ["NRC_PROFILE"] = str(profile)
+    try:
+        return _run_tape(tape, workspace=workspace, allow_compile=allow_compile)
+    finally:
+        if profile:
+            if saved is None:
+                os.environ.pop("NRC_PROFILE", None)
+            else:
+                os.environ["NRC_PROFILE"] = saved
+
+
+def _run_tape(tape: dict, *, workspace: Path, allow_compile: bool) -> dict:
     name = tape.get("name") or "unnamed"
     started = time.time()
+    # `fixture_dir` copies a whole game-directory tree (maps/, scripts/, ...) and keeps the
+    # map's own name, for a map whose script and arena are found by that name. `fixture` copies
+    # one .map in as work.map.
+    work = (
+        workspace / (tape.get("map") or WORK_NAME)
+        if tape.get("fixture_dir")
+        else workspace / WORK_NAME
+    )
     subs = {
-        "work": str(workspace / WORK_NAME),
+        "work": str(work),
         "workspace": str(workspace),
         "repo": str(repo_root()),
     }
@@ -126,7 +154,17 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
 
     baseline: Path | None = None
     fixture = tape.get("fixture")
-    if fixture:
+    fixture_dir = tape.get("fixture_dir")
+    if fixture_dir:
+        src_dir = Path(_expand(fixture_dir, subs))
+        if not src_dir.is_absolute():
+            src_dir = repo_root() / src_dir
+        if not (src_dir / str(tape.get("map") or "")).is_file():
+            return _skip(name, started, f"fixture not available: {src_dir / str(tape.get('map'))}")
+        shutil.copytree(src_dir, workspace, dirs_exist_ok=True)
+        baseline = workspace / "baseline.map"
+        shutil.copyfile(work, baseline)
+    elif fixture:
         src = Path(_expand(fixture, subs))
         if not src.is_absolute():
             src = repo_root() / src
@@ -166,6 +204,12 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
         # is a list of substrings that must all appear in the message, which keeps the tape
         # pinned to the reason rather than merely to the fact that something went wrong.
         expect_error = step.get("expect_error")
+
+        # A step that runs the compiler (compile, pack) runs only when compiling is enabled,
+        # like the invariants that need one. It is recorded as skipped, never as passed.
+        if step.get("needs_compile") and not allow_compile:
+            steps.append({"step": label, "ok": True, "skipped": "compiling not enabled"})
+            continue
 
         try:
             result = fn(**args)
@@ -216,7 +260,7 @@ def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dic
             if not step.get("continue_on_mismatch"):
                 break
 
-    current = workspace / WORK_NAME
+    current = work
     check = playspace.Check(
         workspace=workspace,
         baseline=baseline if baseline and baseline.is_file() else None,
@@ -315,7 +359,9 @@ def report(results: list[dict], *, verbose: bool) -> None:
                 print(f"         ! {step['step']}: {step['error']}")
             for m in step.get("mismatches") or []:
                 print(f"         ! {step['step']}: {m}")
-            if verbose and step.get("ok"):
+            if verbose and step.get("skipped"):
+                print(f"         - {step['step']}: skipped ({step['skipped']})")
+            elif verbose and step.get("ok"):
                 print(f"         . {step['step']}")
         for inv in r["invariants"]:
             if inv["skipped"]:
@@ -331,8 +377,11 @@ def report(results: list[dict], *, verbose: bool) -> None:
     skipped_tapes = [r for r in results if r.get("skipped")]
     passed = sum(1 for r in ran if r["ok"])
     skipped = sum(1 for r in results for i in r["invariants"] if i["skipped"])
+    skipped_steps = sum(1 for r in results for s in r["steps"] if s.get("skipped"))
     print()
     line = f"  tapes: {passed}/{len(ran)} passed, {skipped} invariant(s) skipped"
+    if skipped_steps:
+        line += f", {skipped_steps} compile step(s) skipped"
     if skipped_tapes:
         line += f", {len(skipped_tapes)} tape(s) skipped for want of a fixture"
     print(line)

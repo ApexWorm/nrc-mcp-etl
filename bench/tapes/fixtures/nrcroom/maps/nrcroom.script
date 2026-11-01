@@ -1,0 +1,30 @@
+game_manager
+{
+	spawn
+	{
+		wm_axis_respawntime 10
+		wm_allied_respawntime 10
+		wm_set_round_timelimit 10
+		wm_number_of_objectives 1
+
+		wait 50
+		setautospawn "Axis Bunker" 0
+		setautospawn "Allied Bunker" 1
+
+		// Open the way between the bunkers after half a minute.
+		wait 30000
+		alertentity gate
+	}
+}
+
+gate
+{
+	spawn
+	{
+	}
+
+	death
+	{
+		wm_announce "The gate between the bunkers is down!"
+	}
+}
