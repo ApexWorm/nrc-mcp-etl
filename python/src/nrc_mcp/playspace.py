@@ -781,12 +781,20 @@ def _no_new_validation_errors(check: Check, grid: int = 8) -> Outcome:
 
 
 @invariant("spawns_reach_objectives")
-def _spawns_reach_objectives(check: Check) -> Outcome:
-    """Every spawn group can walk to every objective. The check a bomb map lives or dies on."""
+def _spawns_reach_objectives(check: Check, open_state_changing: bool = True) -> Outcome:
+    """Every spawn group can walk to every objective. The check a bomb map lives or dies on.
+
+    By default the walk is made with the profile's state-changing brushes open: an objective
+    behind a door the attackers must blow is reachable *by playing the map*, which is the
+    question. `open_state_changing: false` asks about the opening state instead.
+    """
     from . import analysis as ana  # noqa: PLC0415
 
     report = ana.balance_report(
-        _require_current(check), cell=check.cell, profile_id=check.profile_id
+        _require_current(check),
+        cell=check.cell,
+        profile_id=check.profile_id,
+        open_state_changing=open_state_changing,
     )
     bad = [f for f in report.get("findings", []) if f["code"] == "BALANCE_OBJECTIVE_UNREACHABLE"]
     pairs = report.get("distances") or []
@@ -801,7 +809,8 @@ def _spawns_reach_objectives(check: Check) -> Outcome:
     return Outcome(
         "spawns_reach_objectives",
         not unreachable and not bad,
-        f"{len(pairs) - len(unreachable)}/{len(pairs)} pairs reachable",
+        f"{len(pairs) - len(unreachable)}/{len(pairs)} pairs reachable"
+        + (" (state-changing brushes open)" if open_state_changing else ""),
     )
 
 

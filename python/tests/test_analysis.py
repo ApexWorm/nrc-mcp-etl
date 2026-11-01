@@ -880,6 +880,65 @@ def test_etl_reports_group_spawns_by_marker_and_centre_a_brush_objective(tmp_pat
     assert row["nearest_enemy_spawn"]["walked_between_teams"]["reachable"] is True
 
 
+def _et_bunkers(tmp_path, *, door: bool, name: str) -> Path:
+    """Two spawn ends of a hall; a dynamite objective at the east end: a solid crate with a
+    trigger_objective_info twice its height around it. `door` walls the hall off at x=1008,
+    leaving one doorway filled by a func_explosive."""
+    entities = [
+        point_entity("team_WOLF_objective", (128, 128, 8), spawnflags="1"),
+        point_entity("team_WOLF_objective", (1920, 128, 8), spawnflags="2"),
+    ]
+    for classname, x in (("team_CTF_redspawn", 96), ("team_CTF_bluespawn", 1952)):
+        entities += [point_entity(classname, (x, 64 + i * 32, 8)) for i in range(4)]
+    entities.append(
+        '{\n"classname" "func_explosive"\n"targetname" "crate"\n'
+        + box((1600, 96, 0), (1664, 160, 64))
+        + "}\n"
+    )
+    entities.append(
+        '{\n"classname" "trigger_objective_info"\n"spawnflags" "2"\n"target" "crate"\n'
+        + box((1568, 64, 0), (1696, 192, 128), "common/trigger")
+        + "}\n"
+    )
+    brushes = room(0, 0, 2048, 256)
+    if door:
+        brushes += [box((1008, 16, 0), (1040, 96, 256)), box((1008, 160, 0), (1040, 240, 256))]
+        entities.append(
+            '{\n"classname" "func_explosive"\n' + box((1008, 96, 0), (1040, 160, 256)) + "}\n"
+        )
+    return write_map(tmp_path, brushes, entities, name=name)
+
+
+def test_a_brush_objective_is_reached_on_its_floor_not_at_its_centre(tmp_path, kern):
+    """A trigger's centre floats half its height up; snapped to the nearest walkable cell it
+    lands on the crate inside it, which no spawn can climb onto. Measured at the trigger's
+    floor footprint, both teams reach it."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    path = _et_bunkers(tmp_path, door=False, name="et_crate.map")
+    report = analysis.balance_report(path, profile_id="etl", cell=16)
+    assert "error" not in report
+    rows = report["distances"]
+    assert len(rows) == 2
+    assert all(r["reachable"] for r in rows), [r["reason"] for r in rows]
+    assert not [f for f in report["findings"] if f["code"] == "BALANCE_OBJECTIVE_UNREACHABLE"]
+
+
+def test_a_breakable_door_cuts_the_map_until_state_changing_brushes_are_opened(tmp_path, kern):
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    assert "breakable" in analysis.roles("etl").state_changing
+    path = _et_bunkers(tmp_path, door=True, name="et_door.map")
+
+    closed = analysis.balance_report(path, profile_id="etl", cell=16)
+    reach = {r["team"]: r["reachable"] for r in closed["distances"]}
+    assert reach == {"red": False, "blue": True}, "the door stands between red and the crate"
+
+    opened = analysis.balance_report(path, profile_id="etl", cell=16, open_state_changing=True)
+    assert all(r["reachable"] for r in opened["distances"])
+    assert any("state-changing brushes open" in n for n in opened["notes"])
+
+
 def test_symmetry_detection_distinguishes_a_mirror_from_a_rotation():
     red, blue = "red", "blue"
 

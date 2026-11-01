@@ -339,6 +339,12 @@ roles:
   spawn_groups:
     nearest: team_WOLF_objective
     label_key: description
+  # Categories whose brushes can stop blocking during a round. A blown func_explosive is
+  # freed outright: func_explosive_explode thinks BecomeExplosion, which ends in G_FreeEntity
+  # (g_mover.c:4280-4289, 4310). spawns_reach_objectives walks with these open, so an
+  # objective behind a door the attackers must blow still counts as reachable.
+  # func_constructible is not listed: building one adds collision rather than removing it.
+  state_changing: [breakable]
 
 # ---------------------------------------------------------------------------
 # ENUMS and ENTITIES

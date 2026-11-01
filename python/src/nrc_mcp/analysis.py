@@ -355,6 +355,9 @@ class Roles:
     # Spawns without a group key take the nearest entity of this class as their group.
     group_nearest: str = ""
     group_label_key: str = ""
+    # Categories whose brushes change state during a round (blown, built), from
+    # `roles.state_changing`. Solid by default; `open_state_changing` treats them as open.
+    state_changing: frozenset[str] = frozenset()
 
     def team_of(self, classname: str, keys: dict[str, str]) -> str:
         """The team an entity belongs to.
@@ -518,6 +521,7 @@ def roles(profile_id: str) -> Roles:
         team_flags=team_flags,
         group_nearest=str(grouping.get("nearest") or ""),
         group_label_key=str(grouping.get("label_key") or ""),
+        state_changing=frozenset(str(c) for c in extra.get("state_changing") or []),
     )
 
 
@@ -696,6 +700,7 @@ def collect_solids(
     *,
     max_hull_vertices: int = MAX_HULL_VERTICES,
     nonsolid_fragments: tuple[str, ...] = NONSOLID_SHADER_FRAGMENTS,
+    open_state_changing: bool = False,
 ) -> tuple[list[Solid], dict[str, Any]]:
     """Every collision brush in the map, as half-space solids, plus what was left out.
 
@@ -704,6 +709,8 @@ def collect_solids(
     no way to judge an "unreachable" answer.
     """
     nonsolid_categories = set(NONSOLID_ROLES)
+    if open_state_changing and role_map:
+        nonsolid_categories |= role_map.state_changing
     solids: list[Solid] = []
     provenance = {
         "brushes": 0,
@@ -1291,6 +1298,7 @@ def cached_navgrid(
         kwargs.get("max_cells", MAX_CELLS),
         kwargs.get("max_hull_vertices", MAX_HULL_VERTICES),
         kwargs.get("bucket", DEFAULT_BUCKET),
+        bool(kwargs.get("open_state_changing", False)),
     )
     hit = _GRID_CACHE.get(key)
     if hit is not None:
@@ -1339,6 +1347,7 @@ def build_navgrid(
     max_hull_vertices: int = MAX_HULL_VERTICES,
     bucket: float = DEFAULT_BUCKET,
     game_map: Any = None,
+    open_state_changing: bool = False,
 ) -> NavGrid:
     """Voxelize a map into a walkable grid.
 
@@ -1376,7 +1385,12 @@ def build_navgrid(
     if game_map is None:
         game_map = load_map(path)
     role_map = roles(profile)
-    solids, provenance = collect_solids(game_map, role_map, max_hull_vertices=max_hull_vertices)
+    solids, provenance = collect_solids(
+        game_map,
+        role_map,
+        max_hull_vertices=max_hull_vertices,
+        open_state_changing=open_state_changing,
+    )
     if not solids:
         raise AnalysisError(
             f"{path.name} has no brush the kernel can evaluate exactly "
@@ -1772,6 +1786,9 @@ class Marker:
     origin: tuple[float, float, float]
     team: str
     group: str
+    #: Bounds of a brush entity with no origin key; None for point entities. Paths to a brush
+    #: objective go to its floor footprint (`_approach_points`), not to the centre in `origin`.
+    bounds: tuple[list[float], list[float]] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1789,6 +1806,50 @@ def _brush_centre(game_map: Any, entity: dict) -> tuple[float, float, float] | N
     Objectives are often brush entities — a constructible, a trigger volume — and without this
     they would be counted as markers without a position and dropped from every report.
     """
+    bounds = _brush_bounds(game_map, entity)
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    return ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+
+
+def _approach_points(
+    bounds: tuple[list[float], list[float]], margin: float
+) -> tuple[tuple[float, float, float], ...]:
+    """Where a player stands to use a brush objective: on the floor of its footprint.
+
+    The centre of the brushes is the wrong goal. A trigger's centre floats half its height up,
+    and a solid objective's centre is inside it - both snap to the walkable top of whatever is
+    nearest, often the objective's own roof, which no spawn can reach. So the footprint's
+    bottom centre (inside a trigger volume) and a floor point just outside each side (beside a
+    solid) are tried, and the objective counts as reached from the nearest of them.
+    """
+    lo, hi = bounds
+    cx, cy, z = (lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]
+    return (
+        (cx, cy, z),
+        (lo[0] - margin, cy, z),
+        (hi[0] + margin, cy, z),
+        (cx, lo[1] - margin, z),
+        (cx, hi[1] + margin, z),
+    )
+
+
+def _path_to_marker(navgrid: NavGrid, start: tuple[float, float, float], marker: Marker) -> dict:
+    """`path_distance` to a marker: its origin, or the nearest reachable approach point of a
+    brush objective. With none reachable, the result of the first (the footprint centre) is
+    returned, so the reason names a real place rather than the last side tried."""
+    if marker.bounds is None:
+        return path_distance(navgrid, start, marker.origin)
+    results = [
+        path_distance(navgrid, start, p) for p in _approach_points(marker.bounds, navgrid.cell)
+    ]
+    reached = [r for r in results if r["reachable"] and r.get("distance") is not None]
+    return min(reached, key=lambda r: r["distance"]) if reached else results[0]
+
+
+def _brush_bounds(game_map: Any, entity: dict) -> tuple[list[float], list[float]] | None:
+    """Axis-aligned bounds of a brush entity's usable brushes and patches, or None."""
     index = int(entity["index"])
     lo = [math.inf] * 3
     hi = [-math.inf] * 3
@@ -1805,7 +1866,7 @@ def _brush_centre(game_map: Any, entity: dict) -> tuple[float, float, float] | N
             hi[axis] = max(hi[axis], float(bounds[1][axis]))
     if lo[0] == math.inf:
         return None
-    return ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
+    return lo, hi
 
 
 def _markers(game_map: Any, role_map: Roles) -> tuple[list[Marker], list[Marker], int]:
@@ -1822,10 +1883,15 @@ def _markers(game_map: Any, role_map: Roles) -> tuple[list[Marker], list[Marker]
         if not (is_spawn or is_objective or is_anchor):
             continue
         origin = entity.get("origin")
+        bounds = None
         if origin:
             point = (float(origin[0]), float(origin[1]), float(origin[2]))
         else:
-            point = _brush_centre(game_map, entity) if entity.get("brushes") else None
+            bounds = _brush_bounds(game_map, entity) if entity.get("brushes") else None
+            point = None
+            if bounds is not None:
+                lo, hi = bounds
+                point = ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2)
         if point is None:
             without_origin += int(is_spawn or is_objective)
             continue
@@ -1842,6 +1908,7 @@ def _markers(game_map: Any, role_map: Roles) -> tuple[list[Marker], list[Marker]
             origin=point,
             team=role_map.team_of(classname, keys),
             group=str(keys.get(role_map.group_key, "")) if role_map.group_key else "",
+            bounds=bounds,
         )
         (spawns if is_spawn else objectives).append(marker)
 
@@ -1930,8 +1997,14 @@ def balance_report(
     grid: NavGrid | None = None,
     max_paths: int = 64,
     symmetry_tolerance: float | None = None,
+    open_state_changing: bool = False,
 ) -> dict[str, Any]:
     """Per-team traversal distance from each spawn group to each objective (§7.3).
+
+    `open_state_changing` walks the map as it is once the brushes the profile lists under
+    `roles.state_changing` (blown doors, built bridges) have changed state, by leaving them out
+    of collision. Without it the map is measured as it starts the round, where a door the
+    attackers must blow cuts them off from what is behind it.
 
     Distances are walked, not straight-line: one A* run per spawn group per objective, using
     the group's centroid, which keeps the number of searches proportional to the number of
@@ -1947,7 +2020,9 @@ def balance_report(
     try:
         # A supplied grid is the source of truth for which profile this report is about: it was
         # built against one, and resolving again could quietly pick a different one.
-        navgrid = grid or cached_navgrid(map_path, cell=cell, profile_id=profile_id)
+        navgrid = grid or cached_navgrid(
+            map_path, cell=cell, profile_id=profile_id, open_state_changing=open_state_changing
+        )
     except AnalysisError as e:
         return {"error": str(e), "profile": profile_id or ""}
     profile = navgrid.profile
@@ -1965,6 +2040,13 @@ def balance_report(
         "no traversal time is estimated: the profile states no player movement speed, and "
         "guessing one would defeat the point of reading constants from data",
     ]
+    if open_state_changing and grid is None:
+        opened = sorted(role_map.state_changing)
+        notes.append(
+            "walked with state-changing brushes open ("
+            + (", ".join(opened) if opened else "the profile lists none")
+            + "): the map once objectives have been blown or built, not as it starts"
+        )
 
     if not spawns:
         findings.append(
@@ -2016,7 +2098,7 @@ def balance_report(
             if budget <= 0:
                 break
             budget -= 1
-            result = path_distance(navgrid, row["_centroid"], objective.origin)
+            result = _path_to_marker(navgrid, row["_centroid"], objective)
             distances.append(
                 {
                     "team": row["team"],

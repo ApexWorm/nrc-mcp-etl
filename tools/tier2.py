@@ -352,16 +352,21 @@ async def run_scenario(
                 break
             turns += 1
 
-            response = await client.beta.messages.create(
+            # Streamed: the SDK refuses a non-streaming call whose max_tokens could outlast its
+            # timeout. Top-level cache_control moves a breakpoint to the end of the history each
+            # turn, so earlier turns are read from cache instead of billed again in full.
+            async with client.beta.messages.stream(
                 model=model,
                 max_tokens=int(scenario.get("max_tokens") or DEFAULT_MAX_TOKENS),
                 system=SYSTEM,
                 tools=tools,
                 messages=messages,
                 output_config={"effort": effort},
+                cache_control={"type": "ephemeral"},
                 betas=[FALLBACK_BETA],
                 fallbacks="default",
-            )
+            ) as stream:
+                response = await stream.get_final_message()
             if any(
                 getattr(it, "type", "") == "fallback_message"
                 for it in (getattr(response.usage, "iterations", None) or [])
