@@ -337,9 +337,29 @@ and tells you where the hole is.
 `structural_audit` is the biggest single lever on compile time and runtime visibility cost:
 structural brushes generate portals, and most brushes do not need to be structural.
 
+### Building an ET: Legacy map with the tools
+
+The whole map can be made through tool calls, with nothing written by hand. With
+`NRC_PROFILE=etl`, a working order:
+
+| Step | Tools |
+| --- | --- |
+| Start the file | `map_new` |
+| Rooms, walls, trim | `solid_commit` (`textures` per face direction; `detail` for trim and props), `patch_commit` for columns, arches and bevels |
+| Spawns, markers, intermission, lights | `entity_place` (team spawns, `team_WOLF_objective` markers with a description, `script_multiplayer`, `info_player_intermission`, `light`) |
+| Objectives | `objective_place` (`dynamite` or `constructible`): trigger, objective, links and script events in one call |
+| The map script | `script_set_event` (respawn times, `wm_setwinner`, `setautospawn`, the objectives' events), `script_show` to read it back |
+| Check | `validate`, `validate_profile`, `spawn_safety`, `balance_report`, `lighting_report`, `structural_audit` then `brush_set_detail` |
+| Release files | `arena_write`, `objdata_write`, `commandmap_make`, `levelshot_make` |
+| Build and ship | `map_save`, `compile_map`, `pack_pk3`, `ship_check`, then `mise run game:smoke -- <pk3> --client` |
+
+The `etl-build-from-nothing` tape is this list run end to end, and `--compile` loads the result in
+the engine with a client joined. `validate_profile` only calls something an error when ET: Legacy
+stops on it; each such rule names the engine source line and was checked by loading a map.
+
 ## Tool reference
 
-59 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+66 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -364,6 +384,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `validate` | Geometry and file-format findings. |
 | `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
 | `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
+| `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite` and `constructible`). |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
 **Seeing it**
@@ -382,8 +403,9 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `solid_help` | Every operator, its fields, and the on-grid caveat. |
 | `solid_compile` | Compile geometry and report it, touching nothing. |
 | `solid_preview` | Compile and render, without committing. |
-| `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail. |
+| `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail; `new_entity` makes a second door or trigger of a class. |
 | `brush_set_detail` | Mark existing brushes detail (or structural again); takes `structural_audit` findings directly. |
+| `patch_commit` | Curved surfaces as patches: a column, an arch, a quarter-round bevel. |
 | `solid_inspect` · `solid_list` | Structure of a recorded shape; everything recorded. |
 | `solid_param_preview` | Show what changing one parameter would produce. |
 | `solid_edit_param` | Change one parameter and record the edited tree. |
@@ -420,6 +442,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `sightline_report` | Sightline length distribution and power positions. |
 | `movement_check` | Clearances against verified movement constants. |
 | `spawn_safety` | Exits per spawn, and distance to the nearest enemy spawn. |
+| `lighting_report` | Lights, ambient and minimum light as q3map2 reads them; warns on a map that would compile black, notes walkable areas far from any light. |
 | `playable_space_diff` | What an edit did to the space a player can stand in. |
 
 **Shipping**
@@ -427,6 +450,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | Tool | Does |
 | --- | --- |
 | `ship_check` | Naming, levelshot, arena file, companion files, package contents. |
+| `arena_write` · `objdata_write` | The arena file (the map in the menu: name, briefing, gametypes) and the limbo objective descriptions. |
+| `commandmap_make` · `levelshot_make` | The command map - map coordinates on the worldspawn, a top-down section image and its shaders - and the loading-screen levelshot. |
 | `pack_pk3` | Build the release archive. |
 | `repack_analyze` | Every resource the BSP actually references. |
 
@@ -637,8 +662,16 @@ rotated geometry, and every report says which it is looking at. Closing the gap 
 input — which changes the map — or adaptive floating-point predicates. `crates/nrc-core/src/exact.rs`
 explains why the integer route came first.
 
-**No patch authoring.** Patches are parsed, validated, tessellated and rendered, but cannot be
-created. Curved geometry is editor work.
+**No bot navigation.** Omni-bot waypoints are not generated or checked, so a map built here has no
+bots until someone waypoints it in game.
+
+**Decompiled or editor-asset-dependent sources are partial.** Splash Damage's released ET sources
+round-trip and compile, but reference editor-only models that the game does not ship: the packer
+reports them as missing, and battery leaks without them.
+
+**Limited patch authoring.** `patch_commit` makes cylinders, arches and quarter-round bevels as
+`patchDef2`; free-form curves and terrain are still editor work. A patch is a surface, not a solid,
+so it needs a clip brush behind it to stop players.
 
 **No measured reference dimensions.** There is no corpus of width/height/length distributions per
 space category, so sizing comes from the profile's verified constants. Related: no cover density or
@@ -663,9 +696,10 @@ exactly why it costs nothing.
 
 `mise run bench:tier2` is the harness that closes that gap — a model driving this MCP over stdio
 against small fixtures, graded by the same invariants. Its free modes are exercised
-(`--check` starts the server, lists the 48 tools, and verifies every scenario's goal is false on
-the untouched fixture). **`--run` has never executed**, because there are no API credentials on
-the machine it was written on, so nothing here reports a Tier 2 score and none should be inferred.
+(`--check` starts the server, lists the 66 tools, and verifies every scenario's goal is false on
+the untouched fixture). **`--run` has never executed**: it spends tokens, and that is the
+owner's call to make, so nothing here reports a Tier 2 score and none should be inferred. Three
+ET: Legacy scenarios - build a map from nothing, add an objective, ship a map - are ready for it.
 `bench/scenarios/README.md` covers the cost controls.
 
 **No kernel self-modification.** The exact predicates, the differential harness, the fitness

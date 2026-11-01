@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -161,6 +162,10 @@ def q3map2_available() -> tuple[bool, str]:
     return True, raw
 
 
+#: The keys q3map2 reads a terrain's index image from (map.cpp:1337-1338).
+INDEXMAP_RE = re.compile(r'^"(?:_indexmap|alphamap)" "([^"/\\]+)"', re.M | re.I)
+
+
 def compile_and_unpack(root: Path, map_path: Path, workdir: Path) -> Path:
     """Compile a .map and unpack its BSP, returning the lump directory."""
     env = dict(os.environ, NRC_ROOT=str(workdir))
@@ -259,6 +264,11 @@ def run_semantic(
                 # Re-serialize through the kernel into a second file, then compile both.
                 resaved = work / m.name
                 shutil.copyfile(m, resaved)
+                # A terrain's index image is found beside the map (the compile wrapper adds
+                # the map's folder as a search path), so the copy needs it beside it too.
+                for name in set(INDEXMAP_RE.findall(m.read_text(errors="replace"))):
+                    if (m.parent / name).is_file():
+                        shutil.copyfile(m.parent / name, work / name)
                 proc = subprocess.run(
                     [str(nrc), "normalize", "--write", str(resaved)],
                     capture_output=True,

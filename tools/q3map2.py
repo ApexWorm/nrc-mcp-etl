@@ -231,6 +231,21 @@ def general_flags() -> list[str]:
     return flags
 
 
+def map_root_flags(map_path: Path, staged: bool) -> list[str]:
+    """The map's own folder as a search path, so files it keeps beside itself resolve.
+
+    A terrain's index image (`_indexmap`, or the older `alphamap`, map.cpp:1337-1338), custom
+    textures and shaders are looked up through q3map2's search paths, not beside the map. The
+    folder holding `maps/` - or the map's folder, for a flat layout - is added with
+    `-fs_pakpath` (path_init.cpp:358-359, :420-424). A staged Windows compile only gets it
+    when the folder is reachable from Windows.
+    """
+    root = map_path.parent.parent if map_path.parent.name.lower() == "maps" else map_path.parent
+    if staged and not str(root).startswith("/mnt/"):
+        return []
+    return ["-fs_pakpath", to_windows_path(root)]
+
+
 def classify(line: str) -> str | None:
     low = line.lower()
     if low.startswith("************ error") or low.startswith("error:"):
@@ -294,7 +309,7 @@ def compile_map(
         shutil.copyfile(map_path, work_map)
         staged = True
 
-    general = general_flags()
+    general = general_flags() + map_root_flags(map_path, staged)
     win_map = to_windows_path(work_map)
 
     results: list[StageResult] = []

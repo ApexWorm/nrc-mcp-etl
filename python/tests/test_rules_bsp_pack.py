@@ -915,3 +915,122 @@ def test_pack_pk3_clears_a_stale_failure_marker_before_packing(packer):
     r = pack.pack_pk3(packer["bsp"], profile_id="test")
     assert r["ok"] and r["failed_packages"] == []
     assert not stale.exists()
+
+
+# ---------------------------------------------------------------------------
+# Cross-entity checks (objectives)
+# ---------------------------------------------------------------------------
+
+
+def _rule(check: str, **params) -> dict:
+    return {
+        "id": "T",
+        "check": check,
+        "severity": "error",
+        "confidence": "verified",
+        "message": "{found} {detail}",
+        "params": params,
+    }
+
+
+def test_flags_any_needs_one_of_the_flags(monkeypatch):
+    rule = _rule("flags_any", classname="c", flags=[4, 8])
+    assert run(rule, [ent(0, "c", spawnflags="5")], monkeypatch) == []
+    (f,) = run(rule, [ent(0, "c", spawnflags="1"), ent(1, "c")], monkeypatch)
+    assert f.entities == [0, 1]
+
+
+def test_targeted_by_applies_only_under_its_flag_conditions(monkeypatch):
+    rule = _rule(
+        "targeted_by",
+        classname="c",
+        when_flags_all=[1],
+        when_flags_none=[2],
+        by_classname="t",
+        by_key="target",
+    )
+    lone = ent(0, "c", spawnflags="1", targetname="Obj")
+    assert run(rule, [lone], monkeypatch)
+    assert run(rule, [lone, ent(1, "t", target="obj")], monkeypatch) == [], "matched without case"
+    assert run(rule, [ent(0, "c", spawnflags="3", targetname="obj")], monkeypatch) == []
+    assert run(rule, [ent(0, "c", spawnflags="0", targetname="obj")], monkeypatch) == []
+
+
+def test_list_targets_reads_only_terminated_entries(monkeypatch):
+    rule = _rule(
+        "list_targets", classname="c", keys=["stages"], separator=";", target_classes=["m"]
+    )
+    others = [ent(1, "m", targetname="a"), ent(2, "x", targetname="b")]
+    assert run(rule, [ent(0, "c", stages="a;"), *others], monkeypatch) == []
+    (f,) = run(rule, [ent(0, "c", stages="a;b;"), *others], monkeypatch)
+    assert "'b' is a x" in f.message
+    assert run(rule, [ent(0, "c", stages="a;b"), *others], monkeypatch) == [], (
+        "unterminated b is no entry"
+    )
+
+
+def test_list_counts_match_compares_resolved_entries(monkeypatch):
+    rule = _rule("list_counts_match", classname="c", keys=["con", "des"], separator=";")
+    names = [ent(1, "m", targetname="a"), ent(2, "m", targetname="b")]
+    assert run(rule, [ent(0, "c", con="a;", des="b;"), *names], monkeypatch) == []
+    assert run(rule, [ent(0, "c", con="a;"), *names], monkeypatch) == [], "only when both are set"
+    assert run(rule, [ent(0, "c", con="a;", des="a;b;"), *names], monkeypatch)
+
+
+def test_key_pattern_matches_the_whole_value(monkeypatch):
+    rule = _rule("key_pattern", classname="c", key="k", pattern="(?:[^;]+;)*")
+    assert run(rule, [ent(0, "c", k="a;b;"), ent(1, "c")], monkeypatch) == []
+    assert run(rule, [ent(0, "c", k="a;b")], monkeypatch)
+
+
+def test_the_etl_profile_knows_what_stops_an_objective():
+    """Each of these was loaded in etlded and stopped the game with the message the rule names."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    world = ent(0, "worldspawn")
+
+    def codes(*entities):
+        return {f.code for f in rules.evaluate("etl", [world, *entities]) if f.severity == "error"}
+
+    toi = ent(1, "trigger_objective_info", track="x", target="obj")
+    assert "ETL_OBJECTIVE_INFO_TARGET" in codes(toi)
+    assert "ETL_OBJECTIVE_INFO_TARGET" not in codes(toi, ent(2, "func_explosive", targetname="obj"))
+    assert "ETL_CONSTRUCTIBLE_TEAM" in codes(ent(2, "func_constructible", targetname="obj"))
+    assert "ETL_CONSTRUCTIBLE_PARENT" in codes(
+        ent(2, "func_constructible", targetname="b", spawnflags="5")
+    )
+    assert "ETL_CONSTRUCTIBLE_PARENT" not in codes(
+        toi, ent(2, "func_constructible", targetname="obj", spawnflags="5")
+    )
+    many = [ent(i, "trigger_objective_info", track=str(i)) for i in range(1, 20)]
+    assert "ETL_OBJECTIVE_INFO_LIMIT" in codes(*many)
+    assert "ETL_CHECKPOINT_SCRIPTNAME" in codes(ent(1, "team_WOLF_checkpoint"))
+
+
+def test_pack_pk3_moves_a_failed_package_out_across_devices_and_fixes_it_up(packer, monkeypatch):
+    """The install and the map often sit on different filesystems, where rename fails."""
+    import errno
+    import os as _os
+
+    install = packer["install"]
+
+    def failing_q3map2(args, target, timeout=1800):
+        out = install / f"{target.stem}{pack.FAILURE_SUFFIX}"
+        make_pk3(out, ["maps/nrcroom.bsp"])
+        return {"ok": True, "returncode": 0, "stdout": f"Saved to {out}\n", "stderr": ""}
+
+    real_rename = _os.rename
+
+    def cross_device(src, dst, *a, **k):
+        if str(src).startswith(str(install)):
+            raise OSError(errno.EXDEV, "Invalid cross-device link")
+        return real_rename(src, dst, *a, **k)
+
+    monkeypatch.setattr(pack, "_q3map2", failing_q3map2)
+    monkeypatch.setattr(_os, "rename", cross_device)
+    (packer["work"] / "maps" / "nrcroom.script").write_text("x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["missing_resources"] and not r["ok"]
+    (failed,) = r["failed_packages"]
+    assert "maps/nrcroom.script" in names(failed), "fixed up like a good package"
+    assert not list(install.glob("*.pk3")), "nothing left in the install"

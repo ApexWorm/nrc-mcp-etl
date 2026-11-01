@@ -404,3 +404,59 @@ def test_brush_set_detail_marks_existing_brushes_and_keeps_other_bits(k, tmp_pat
     finally:
         srv.SESSION.map = None
         srv.SESSION.path = None
+
+
+def test_solid_commit_can_make_a_second_entity_of_a_class(k, tmp_path):
+    from mcp.server.mcpserver.exceptions import ToolError
+    from nrc_mcp import server as srv
+
+    box = {"op": "box", "min": [0, 0, 0], "max": [64, 64, 64]}
+    srv.map_new(str(tmp_path / "e.map"))
+    try:
+        first = srv.solid_commit(box, label="a", target_classname="func_door")
+        piled = srv.solid_commit(box, label="b", target_classname="func_door")
+        second = srv.solid_commit(box, label="c", target_classname="func_door", new_entity=True)
+        assert first["entity"] == piled["entity"] == 1, "without new_entity it joins the first"
+        assert second["entity"] == 2 and second["created_entity"] == "func_door"
+        onto = srv.solid_commit(box, label="d", target_entity=2)
+        assert onto["entity"] == 2
+        assert [e["brushes"] for e in srv.query_entities()["entities"]] == [0, 2, 2]
+        with pytest.raises(ToolError, match="no entity 9"):
+            srv.solid_commit(box, label="e", target_entity=9)
+        with pytest.raises(ToolError, match="not both"):
+            srv.solid_commit(box, label="f", new_entity=True, target_entity=1)
+    finally:
+        srv.SESSION.map = None
+        srv.SESSION.path = None
+
+
+def test_grid_findings_are_errors_for_new_work_and_one_warning_for_inherited(k, tmp_path):
+    from nrc_mcp import server as srv
+
+    prism = {"op": "prism", "min": [0, 0, 0], "max": [64, 64, 128], "axis": "z", "sides": 8}
+    srv.map_new(str(tmp_path / "g.map"))
+    try:
+        srv.solid_commit(prism, label="old")
+        srv.solid_commit(prism, label="old2")
+        new_work = srv.validate()
+        assert [f["code"] for f in new_work["findings"] if f["severity"] == "error"] == [
+            "BRUSH_OFF_GRID",
+            "BRUSH_OFF_GRID",
+        ], "made in this session: errors"
+        srv.map_save(allow_non_identical=True)
+
+        srv.map_open(str(tmp_path / "g.map"))
+        inherited = srv.validate()
+        assert inherited["summary"]["error"] == 0
+        (summary,) = [f for f in inherited["findings"] if f["code"] == "BRUSH_OFF_GRID"]
+        assert summary["severity"] == "warning" and summary["count"] == 2
+
+        srv.solid_commit({**prism, "min": [128, 0, 0], "max": [192, 64, 128]}, label="new")
+        mixed = srv.validate()
+        errors = [f for f in mixed["findings"] if f["severity"] == "error"]
+        assert len(errors) == 1 and errors[0]["primitive"] == 2, "only the new brush"
+        assert any(f.get("count") == 2 for f in mixed["findings"])
+    finally:
+        srv.SESSION.map = None
+        srv.SESSION.path = None
+        srv.SESSION.opened_brushes = None

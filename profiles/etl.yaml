@@ -273,6 +273,62 @@ teams:
       - {flag: 1, label: red}
       - {flag: 2, label: blue}
 
+# ---------------------------------------------------------------------------
+# objectives - recipes objective_place builds as one unit: entities, keys, script events
+# ---------------------------------------------------------------------------
+# Each kind lists the brush entities it creates (one per box the caller gives), their keys,
+# and the script events written into the map script. {name}, {track} and {team} are the
+# caller's; every other {placeholder} comes from team_values for that team. Built and loaded
+# in ET: Legacy v2.86.2 before being listed here.
+objectives:
+  confidence: verified
+  source: etlegacy_source
+  teams: [axis, allies]
+  kinds:
+    dynamite:
+      description: >-
+        Something the other team blows up with dynamite: an objective trigger around a
+        func_explosive. {team} owns and defends it.
+      entities:
+        - role: trigger
+          classname: trigger_objective_info
+          texture: common/trigger
+          keys: {track: "{track}", shortname: "{track}", target: "{name}", spawnflags: "{owner_flag}"}
+        - role: objective
+          classname: func_explosive
+          keys: {targetname: "{name}", scriptname: "{name}", constructible_class: "3"}
+      script:
+        - {block: "{name}", event: death, actions: ['wm_announce "{track} has been destroyed!"']}
+      locus: >-
+        game/g_trigger.c:1612-1678 (trigger links to its target), game/g_weapon.c:1980-2020
+        (dynamite must sit in an enemy objective trigger), game/g_missile.c:395-447 (blows it up
+        when its weapon class is at least 1; constructible_class 3 gives 2, g_mover.c:4672-4689)
+    constructible:
+      description: >-
+        Something {team}'s engineers build, and the other team can destroy with dynamite once
+        built: an objective trigger around a func_constructible.
+      entities:
+        - role: trigger
+          classname: trigger_objective_info
+          texture: common/trigger
+          keys: {track: "{track}", shortname: "{track}", target: "{name}", spawnflags: "{owner_flag}"}
+        - role: objective
+          classname: func_constructible
+          keys: {targetname: "{name}", scriptname: "{name}", constructible_class: "3", spawnflags: "{builder_flag}"}
+      script:
+        - {block: "{name}", event: buildstart, params: [final], actions: []}
+        - {block: "{name}", event: built, params: [final], actions: ['wm_announce "{track} has been constructed!"']}
+        - {block: "{name}", event: decayed, params: [final], actions: []}
+        - {block: "{name}", event: death, actions: ['wm_announce "{track} has been destroyed!"']}
+      locus: >-
+        game/g_mover.c:5614-5653 (team flag and constructible_class), game/g_trigger.c:1698-1706
+        (trigger links to it), game/g_weapon.c:1068-1247 (buildstart/built events name a
+        stage, here final), game/g_mover.c:5272-5313 (decayed)
+  team_values:
+    owner_flag: {axis: "1", allies: "2"}      # AXIS_OBJECTIVE / ALLIED_OBJECTIVE, g_local.h:2631-2632
+    builder_flag: {axis: "4", allies: "8"}    # AXIS/ALLIED_CONSTRUCTIBLE, g_local.h:2637-2638
+    script_team: {axis: "0", allies: "1"}     # the team number scripts use, g_script_actions.c:3560
+
 # What a category cannot say. Read by analysis.roles.
 roles:
   # An objective volume. Categorized `trigger` so its brushes are not collision, but it is
@@ -476,11 +532,20 @@ entities:
       - {name: track, type: string, confidence: verified, source: gamepack_entities, editor_label: "Track", description: "Functions as a group name. All entities with the same 'track' as the func_constructible will be constructed at the same time."}
       - {name: constages, type: string, confidence: verified, source: gamepack_entities, editor_label: "Construction stages", description: "List of target func_brushmodel entities (up to 3) that make up the construction stages (example: \"stage1;stage2;\")"}
       - {name: desstages, type: string, confidence: verified, source: gamepack_entities, editor_label: "Destruction stages", description: "List of target func_brushmodel entities (up to 3) that make up the destruction stages (example: \"desstage1;desstage2;\")"}
+      - {name: constructible_class, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:5632", description: "1 (or absent) keeps the defaults, 2 satchel, 3 dynamite: the key minus one indexes g_constructible_classes, whose weaponclass is then decremented (g_mover.c:5585-5590, 5654)"}
+      - {name: constructible_chargebarreq, type: float, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:5638", description: "fraction of an engineer's charge bar one build costs"}
+      - {name: constructible_constructxpbonus, type: float, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:5639", description: "XP for building"}
+      - {name: constructible_destructxpbonus, type: float, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:5640", description: "XP for destroying"}
+      - {name: constructible_health, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:5641", description: "health once built"}
+      - {name: constructible_weaponclass, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:5642", description: "weakest weapon class that damages it, plus one: -1 none, 0 explosives, 1 satchel, 2 dynamite once decremented (bg_public.h:1315-1318)"}
+      - {name: constructible_duration, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:5643", description: "milliseconds to build"}
     spawnflags:
       - {name: START_BUILT, bit: 0, value: 1, confidence: verified, source: gamepack_entities, editor_label: "Start built", description: "Starts built"}
       - {name: INVULNERABLE, bit: 1, value: 2, confidence: verified, source: gamepack_entities, editor_label: "Invulnerable", description: "Indestructible"}
       - {name: AXIS_CONSTRUCTIBLE, bit: 2, value: 4, confidence: verified, source: gamepack_entities, editor_label: "Axis constructible", description: "Axis can build this, if not invulnerable Allies can damage it"}
       - {name: ALLIED_CONSTRUCTIBLE, bit: 3, value: 8, confidence: verified, source: gamepack_entities, editor_label: "Allied constructible", description: "Allies can build this, if not invulnerable Axis can damage it"}
+      - {name: BLOCK_PATHS_WHEN_BUILT, bit: 4, value: 16, source: etlegacy_source, confidence: verified, locus: "game/g_local.h:2639", description: "Blocks bot paths once built"}
+      - {name: NO_AAS_BLOCKING, bit: 5, value: 32, source: etlegacy_source, confidence: verified, locus: "game/g_local.h:2640", description: "Never blocks bot paths"}
   - classname: func_debris
     kind: brush
     category: breakable
@@ -574,6 +639,10 @@ entities:
       - {name: _castshadows, type: integer, confidence: verified, source: gamepack_entities, editor_label: "Shadow Caster Level", description: "Allows per-entity control over shadow casting. Defaults to 0 on entities, 1 on world. 0 = no shadow casting. 1 = cast shadows on world. > 1 = cast shadows on entities with _rs (or _receiveshadows) with the corresponding value, AND world. Negative values imply same, but DO NOT cast shadows on world."}
       - {name: _receiveshadows, type: integer, confidence: verified, source: gamepack_entities, editor_label: "Shadow Reciever Level", description: "Allows per-entity control over shadow reception. Defaults to 1 on everything (world shadows). 0 = receives NO shadows. > 1 = receive shadows only from corresponding keyed entities (see above) and world. < 1 = receive shadows ONLY from corresponding keyed entities."}
       - {name: _celshader, type: texture, confidence: verified, source: gamepack_entities, editor_label: "Cel Shader", description: "Sets the cel shader used for this geometry. Note: omit the \"textures/\" prefix."}
+      - {name: constructible_class, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:4672", description: "3 makes it a dynamite objective, 2 satchel; absent or 1 leaves weaponclass -1, so dynamite planted at it never destroys it (g_missile.c:428)"}
+      - {name: constructible_weaponclass, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:4680", description: "weakest weapon class that destroys it, plus one"}
+      - {name: constructible_health, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:4679", description: "health"}
+      - {name: constructible_destructxpbonus, type: float, source: etlegacy_source, confidence: verified, locus: "game/g_mover.c:4678", description: "XP for destroying"}
     spawnflags:
       - {name: START_INVIS, bit: 0, value: 1, confidence: verified, source: gamepack_entities, editor_label: "Start invisible", description: "Must be triggered before it will show in the world"}
       - {name: TOUCHABLE, bit: 1, value: 2, confidence: verified, source: gamepack_entities, editor_label: "Touchable", description: "Means automatic use on player contact"}
@@ -1366,6 +1435,9 @@ entities:
       - {name: target, type: target, confidence: verified, source: gamepack_entities, editor_label: "Target", description: "You may target dynamitable objectives"}
       - {name: score, type: integer, confidence: verified, source: gamepack_entities, editor_label: "Score", description: "If targeting a dynamitable objective, give this score when blown."}
       - {name: shortname, type: string, confidence: verified, source: gamepack_entities, editor_label: "Short name", description: "Name to display on the command map"}
+      - {name: objflags, type: integer, source: etlegacy_source, confidence: verified, locus: "game/g_trigger.c:1832", description: "which command map objectives this trigger belongs to"}
+      - {name: customalliedimage, type: string, source: etlegacy_source, confidence: verified, locus: "game/g_trigger.c:1853", description: "alternative spelling of customalliesimage the engine also reads"}
+      - {name: override, type: string, source: etlegacy_source, confidence: verified, locus: "game/g_spawn.c:226", description: "text shown instead of the track message; required with MESSAGE_OVERRIDE"}
     spawnflags:
       - {name: AXIS_OBJECTIVE, bit: 0, value: 1, confidence: verified, source: gamepack_entities, editor_label: "Axis objective", description: "Set if targeting an objective owned by AXIS, then only Allied dynamite will blow it up."}
       - {name: ALLIED_OBJECTIVE, bit: 1, value: 2, confidence: verified, source: gamepack_entities, editor_label: "Allied objective", description: "Set if targeting an objective owned by ALLIES, then only Axis dynamite will blow it up."}
@@ -1373,6 +1445,8 @@ entities:
       - {name: IS_OBJECTIVE, bit: 4, value: 16, confidence: verified, source: gamepack_entities, editor_label: "Is objective", description: "Will use a standard objective icon on the command map"}
       - {name: IS_HEALTHAMMOCABINET, bit: 5, value: 32, confidence: verified, source: gamepack_entities, editor_label: "Health/Ammo cabinet", description: "Will use a healthammo cabinet icon on the command map"}
       - {name: IS_COMMANDPOST, bit: 6, value: 64, confidence: verified, source: gamepack_entities, editor_label: "Command Post", description: "Will use a command post icon on the command map"}
+      - {name: MESSAGE_OVERRIDE, bit: 2, value: 4, source: etlegacy_source, confidence: verified, locus: "game/g_trigger.c:1823-1829", description: "Show the override text; without it the game stops at load"}
+      - {name: DISABLED, bit: 7, value: 128, source: etlegacy_source, confidence: verified, locus: "game/g_weapon.c:2014-2016", description: "Dynamite cannot be planted here"}
   - classname: trigger_once
     kind: brush
     category: trigger
@@ -1406,6 +1480,7 @@ entities:
       - {name: fogclip, type: float, confidence: verified, source: gamepack_entities, editor_label: "Fogclip", description: "Uses vis to exclude stuff beyond the specified distance."}
       - {name: mapcoordsmins, type: integer2, confidence: verified, source: gamepack_entities, editor_label: "mapcoordsmins", description: "Top left corner coordinate. Example \"-256 256\"."}
       - {name: mapcoordsmaxs, type: integer2, confidence: verified, source: gamepack_entities, editor_label: "mapcoordsmaxs", description: "Lower right corner coordinate. Example \"256 -256\". Both mapcoordsmins and mapcoordsmaxs must be set for command map and auto map to work properly."}
+      - {name: cclayers, type: integer, source: etlegacy_source, confidence: verified, locus: "cgame/cg_spawn.c:567", description: "number of command map layers; each needs cclayerceil<i> and its own levelshots/<map>_<i>_cc image"}
     spawnflags:
       - {name: NO_GT_WOLF, bit: 0, value: 1, confidence: verified, source: gamepack_entities, editor_label: "No campaign", description: "Campaign cannot be played on this map"}
       - {name: NO_STOPWATCH, bit: 1, value: 2, confidence: verified, source: gamepack_entities, editor_label: "No stopwatch", description: "Stopwatch cannot be played on this map"}
@@ -2310,7 +2385,10 @@ entities:
     description: "Spawned by the engine; not in the gamepack, so no keys are listed."
     note: "spawned at game/g_spawn.c:607; QUAKED at game/g_trigger.c:1408"
     keys: []
-    spawnflags: []
+    spawnflags:
+      - {name: RED_FLAG, bit: 0, value: 1, source: etlegacy_source, confidence: verified, locus: "game/g_trigger.c:1234", description: "Fires for a carrier of the red (Axis-owned) item"}
+      - {name: BLUE_FLAG, bit: 1, value: 2, source: etlegacy_source, confidence: verified, locus: "game/g_trigger.c:1235", description: "Fires for a carrier of the blue (Allied-owned) item"}
+      - {name: KILL_FLAG, bit: 2, value: 4, source: etlegacy_source, confidence: verified, locus: "game/g_trigger.c:1258-1262", description: "Takes the item from the carrier"}
   - classname: script_model_med
     kind: point
     category: utility
@@ -2761,7 +2839,130 @@ rules:
       list_keys: [constages, desstages]
       separator: ";"
       # Its target is a script event label, checked by mapscript.entity_events instead.
-      exclude_classnames: [target_script_trigger]
+      # An objective trigger's missing target stops the game: ETL_OBJECTIVE_INFO_TARGET.
+      exclude_classnames: [target_script_trigger, trigger_objective_info]
+
+  # --- objectives: each error below stops the game at load (G_Error), checked in etlded ---
+
+  - id: ETL_OBJECTIVE_INFO_TARGET
+    check: targets_resolve
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1612-1619 (Think_SetupObjectiveInfo: G_Error \"has a missing target\")"
+    message: >-
+      {found} trigger_objective_info target(s) name no entity ({detail}); the game stops a few
+      frames after load with "has a missing target"
+    fix_hint: "give the objective entity that targetname, or fix the trigger's target"
+    params:
+      classname: trigger_objective_info
+      keys: [target]
+
+  - id: ETL_OBJECTIVE_INFO_LIMIT
+    check: count_max
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1876-1879, MAX_OID_TRIGGERS game/bg_public.h:230"
+    message: >-
+      found {found} trigger_objective_info entities; the game stops at load above {expected}
+    fix_hint: "merge objectives until there are at most 18 objective triggers"
+    params:
+      classname: trigger_objective_info
+      count: 18
+
+  - id: ETL_CONSTRUCTIBLE_TEAM
+    check: flags_any
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:5618-5629 (G_Error \"does not have a team that can build it\")"
+    message: >-
+      {found} func_constructible(s) set neither AXIS_CONSTRUCTIBLE (4) nor ALLIED_CONSTRUCTIBLE
+      (8); the game stops at load
+    fix_hint: "set spawnflag 4 or 8 for the team that builds it"
+    params:
+      classname: func_constructible
+      flags: [4, 8]
+
+  - id: ETL_CONSTRUCTIBLE_PARENT
+    check: targeted_by
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:5536-5553 (G_Error \"missing parent trigger_objective_info\")"
+    message: >-
+      {found} func_constructible(s) start built and are not invulnerable, but no
+      trigger_objective_info targets them; the game stops at load
+    fix_hint: "add a trigger_objective_info whose target is the constructible's targetname"
+    params:
+      classname: func_constructible
+      when_flags_all: [1]
+      when_flags_none: [2]
+      by_classname: trigger_objective_info
+      by_key: target
+
+  - id: ETL_CONSTRUCTIBLE_STAGE_CLASS
+    check: list_targets
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:5378-5385 and :5415-5422 (G_Error \"entry doesn't target a 'func_brushmodel'\")"
+    message: >-
+      construction stage entries name something other than a func_brushmodel ({detail}); the
+      game stops at load
+    fix_hint: "make each stage a func_brushmodel with that targetname"
+    params:
+      classname: func_constructible
+      keys: [constages, desstages]
+      separator: ";"
+      target_classes: [func_brushmodel]
+
+  - id: ETL_CONSTRUCTIBLE_STAGE_COUNTS
+    check: list_counts_match
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:5434-5437 (G_Error \"has %i entries in the desstages and %i targets in the constages key\")"
+    message: >-
+      constages and desstages list different numbers of stages ({detail}); the game stops at load
+    fix_hint: "give desstages exactly as many entries as constages"
+    params:
+      classname: func_constructible
+      keys: [constages, desstages]
+      separator: ";"
+
+  - id: ETL_CONSTRUCTIBLE_STAGE_TERMINATOR
+    check: key_pattern
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:5366-5392 (an entry counts only when a ';' ends it)"
+    message: >-
+      a stage list does not end with ';' ({detail}); its last entry is silently ignored
+    fix_hint: "end every entry with ';', as in \"stage1;stage2;\""
+    params:
+      classname: func_constructible
+      key: constages
+      pattern: "(?:[^;]+;)*"
+
+  - id: ETL_CONSTRUCTIBLE_DESSTAGE_TERMINATOR
+    check: key_pattern
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:5400-5430 (an entry counts only when a ';' ends it)"
+    message: >-
+      a stage list does not end with ';' ({detail}); its last entry is silently ignored
+    fix_hint: "end every entry with ';'"
+    params:
+      classname: func_constructible
+      key: desstages
+      pattern: "(?:[^;]+;)*"
+
+  - id: ETL_CHECKPOINT_SCRIPTNAME
+    check: key_required
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:1417-1420 (G_Error for a checkpoint without a scriptname)"
+    message: >-
+      {found} team_WOLF_checkpoint(s) have no scriptname; the game stops at load
+    fix_hint: "give the checkpoint a scriptname and a block for its trigger events"
+    params:
+      classname: team_WOLF_checkpoint
+      key: scriptname
 
 # ---------------------------------------------------------------------------
 # mapscript — maps/<map>.script, checked against the map by nrc_mcp.mapscript
@@ -2858,6 +3059,60 @@ mapscript:
       case_insensitive: true   # G_Find compares with Q_stricmp, game/g_utils.c:345
       consequence: "the game stops with 'setautospawn, couldn't find target' when it runs"
       locus: "game/g_script_actions.c:176-210; description becomes message at game/g_team.c:942-946"
+    - action: construct
+      arg: 0
+      resolves:
+        - {key: targetname, classname: func_constructible}
+      severity: error
+      case_insensitive: true   # G_FindByTargetname compares with Q_stricmp, game/g_utils.c:509
+      describe: "a func_constructible's targetname"
+      consequence: "the game stops with '\"construct\" could not find entity' when it runs"
+      locus: "game/g_script_actions.c:4275-4287"
+    - action: wm_set_main_objective
+      arg: 0
+      resolves:
+        - {key: target, classname: trigger_objective_info}
+      severity: warning
+      case_insensitive: true
+      describe: "the target of a trigger_objective_info"
+      consequence: "nothing happens: the objective is looked up by its trigger's target, and a miss is silent"
+      locus: "game/g_script_actions.c:3358-3405"
+      # Every stock map passes an objective number here, the old syntax, which the engine
+      # ignores on purpose "for old map scripts compatibility" (g_script_actions.c:3372-3386).
+      skip_numeric: true
+  # Numeric arguments the engine refuses, with a G_Error, when the action runs.
+  arg_ranges:
+    - action: constructible_class
+      arg: 0
+      min: 1
+      max: 3
+      severity: error
+      consequence: "the game stops with 'constructible_class has a bad value' when it runs"
+      locus: "game/g_script_actions.c:4310-4315"
+  # Calls a running block should make. Not enforced by the engine, so never an error.
+  required_actions:
+    - block: game_manager
+      event: spawn
+      action: wm_setwinner
+      severity: info
+      consequence: >-
+        at the time limit the winner is whatever wm_setwinner last set, and unset reads as 0,
+        an Axis win (game/g_main.c:3549-3587)
+      fix_hint: "call wm_setwinner with the defending team (0 Axis, 1 Allies) in game_manager's spawn"
+  # Objective entities that need a key value, or a script action in their own block, to work.
+  objective_requirements:
+    - classname: func_explosive
+      targeted_by: {classname: trigger_objective_info, key: target, flags_any: [1, 2]}
+      # constructible_class 2/3 (or constructible_weaponclass 2/3 with no class) leaves a
+      # weapon class of at least 1 after the engine's decrement (game/g_mover.c:4672-4689).
+      key_min: {constructible_class: 2, constructible_weaponclass: 2}
+      action: constructible_class
+      action_min: 2
+      severity: warning
+      message: >-
+        is a dynamite objective, but its weapon class stays below 1: dynamite can be planted and
+        counts down, and the objective survives (game/g_missile.c:428, game/g_weapon.c:2072)
+      fix_hint: "set constructible_class 3 on it, or call constructible_class 3 in its spawn event"
 
 
 # ---------------------------------------------------------------------------
@@ -2957,6 +3212,59 @@ packaging:
     required_keys: [map, longname, type]
     confidence: unverified
     note: "scripts/<map>.arena is read at cgame/cg_missionbriefing.c:476; see unverified.arena_required_keys"
+    # What arena_write may write. cgame reads map, longname, briefing, lmsbriefing,
+    # alliedwintext, axiswintext and mapposition_x/y (cgame/cg_missionbriefing.c:260-417); the
+    # UI reads map, longname, briefing, timelimit, the respawn times and type (ui/ui_gameinfo.c:101-215).
+    keys: [map, longname, type, briefing, lmsbriefing, alliedwintext, axiswintext, timelimit,
+           axisRespawnTime, alliedRespawnTime, mapposition_x, mapposition_y]
+    # type lists the gametypes the map offers in the menu; these two are objective and stopwatch.
+    defaults: {type: "wolfmp wolfsw"}
+  # What objdata_write writes: limbo's map and objective descriptions (cgame/cg_main.c:521-629).
+  objdata:
+    path: "maps/{map}.objdata"
+    teams: [axis, allied, neutral]
+    description: 'wm_mapdescription {team} "{text}"'
+    objective: 'wm_objective_{team}_desc {number} "{text}"'
+    objective_teams: [axis, allied]
+    max_objectives: 8          # MAX_OBJECTIVES, game/bg_public.h:229
+    confidence: verified
+  # What commandmap_make writes. The game frames levelshots/<map>_cc by the worldspawn's
+  # mapcoordsmins (top-left: x min, y max) and mapcoordsmaxs (bottom-right), cgame/cg_spawn.c:555-586;
+  # the area must be square (game/bg_tracemap.c:98-101). The shaders it draws are <map>_cc_trans
+  # and _cc_automap (cgame/cg_commandmap.c:1572-1589), defined as the base game defines its own
+  # in scripts/levelshots.shader, in a file of the map's own name so nothing is shadowed.
+  commandmap:
+    image: "levelshots/{map}_cc.tga"
+    size: 512                  # every stock _cc.tga is 512x512, 24-bit
+    mins_key: mapcoordsmins
+    maxs_key: mapcoordsmaxs
+    shader_file: "scripts/levelshots_{map}.shader"
+    shader_text: |
+      levelshots/{map}_cc_automap
+      {{
+      	nopicmip
+      	nocompress
+      	nomipmaps
+      	{{
+      		clampmap levelshots/{map}_cc.tga
+      		depthFunc equal
+      		rgbGen identity
+      	}}
+      }}
+
+      levelshots/{map}_cc_trans
+      {{
+      	nopicmip
+      	nocompress
+      	nomipmaps
+      	{{
+      		clampmap levelshots/{map}_cc.tga
+      		blendfunc blend
+      		rgbGen identity
+      		alphaGen vertex
+      	}}
+      }}
+    confidence: verified
   # The other files a map is looked up by; ship_check reports any that are missing. An image
   # may ship under any extension the renderer tries (renderercommon/tr_common.c:45-53).
   companions:
@@ -2965,6 +3273,8 @@ packaging:
     - {path: "levelshots/{map}_cc.tga", any_extension: [png, tga, jpg, jpeg], confidence: verified, role: command map, required: false, locus: "cgame/cg_main.c:1087"}
     - {path: "maps/{map}_tracemap.tga", confidence: verified, role: tracemap (written by generatetracemap), required: false, locus: "game/bg_tracemap.c:598"}
     - {path: "maps/{map}_loc.dat", confidence: verified, role: location names, required: false, locus: "cgame/cg_locations.c:526"}
+    - {path: "levelshots/{map}.tga", any_extension: [png, tga, jpg, jpeg], confidence: verified, role: levelshot, required: false, locus: "cgame/cg_loadpanel.c:449"}
+    - {path: "scripts/levelshots_{map}.shader", confidence: verified, role: command map shaders, required: false, locus: "cgame/cg_commandmap.c:1572-1589"}
   reserved_shader_prefixes: [common/, sfx/, gfx/, models/]
   size_budget_bytes: 52428800
   size_budget_confidence: unverified

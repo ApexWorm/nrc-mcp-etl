@@ -448,10 +448,18 @@ def test_every_tier2_scenario_is_well_formed():
         # install and are not redistributable, so CI and most machines do not have them.
         # What must always hold is that the scenario *names* one — a scenario with no
         # fixture grades nothing, wherever it runs.
-        assert s["fixture"], f"{path.name} names no fixture"
-        fixture = root / s["fixture"]
+        # A scenario starts from a fixture, a fixture tree, or nothing - and then it must say
+        # which map the model creates, or grading has nothing to read.
+        if s.get("fixture_dir"):
+            assert s.get("map"), f"{path.name}: fixture_dir needs a map"
+            fixture = root / s["fixture_dir"] / s["map"]
+        elif s.get("fixture"):
+            fixture = root / s["fixture"]
+        else:
+            assert s.get("map"), f"{path.name} names no fixture and no map to create"
+            continue
         if not fixture.is_file():
-            missing.append(f"{path.name} -> {s['fixture']}")
+            missing.append(f"{path.name} -> {fixture.relative_to(root)}")
 
     if missing:
         pytest.skip(
@@ -619,3 +627,85 @@ def _load_tool(name: str):
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def test_the_compile_wrapper_searches_the_maps_own_folder(tmp_path):
+    """A terrain's index image sits beside the map; q3map2 finds it only on a search path."""
+    q3 = _load_tool("q3map2")
+    nested = tmp_path / "work" / "maps" / "m.map"
+    flat = tmp_path / "flat" / "m.map"
+    assert q3.map_root_flags(nested, staged=False) == ["-fs_pakpath", str(tmp_path / "work")]
+    assert q3.map_root_flags(flat, staged=False) == ["-fs_pakpath", str(tmp_path / "flat")]
+    assert q3.map_root_flags(nested, staged=True) == [], "Windows cannot read a Linux path"
+
+
+def test_the_importer_brings_a_maps_index_image_along(tmp_path, monkeypatch):
+    imp = _load_tool("import_corpus")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "t.map").write_text(
+        '{\n"classname" "worldspawn"\n}\n{\n"classname" "func_group"\n"alphamap" "t.pcx"\n}\n'
+    )
+    (src / "t.pcx").write_bytes(b"PCX")
+    (src / "unused.pcx").write_bytes(b"PCX")
+    monkeypatch.setenv("NRC_MAPSRC", str(src))
+    out = []
+    imp.import_game_maps(tmp_path, out)
+    assert sorted(i.name for i in out) == ["t.map", "t.pcx"], "only what the map names"
+
+
+def test_profile_clean_classname_count_and_files_exist(tmp_path):
+    from nrc_mcp import profiles
+
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    root = Path(__file__).resolve().parents[2] / "bench" / "tapes" / "fixtures" / "nrcroom"
+    shutil.copytree(root, tmp_path, dirs_exist_ok=True)
+    check = playspace.Check(
+        workspace=tmp_path, current=tmp_path / "maps" / "nrcroom.map", profile_id="etl"
+    )
+    assert playspace.run_invariant("profile_clean", check, max_warnings=0).ok
+    assert playspace.run_invariant(
+        "classname_count", check, classname="team_CTF_redspawn", at_least=2
+    ).ok
+    assert not playspace.run_invariant(
+        "classname_count", check, classname="trigger_objective_info"
+    ).ok
+    assert playspace.run_invariant("files_exist", check, paths=["maps/nrcroom.script"]).ok
+    assert not playspace.run_invariant("files_exist", check, paths=["maps/nrcroom.objdata"]).ok
+    (tmp_path / "maps" / "nrcroom.script").write_text("game_manager { spawn { bogus 1 } }")
+    broken = playspace.run_invariant("profile_clean", check)
+    assert not broken.ok and "MAPSCRIPT" in broken.detail
+
+
+def test_tier2_stages_fixture_trees_and_passes_images_through(tmp_path, monkeypatch):
+    t2 = _load_tool("tier2")
+    scenario = {
+        "name": "s",
+        "fixture_dir": "bench/tapes/fixtures/nrcroom",
+        "map": "maps/nrcroom.map",
+    }
+    workspace, baseline = t2.prepare_workspace(scenario)
+    try:
+        assert t2.work_path(scenario, workspace) == workspace / "maps" / "nrcroom.map"
+        assert (workspace / "maps" / "nrcroom.script").is_file() and baseline.is_file()
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+    empty, none = t2.prepare_workspace({"name": "e", "map": "maps/new.map"})
+    assert none is None and not any(empty.iterdir())
+    shutil.rmtree(empty, ignore_errors=True)
+
+    class Block:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class Result:
+        content = [
+            Block(type="text", text="notes"),
+            Block(type="image", data="iVBOR", mimeType="image/png"),
+        ]
+
+    blocks = t2._result_blocks(Result())
+    assert blocks[0] == {"type": "text", "text": "notes"}
+    assert blocks[1]["type"] == "image" and blocks[1]["source"]["data"] == "iVBOR"
+    assert t2.DEFAULT_MODEL == "claude-opus-5-5"

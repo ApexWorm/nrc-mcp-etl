@@ -185,22 +185,18 @@ fn validate_entity(r: &mut Report, ei: usize, e: &Entity, t: &Thresholds) {
     for (pi, p) in e.prims.iter().enumerate() {
         match p {
             Primitive::Brush(b) => {
-                // Out-of-bounds coordinates make every later check meaningless, so report
-                // them first and plainly.
+                // A non-finite plane point makes every later check meaningless, so report it
+                // first and plainly. A *finite* plane point beyond the world limit is not a
+                // problem: plane points only define a plane, and q3map2 bounds a brush by its
+                // windings (brush.cpp:48-55). Shipped maps carry such points (oasis). The
+                // world limit is checked against the brush's vertices below.
                 for (fi, f) in b.faces.iter().enumerate() {
                     for pt in f.point_vecs() {
-                        if !pt.is_finite()
-                            || pt.x.abs() > MAX_WORLD_COORD
-                            || pt.y.abs() > MAX_WORLD_COORD
-                            || pt.z.abs() > MAX_WORLD_COORD
-                        {
+                        if !pt.is_finite() {
                             r.findings.push(Finding {
                                 severity: Severity::Error,
                                 code: "COORD_OUT_OF_BOUNDS",
-                                message: format!(
-                                    "plane point {pt} lies outside the +/-{MAX_WORLD_COORD:.0} \
-                                     world limit"
-                                ),
+                                message: format!("plane point {pt} is not a finite number"),
                                 location: at(Some(pi), Some(fi)),
                                 rule_source: SRC_WORLD,
                                 confidence: Confidence::Verified,
@@ -271,8 +267,46 @@ fn validate_entity(r: &mut Report, ei: usize, e: &Entity, t: &Thresholds) {
                             rule_source: SRC_SPEC,
                             confidence: Confidence::Verified,
                         });
+                        // Exact geometry refuses plane points beyond the world, so whether the
+                        // brush itself leaves it is decided from an approximate hull instead.
+                        if let Some(v) = approx_vertices(&b.faces).into_iter().find(|v| {
+                            v.x.abs() > MAX_WORLD_COORD
+                                || v.y.abs() > MAX_WORLD_COORD
+                                || v.z.abs() > MAX_WORLD_COORD
+                        }) {
+                            r.findings.push(Finding {
+                                severity: Severity::Error,
+                                code: "COORD_OUT_OF_BOUNDS",
+                                message: format!(
+                                    "vertex near {v} lies outside the +/-{MAX_WORLD_COORD:.0} \
+                                     world limit; q3map2 drops the whole brush, silently"
+                                ),
+                                location: at(Some(pi), None),
+                                rule_source: SRC_WORLD,
+                                confidence: Confidence::Verified,
+                            });
+                        }
                     }
                     Ok(g) => {
+                        // q3map2 drops a brush whose windings leave the world, without a word
+                        // (CreateBrushWindings -> BoundBrush fails, map.cpp:786-788).
+                        if let Some(v) = g.vertices.iter().map(|v| v.to_vec3()).find(|v| {
+                            v.x.abs() > MAX_WORLD_COORD
+                                || v.y.abs() > MAX_WORLD_COORD
+                                || v.z.abs() > MAX_WORLD_COORD
+                        }) {
+                            r.findings.push(Finding {
+                                severity: Severity::Error,
+                                code: "COORD_OUT_OF_BOUNDS",
+                                message: format!(
+                                    "vertex {v} lies outside the +/-{MAX_WORLD_COORD:.0} world \
+                                     limit; q3map2 drops the whole brush, silently"
+                                ),
+                                location: at(Some(pi), None),
+                                rule_source: SRC_WORLD,
+                                confidence: Confidence::Verified,
+                            });
+                        }
                         for fi in g.redundant_faces() {
                             r.findings.push(Finding {
                                 severity: Severity::Warning,
@@ -458,6 +492,46 @@ pub fn all_points_exact(map: &Map) -> bool {
     })
 }
 
+/// The corners of a brush in floating point: every triple of face planes that meets in a point
+/// inside all the others. Only for deciding the world limit when exact geometry declines, so a
+/// small tolerance is fine and nothing else is judged from it.
+fn approx_vertices(faces: &[crate::model::Face]) -> Vec<crate::math::Vec3> {
+    use crate::math::Vec3;
+    // Each plane as (normal, d) with the brush on the side where n.p <= d.
+    let planes: Vec<(Vec3, f64)> = faces
+        .iter()
+        .filter_map(|f| {
+            let [a, b, c] = f.point_vecs();
+            let n = (c - a).cross(b - a);
+            let len = n.length();
+            (len > 0.0 && len.is_finite()).then(|| {
+                let n = n * (1.0 / len);
+                (n, n.dot(a))
+            })
+        })
+        .collect();
+    let mut out = Vec::new();
+    for i in 0..planes.len() {
+        for j in i + 1..planes.len() {
+            for k in j + 1..planes.len() {
+                let (n1, d1) = planes[i];
+                let (n2, d2) = planes[j];
+                let (n3, d3) = planes[k];
+                let det = n1.dot(n2.cross(n3));
+                if det.abs() < 1e-9 {
+                    continue;
+                }
+                let p = (n2.cross(n3) * d1 + n3.cross(n1) * d2 + n1.cross(n2) * d3) * (1.0 / det);
+                let scale = 1e-6 * p.length().max(1.0);
+                if planes.iter().all(|&(n, d)| n.dot(p) <= d + scale) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,12 +700,35 @@ mod tests {
     }
 
     #[test]
-    fn out_of_bounds_coordinates_are_errors() {
+    fn a_plane_point_beyond_the_world_is_fine_when_the_brush_is_inside() {
+        // The top plane is defined far above the world, but the brush is a 64 unit cube.
+        // Shipped maps do this (oasis), and q3map2 bounds a brush by its windings.
         let brush = "{\n\
-            ( 0 0 999999 ) ( 1 0 999999 ) ( 0 1 999999 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
-            ( 0 0 0 ) ( 0 1 0 ) ( 1 0 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
-            ( 0 0 0 ) ( 1 0 0 ) ( 0 0 1 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
-            ( 0 8 0 ) ( 0 8 1 ) ( 1 8 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 0 64 ) ( 0 1 64 ) ( 1 0 64 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 0 0 ) ( 1 0 0 ) ( 0 1 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 0 0 ) ( 0 0 100000 ) ( 1 0 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 64 0 ) ( 1 64 0 ) ( 0 64 100000 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 0 0 ) ( 0 1 0 ) ( 0 0 100000 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 64 0 0 ) ( 64 0 1 ) ( 64 1 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            }\n";
+        let r = validate_map(&world(brush), &Thresholds::default());
+        assert!(
+            !codes(&r).contains(&"COORD_OUT_OF_BOUNDS"),
+            "{:?}",
+            codes(&r)
+        );
+    }
+
+    #[test]
+    fn out_of_bounds_coordinates_are_errors() {
+        // A closed brush whose top reaches z = 999999: its vertices leave the world.
+        let brush = "{\n\
+            ( 0 0 999999 ) ( 0 1 999999 ) ( 1 0 999999 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 0 0 ) ( 1 0 0 ) ( 0 1 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 0 0 ) ( 0 0 1 ) ( 1 0 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 64 0 ) ( 1 64 0 ) ( 0 64 1 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 0 0 0 ) ( 0 1 0 ) ( 0 0 1 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
+            ( 64 0 0 ) ( 64 0 1 ) ( 64 1 0 ) a/b 0 0 0 0.5 0.5 0 0 0\n\
             }\n";
         let r = validate_map(&world(brush), &Thresholds::default());
         assert!(codes(&r).contains(&"COORD_OUT_OF_BOUNDS"));

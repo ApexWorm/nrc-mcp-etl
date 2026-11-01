@@ -102,6 +102,7 @@ def _reset_session() -> None:
     srv.SESSION.grid = 8
     srv.SESSION.warnings = []
     srv.SESSION.opened_round_trip = None
+    srv.SESSION.opened_brushes = None
 
 
 def run_tape(tape: dict, *, workspace: Path, allow_compile: bool = False) -> dict:

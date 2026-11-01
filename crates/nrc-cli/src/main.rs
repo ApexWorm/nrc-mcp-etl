@@ -425,6 +425,7 @@ fn cmd_render(files: &[PathBuf], a: RenderArgs<'_>) -> Result<(Value, ExitCode),
                 grid_spacing: spacing,
                 annotate: true,
                 scene,
+                ..RenderOptions::default()
             },
         )
     }

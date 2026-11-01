@@ -828,6 +828,43 @@ def _map_seals(check: Check, preset: str = "draft") -> Outcome:
     return Outcome("map_seals", True, "sealed")
 
 
+@invariant("profile_clean")
+def _profile_clean(check: Check, max_warnings: int | None = None) -> Outcome:
+    """No error from the game profile's rules or the map script (validate_profile's checks)."""
+    from . import mapscript, rules  # noqa: PLC0415
+    from .kernel import load_map  # noqa: PLC0415
+
+    path = _require_current(check)
+    pid = resolve_profile(check.profile_id)
+    ents = load_map(path).entities()
+    found = rules.evaluate(pid, ents) + rules.unknown_classnames(pid, ents)
+    found += mapscript.check(pid, ents, path)
+    errors = sorted({f.code for f in found if f.severity == "error"})
+    warnings = sorted({f.code for f in found if f.severity == "warning"})
+    ok = not errors and (max_warnings is None or len(warnings) <= max_warnings)
+    detail = f"errors {errors}" if errors else f"clean; warnings {warnings}"
+    return Outcome("profile_clean", ok, detail)
+
+
+@invariant("classname_count")
+def _classname_count(
+    check: Check, classname: str = "", at_least: int = 1, at_most: int | None = None
+) -> Outcome:
+    """The map has between `at_least` and `at_most` entities of `classname`."""
+    from .kernel import load_map  # noqa: PLC0415
+
+    n = sum(1 for e in load_map(_require_current(check)).entities() if e["classname"] == classname)
+    ok = n >= at_least and (at_most is None or n <= at_most)
+    return Outcome("classname_count", ok, f"{n} {classname}")
+
+
+@invariant("files_exist")
+def _files_exist(check: Check, paths: list[str] | None = None) -> Outcome:
+    """Files beside the map exist, by path inside the workspace: release files, a script."""
+    missing = [p for p in paths or [] if not (check.workspace / p).is_file()]
+    return Outcome("files_exist", not missing, f"missing {missing}" if missing else "all present")
+
+
 @invariant("pk3_contents")
 def _pk3_contents(
     check: Check, step: str = "", has: list[str] | None = None, no_basegame: bool = False

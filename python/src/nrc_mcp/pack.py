@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -118,13 +119,16 @@ def pack_pk3(
     dropped: list[str] = []
     for p in produced:
         dest = _destination(target, p.name, base)
-        if p.name.endswith(SUCCESS_SUFFIX):
+        # A failed package is fixed up too: it is still the map, missing only what the packer
+        # could not find, and testing it should not also lose its script.
+        if zipfile.is_zipfile(p):
             a, d = _fix_up(p, dest, target, pkg, basegame)
             added += a
             dropped += d
         elif p.resolve() != dest.resolve():
             dest.parent.mkdir(parents=True, exist_ok=True)
-            p.replace(dest)
+            # A move, not a rename: the install and the map are often on different devices.
+            shutil.move(p, dest)
         if p.resolve() != dest.resolve() and p.exists():
             p.unlink()
         moved.append(dest)
@@ -470,6 +474,48 @@ def ship_check(
     }
 
 
+def _arena_keys(text: str) -> dict[str, str]:
+    """Key/value pairs of an arena file: a braced list of `key "value"` tokens."""
+    tokens = re.findall(r'"([^"]*)"|([^\s{}"]+)', text)
+    words = [a if a or not b else b for a, b in tokens]
+    return {words[i].lower(): words[i + 1] for i in range(0, len(words) - 1, 2)}
+
+
+def _check_arena(archive: Path, arenas: list[str], stem: str, ar: dict, sev) -> list[dict]:
+    """The arena's required keys, and whether it names this map."""
+    with zipfile.ZipFile(archive) as z:
+        names = {n.lower(): n for n in z.namelist()}
+        d = str(ar.get("directory", "scripts")).lower()
+        want = f"{d}/{stem.lower()}.{str(ar.get('extension', 'arena')).lower()}"
+        name = names.get(want) or names[arenas[0]]
+        keys = _arena_keys(z.read(name).decode("latin-1"))
+    conf = str(ar.get("confidence", "unverified"))
+    out = []
+    missing = [k for k in ar.get("required_keys") or [] if str(k).lower() not in keys]
+    if missing:
+        out.append(
+            _finding(
+                "SHIP_ARENA_KEYS",
+                sev("warning", conf),
+                f"{name} has no {', '.join(missing)}",
+                conf,
+                "arena_write fills in the map name and the profile's defaults",
+            )
+        )
+    if keys.get("map", "").lower() not in ("", stem.lower()):
+        out.append(
+            _finding(
+                "SHIP_ARENA_MAP_NAME",
+                "warning",
+                f"{name} names map {keys['map']!r}, not {stem!r}; the game matches the arena "
+                "to the map by that key",
+                "verified",
+                f'set map "{stem}"',
+            )
+        )
+    return out
+
+
 def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
     findings: list[dict] = []
     try:
@@ -508,7 +554,9 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
     if isinstance(ls, dict):
         d = str(ls.get("directory", "levelshots")).lower()
         conf = str(ls.get("confidence", "unverified"))
-        if not any(n.startswith(f"{d}/") and stem.lower() in n for n in lower):
+        # Exactly <dir>/<map>.<image>: the command map, <map>_cc, is a different picture.
+        shot = re.compile(rf"{re.escape(d)}/{re.escape(stem.lower())}\.(tga|jpg|jpeg|png)")
+        if not any(shot.fullmatch(n) for n in lower):
             findings.append(
                 _finding(
                     "SHIP_NO_LEVELSHOT",
@@ -527,6 +575,8 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
         ext = str(ar.get("extension", "arena")).lower()
         conf = str(ar.get("confidence", "unverified"))
         arenas = [n for n in lower if n.startswith(f"{d}/") and n.endswith(f".{ext}")]
+        if arenas:
+            findings += _check_arena(archive, arenas, stem, ar, sev)
         if not arenas:
             findings.append(
                 _finding(
@@ -541,8 +591,12 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
 
     # --- other files the game looks a map up by -------------------------------
     # Each names a path pattern; a required one missing is a warning, an optional one is noted.
+    levelshot_dir = str((pkg.get("levelshot") or {}).get("directory", "")).lower()
     for comp in pkg.get("companions") or []:
         if not isinstance(comp, dict) or not comp.get("path"):
+            continue
+        # The levelshot has its own check above; one missing picture is one finding.
+        if levelshot_dir and str(comp["path"]).lower() == f"{levelshot_dir}/{{map}}.tga":
             continue
         want = str(comp["path"]).format(map=stem).lower()
         # An image the renderer finds under any of several extensions.

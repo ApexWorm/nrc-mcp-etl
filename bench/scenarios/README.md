@@ -23,6 +23,9 @@ Never part of `mise run test`. `--run` has to be asked for.
 | `seal-the-roofs` | Make a roof unstandable without touching the interior or the plaza. The brief spells out the trap. |
 | `seal-the-roofs-terse` | The same task in the words a mapper actually uses: "block off roof access". |
 | `continue-existing-level` | Add a room to a finished map without costing the old work anything. |
+| `etl-build-small-map` | ET: Legacy from nothing: a sealed two-team map with spawns, markers, script, intermission and lights. Graded by the profile's rules, a sealed compile, and the pk3 loading with a client joined. |
+| `etl-add-objective` | Add a dynamite objective to nrcroom that the Axis destroy in the Allied bunker; both teams must still reach it. |
+| `etl-ship-map` | Make nrcroom releasable: command map, levelshot, limbo descriptions, arena; the files must end up in the pk3. |
 
 The first two share a fixture and a grader and differ only in wording. That pair is the
 measurement worth having: if the careful brief passes and the terse one does not, the result
@@ -47,7 +50,7 @@ In descending order of how much it saves:
 
 1. **Small fixtures.** `plaza_building.map` is 9 brushes. It reproduces the `ut4_dofa` trap at
    roughly a fortieth of the size, and a trap does not need a city to be a trap.
-2. **A cached prefix.** 48 tool schemas are the bulk of every request and never change within a
+2. **A cached prefix.** 66 tool schemas are the bulk of every request and never change within a
    run, so `cache_control` goes on the last one and later turns read them at a tenth of the
    price. Per-turn `cache_read_input_tokens` is reported; if the total is zero the run says so,
    because a silently invalidated prefix costs full price on every turn and looks like nothing.
@@ -79,9 +82,30 @@ Same shape as a tape, with `prompt` instead of `steps`:
 ```
 
 `{work}` is the fixture copied into a throwaway workspace; `{workspace}` is its directory.
+
+- `profile` is the server's `NRC_PROFILE` for the run, so the model is served that game's rules.
+- `fixture_dir` with `map` copies a whole game-directory tree (`maps/`, `scripts/`, ...) and keeps
+  the map's own name, as the tapes do. With neither `fixture` nor `fixture_dir`, the workspace
+  starts empty and `map` is the file the model has to create.
+- `finish` is a list of tool steps the harness runs after the model stops - a compile and a pack,
+  say - so invariants such as `pk3_contents` and `engine_loads` have a result to read. A step with
+  `needs_compile: true` runs only with `--compile`.
+- Render images reach the model as images, not as a note that one was taken.
 `allowed_tools` is optional and narrows the surface the model is offered — useful for asking
 whether a task is possible with fewer tools, and for cutting the cached prefix down.
 
-Then run `--check` before `--run`. It costs nothing and catches the mistakes that are worth
+Then run `--check` before `--run`:
+
+```sh
+mise run bench:tier2 -- --check                       # free: server, tools, fixtures, graders
+mise run bench:tier2 -- --estimate --scenario etl-add-objective   # one count_tokens call
+mise run bench:tier2 -- --run --scenario etl-add-objective --compile   # SPENDS TOKENS
+```
+
+Runs use Claude Opus 5.5 at the effort given (default medium) with server-side refusal
+fallbacks on; a turn a fallback model served is counted in `fallback_turns`. Results are
+written to `bench/results/` (gitignored).
+
+`--check` costs nothing and catches the mistakes that are worth
 catching for free: a renamed tool, a moved fixture, an invariant that does not exist, and a
 goal that was already true.

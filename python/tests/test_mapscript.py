@@ -351,7 +351,7 @@ def test_the_etl_profile_checks_a_small_map_end_to_end(tmp_path):
         ent(1, "script_multiplayer"),
         ent(2, "team_WOLF_objective", description="Axis Yard", spawnflags="1"),
     ]
-    found = mapscript.check(pid, entities, tmp_path / "m.map")
+    found = [f for f in mapscript.check(pid, entities, tmp_path / "m.map") if f.severity != "info"]
     assert [(f.code, f.severity) for f in found] == [("MAPSCRIPT_UNRESOLVED_REFERENCE", "error")]
     assert "missing_thing" in found[0].message
 
@@ -455,3 +455,99 @@ def test_check_can_judge_an_edit_before_it_is_written(tmp_path, spec):
     found = mapscript.check("test", [ent(0, "manager")], tmp_path / "m.map", text=text)
     assert [f.code for f in found] == ["MAPSCRIPT_UNRESOLVED_REFERENCE"]
     assert not (tmp_path / "m.script").exists()
+
+
+def test_numeric_arguments_out_of_range_stop_the_game_when_they_run(tmp_path, monkeypatch):
+    spec = {
+        **SPEC,
+        "actions": [*SPEC["actions"], "constructible_class"],
+        "arg_ranges": [
+            {"action": "constructible_class", "arg": 0, "min": 1, "max": 3, "severity": "error"}
+        ],
+    }
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"mapscript": spec})
+    text = block("game_manager", ("spawn", ["constructible_class 5"])) + block(
+        "dead", ("spawn", ["constructible_class 0"])
+    )
+    found = {
+        f.severity
+        for f in mapscript.check("test", [ent(0, "manager")], tmp_path / "m.map", text=text)
+        if f.code == "MAPSCRIPT_ARGUMENT_RANGE"
+    }
+    assert found == {"error", "warning"}, "a dead block is reported one step milder"
+
+
+def test_a_required_action_is_asked_for_only_in_a_running_block(tmp_path, monkeypatch):
+    spec = {
+        **SPEC,
+        "required_actions": [{"block": "game_manager", "event": "spawn", "action": "setautospawn"}],
+    }
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"mapscript": spec})
+    without = block("game_manager", ("spawn", ["wait 1"]))
+    codes = [
+        f.code
+        for f in mapscript.check("test", [ent(0, "manager")], tmp_path / "m.map", text=without)
+    ]
+    assert codes == ["MAPSCRIPT_REQUIRED_ACTION"]
+    assert not mapscript.check("test", [], tmp_path / "m.map", text=without) or all(
+        f.code != "MAPSCRIPT_REQUIRED_ACTION"
+        for f in mapscript.check("test", [], tmp_path / "m.map", text=without)
+    ), "no manager entity, no running block, nothing asked"
+
+
+def test_an_objective_requirement_is_met_by_a_key_or_by_its_own_script(tmp_path, monkeypatch):
+    spec = {
+        **SPEC,
+        "actions": [*SPEC["actions"], "constructible_class"],
+        "objective_requirements": [
+            {
+                "classname": "boom",
+                "targeted_by": {"classname": "trig", "key": "target", "flags_any": [1, 2]},
+                "key_min": {"cls": 2},
+                "action": "constructible_class",
+                "action_min": 2,
+                "severity": "warning",
+            }
+        ],
+    }
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"mapscript": spec})
+    trig = ent(0, "trig", target="wall", spawnflags="2")
+
+    def unmet(boom, text=""):
+        return [
+            f.code
+            for f in mapscript.check("test", [trig, boom], tmp_path / "m.map", text=text)
+            if f.code == "MAPSCRIPT_OBJECTIVE_UNMET"
+        ]
+
+    assert unmet(ent(1, "boom", targetname="wall")) == ["MAPSCRIPT_OBJECTIVE_UNMET"]
+    assert unmet(ent(1, "boom", targetname="wall", cls="3")) == []
+    scripted = block("wall", ("spawn", ["constructible_class 3"]))
+    assert unmet(ent(1, "boom", targetname="wall", scriptname="wall"), scripted) == []
+    too_low = block("wall", ("spawn", ["constructible_class 1"]))
+    assert unmet(ent(1, "boom", targetname="wall", scriptname="wall"), too_low)
+
+
+def test_a_reference_can_skip_the_old_numeric_syntax(tmp_path, monkeypatch):
+    """wm_set_main_objective took a number before it took a name; the engine ignores numbers."""
+    spec = {
+        **SPEC,
+        "actions": [*SPEC["actions"], "main"],
+        "references": [
+            {
+                "action": "main",
+                "arg": 0,
+                "resolves": [{"key": "target", "classname": "trig"}],
+                "severity": "warning",
+                "skip_numeric": True,
+            }
+        ],
+    }
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"mapscript": spec})
+    text = block("game_manager", ("spawn", ["main 1 0", "main nowhere 0"]))
+    found = [
+        f.message
+        for f in mapscript.check("test", [ent(0, "manager")], tmp_path / "m.map", text=text)
+        if f.code == "MAPSCRIPT_UNRESOLVED_REFERENCE"
+    ]
+    assert len(found) == 1 and "nowhere" in found[0]

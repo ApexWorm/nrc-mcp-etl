@@ -40,7 +40,15 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
         if SESSION.path is None:
             raise ToolError("no map is open and no path was given.")
         target = str(SESSION.path)
-    return run_mise_task(f"compile:{preset}", [target])
+    run = run_mise_task(f"compile:{preset}", [target])
+    # The wrapper's own report, lifted out of the task output: whether the map leaked (and
+    # why, when there is no pointfile to trace) is the first thing to know after a compile.
+    report = optmod._last_json_object(run.get("stdout") or "")
+    if isinstance(report, dict):
+        run["leaked"] = bool(report.get("leaked"))
+        run["hint"] = report.get("hint") or ""
+        run["artifacts"] = report.get("artifacts") or []
+    return run
 
 
 @tool("compiling", "Compile and compare two maps", writes=True)

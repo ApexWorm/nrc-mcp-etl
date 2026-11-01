@@ -96,8 +96,15 @@ def solid_commit(
     grid: int | None = None,
     target_classname: str = "worldspawn",
     remember: bool = True,
+    new_entity: bool = False,
+    target_entity: int | None = None,
 ) -> dict:
     """Compile a Solid IR tree and add the brushes to the open map.
+
+    The brushes go to the first entity of `target_classname` (created if there is none), to a
+    fresh one with `new_entity` - needed for a second door, trigger or objective of a class -
+    or to entity `target_entity` by index. The result's `entity` says which; give it keys with
+    `entity_set_keys`.
 
     `textures` picks shaders per face direction and can make the brushes detail; `solid_help`
     lists its keys (`default`, `top`, `bottom`, `north`/`south`/`east`/`west`, `scale`,
@@ -115,7 +122,12 @@ def solid_commit(
     m = SESSION.require()
     k = _kernel()
     g = grid if grid is not None else SESSION.grid
-    result = k.solid_commit(m, ir, textures, g, target_classname, False, label)
+    try:
+        result = k.solid_commit(
+            m, ir, textures, g, target_classname, False, label, new_entity, target_entity
+        )
+    except ValueError as e:
+        raise ToolError(str(e)) from e
 
     if remember and SESSION.path is not None:
         try:
@@ -126,6 +138,56 @@ def solid_commit(
             # and must not be reported as though the commit failed.
             result["sidecar_error"] = str(e)
     result["next"] = "call map_save to write the map, or render_contact_sheet to look at it"
+    return result
+
+
+@tool("sculpt", "Add a curved surface", writes=True)
+def patch_commit(
+    kind: str,
+    centre: list[float],
+    radius: float,
+    length: float,
+    shader: str,
+    axis: str = "z",
+    facing: str | None = None,
+    start_deg: float = 0.0,
+    target_classname: str = "worldspawn",
+    new_entity: bool = False,
+    target_entity: int | None = None,
+    label: str | None = None,
+) -> dict:
+    """Add a curved surface - brushes cannot curve, so the engine draws curves from patches.
+
+    Kinds:
+      - `cylinder`: a vertical column. `centre` is the middle of its base, `length` its height.
+      - `arch`: a half-round vault spanning a doorway or corridor, running along `axis`
+        (`x` or `y`). `centre` is the middle of the circle at one end, on the springing line;
+        `length` is the depth along the axis.
+      - `bevel`: a quarter-round, vertical, for softening a corner. `start_deg` (0, 90, 180,
+        270) picks the quarter; `centre` and `length` as for a cylinder.
+
+    `facing` is the side that is drawn: `out` (default for cylinder and bevel) or `in` (default
+    for an arch, seen from below). A patch is a surface, not a solid: it does not seal the map
+    and players walk through it unless something solid - usually a clip brush - stands behind
+    it. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    k = _kernel()
+    spec = {
+        "kind": kind,
+        "centre": centre,
+        "radius": radius,
+        "length": length,
+        "axis": axis,
+        "start_deg": start_deg,
+    }
+    if facing is not None:
+        spec["facing"] = facing
+    try:
+        result = k.patch_commit(m, spec, shader, target_classname, new_entity, target_entity, label)
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+    result["next"] = "map_save to write it; a clip brush behind it makes it solid to players"
     return result
 
 

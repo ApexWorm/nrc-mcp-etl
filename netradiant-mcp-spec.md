@@ -211,7 +211,9 @@ Verified against the repo (2026-08):
   rational arithmetic for plane intersection. Floating-point slop is how you produce
   invisible micro-slivers that leak maps.
 - **Integer snapping.** All authored vertices snap to a configurable grid (default 1,
-  authoring default 8/16). Off-grid vertices are a validation error, not a warning.
+  authoring default 8/16). Off-grid vertices are a validation error, not a warning, for geometry added
+  or reshaped in the session; on brushes the map already had they are reported as one warning, since
+  neither the compiler nor the engine stops on them (shipped ET maps carry thousands).
 - **Winding derivation.** Plane set → face windings via half-space clipping; detect
   redundant planes, degenerate faces, non-convex/empty brushes.
 

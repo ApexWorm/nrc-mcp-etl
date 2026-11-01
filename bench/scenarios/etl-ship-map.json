@@ -1,0 +1,69 @@
+{
+  "note": "Release work: nrcroom plays but has no command map, levelshot or objective descriptions. The model must produce them (and keep the arena) so the pre-ship check passes. Graded by the files being inside the packed pk3, the map still valid, and it loading with a client joined.",
+  "profile": "etl",
+  "fixture_dir": "bench/tapes/fixtures/nrcroom",
+  "map": "maps/nrcroom.map",
+  "max_turns": 20,
+  "prompt": "Get the ET: Legacy map at {work} ready to release. It needs a command map, a levelshot, and limbo descriptions of the map for both teams, and its arena file should give it a proper name and briefing. Save the map when you are done; the release archive is built after you finish.",
+  "invariants": [
+    {
+      "name": "validates_clean"
+    },
+    {
+      "name": "profile_clean"
+    },
+    {
+      "name": "files_exist",
+      "args": {
+        "paths": [
+          "maps/nrcroom.objdata",
+          "levelshots/nrcroom.tga",
+          "levelshots/nrcroom_cc.tga",
+          "scripts/levelshots_nrcroom.shader"
+        ]
+      }
+    },
+    {
+      "name": "pk3_contents",
+      "args": {
+        "step": "pack",
+        "no_basegame": true,
+        "has": [
+          "maps/nrcroom.bsp",
+          "maps/nrcroom.script",
+          "maps/nrcroom.objdata",
+          "scripts/nrcroom.arena",
+          "levelshots/nrcroom.tga",
+          "levelshots/nrcroom_cc.tga",
+          "scripts/levelshots_nrcroom.shader"
+        ]
+      }
+    },
+    {
+      "name": "engine_loads",
+      "args": {
+        "step": "pack",
+        "client": true
+      }
+    }
+  ],
+  "finish": [
+    {
+      "tool": "compile_map",
+      "as": "compile",
+      "needs_compile": true,
+      "args": {
+        "preset": "iterate",
+        "path": "{work}"
+      }
+    },
+    {
+      "tool": "pack_pk3",
+      "as": "pack",
+      "needs_compile": true,
+      "args": {
+        "bsp": "{workspace}/maps/nrcroom.bsp"
+      }
+    }
+  ]
+}

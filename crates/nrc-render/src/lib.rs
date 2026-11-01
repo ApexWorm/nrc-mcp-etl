@@ -147,6 +147,16 @@ pub struct RenderOptions {
     /// Draw coordinate ticks, a scale bar and axis letters.
     pub annotate: bool,
     pub scene: SceneOptions,
+    /// Frame these world bounds instead of the map's own (orthographic views): a command map
+    /// has to line up with the coordinates the game is told, not with whatever the map spans.
+    pub frame: Option<Aabb>,
+    /// Pixels left blank around the framed bounds in orthographic views.
+    pub padding: f64,
+    /// Also encode the image as an uncompressed TGA, the format the game's levelshots use.
+    pub tga: bool,
+    /// Skip faces lying wholly above this height: a top-down view of a sealed map otherwise
+    /// shows its roof. A command map is drawn with the roof cut away.
+    pub cut_above: Option<f64>,
 }
 
 impl Default for RenderOptions {
@@ -162,6 +172,10 @@ impl Default for RenderOptions {
             grid_spacing: Some(64.0),
             annotate: true,
             scene: SceneOptions::default(),
+            frame: None,
+            padding: 26.0,
+            tga: false,
+            cut_above: None,
         }
     }
 }
@@ -191,6 +205,8 @@ pub struct Annotations {
 
 pub struct RenderResult {
     pub png: Vec<u8>,
+    /// The same image as a TGA, when `RenderOptions::tga` asked for it.
+    pub tga: Option<Vec<u8>>,
     pub annotations: Annotations,
 }
 
@@ -210,6 +226,8 @@ impl std::fmt::Debug for RenderResult {
 // ---------------------------------------------------------------------------
 
 const BG: Rgb = Rgb(24, 26, 30);
+/// Where a cut passes through a brush: walls and pillars in a section view.
+const SECTION: Rgb = Rgb(40, 42, 48);
 const GRID_MINOR: Rgb = Rgb(38, 41, 47);
 const GRID_MAJOR: Rgb = Rgb(52, 57, 66);
 const AXIS_LINE: Rgb = Rgb(84, 92, 106);
@@ -273,8 +291,21 @@ fn check_size(w: u32, h: u32) -> Result<(), RenderError> {
 }
 
 fn build_camera(view: &View, bounds: Aabb, width: u32, height: u32) -> Camera {
+    build_camera_framed(view, bounds, width, height, None, 26.0)
+}
+
+fn build_camera_framed(
+    view: &View,
+    bounds: Aabb,
+    width: u32,
+    height: u32,
+    frame: Option<Aabb>,
+    padding: f64,
+) -> Camera {
     match view {
-        View::Ortho(axis) => Camera::fit_ortho(*axis, bounds, width, height, 26.0),
+        View::Ortho(axis) => {
+            Camera::fit_ortho(*axis, frame.unwrap_or(bounds), width, height, padding)
+        }
         View::Perspective {
             eye,
             target,
@@ -311,7 +342,14 @@ pub fn render(map: &Map, opts: &RenderOptions) -> Result<RenderResult, RenderErr
     check_size(opts.width, opts.height)?;
 
     let sc = scene::build(map, &opts.scene);
-    let cam = build_camera(&opts.view, sc.bounds, opts.width, opts.height);
+    let cam = build_camera_framed(
+        &opts.view,
+        sc.bounds,
+        opts.width,
+        opts.height,
+        opts.frame,
+        opts.padding,
+    );
     let mut canvas = Canvas::new(opts.width, opts.height, BG);
 
     if let (Some(spacing), true) = (opts.grid_spacing, cam.ortho_extent().is_some()) {
@@ -328,7 +366,7 @@ pub fn render(map: &Map, opts: &RenderOptions) -> Result<RenderResult, RenderErr
         }
     }
 
-    for (_, p) in &sc.entity_points {
+    for (_, p) in sc.entity_points.iter().filter(|_| opts.annotate) {
         if let Some((x, y, _)) = cam.project(*p) {
             let (x, y) = (x.round() as i64, y.round() as i64);
             canvas.rect_outline(x - 2, y - 2, x + 2, y + 2, ENTITY_POINT);
@@ -341,6 +379,7 @@ pub fn render(map: &Map, opts: &RenderOptions) -> Result<RenderResult, RenderErr
 
     Ok(RenderResult {
         png: canvas.to_png(),
+        tga: opts.tga.then(|| canvas.to_tga()),
         annotations: annotations_for(&sc, &cam, opts),
     })
 }
@@ -350,9 +389,35 @@ fn draw_facets(canvas: &mut Canvas, cam: &Camera, sc: &scene::Scene, opts: &Rend
     let wireframe = opts
         .wireframe
         .unwrap_or_else(|| opts.view.prefers_wireframe());
+    // With a cut, a section: a brush wholly above it (a roof) is dropped, and a brush the cut
+    // passes through (a wall, a pillar) shows its footprint in the section colour.
+    let lowest: std::collections::HashMap<(usize, usize), f64> = match opts.cut_above {
+        Some(_) => {
+            let mut m = std::collections::HashMap::new();
+            for f in &sc.facets {
+                let z = f.points.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+                let e = m.entry((f.entity, f.primitive)).or_insert(z);
+                *e = e.min(z);
+            }
+            m
+        }
+        None => std::collections::HashMap::new(),
+    };
     for f in &sc.facets {
         if opts.hide_invisible && f.is_caulk {
             continue;
+        }
+        let mut sectioned = false;
+        if let Some(cut) = opts.cut_above {
+            if f.points.iter().all(|p| p.z > cut) {
+                if lowest
+                    .get(&(f.entity, f.primitive))
+                    .is_some_and(|&z| z > cut)
+                {
+                    continue;
+                }
+                sectioned = true;
+            }
         }
         // Cull faces turned away from the viewer. In view space the eye looks along +z, so a
         // visible surface has a normal with a negative depth component. This is what makes an
@@ -370,7 +435,11 @@ fn draw_facets(canvas: &mut Canvas, cam: &Camera, sc: &scene::Scene, opts: &Rend
         let screen: Vec<(f64, f64, f32)> = clipped.iter().map(|v| cam.project_view(*v)).collect();
 
         if !wireframe {
-            let c = base_colour(f, opts.overlay).scaled(shade(f.normal));
+            let c = if sectioned {
+                SECTION
+            } else {
+                base_colour(f, opts.overlay).scaled(shade(f.normal))
+            };
             canvas.polygon(&screen, c);
         }
 
@@ -695,6 +764,7 @@ pub fn contact_sheet(map: &Map, opts: &ContactSheetOptions) -> Result<RenderResu
             grid_spacing: if is_ortho { opts.grid_spacing } else { None },
             annotate: true,
             scene: opts.scene.clone(),
+            ..RenderOptions::default()
         };
         // Rendering each panel to its own canvas and compositing keeps the depth buffers
         // independent, which they must be — they are different projections.
@@ -752,6 +822,7 @@ pub fn contact_sheet(map: &Map, opts: &ContactSheetOptions) -> Result<RenderResu
     );
     Ok(RenderResult {
         png: sheet.to_png(),
+        tga: None,
         annotations: ann,
     })
 }

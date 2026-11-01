@@ -343,6 +343,31 @@ impl PyMap {
         Ok(out)
     }
 
+    /// A fingerprint of every brush's geometry: `(entity, primitive, hash)`.
+    ///
+    /// The hash covers the plane points only, so a brush that moves or changes shape gets a new
+    /// one and a retextured brush keeps it. Stable within one process, which is all it is for:
+    /// telling the brushes a map was opened with from those added or reshaped since.
+    fn brush_fingerprints(&self) -> Vec<(usize, usize, u64)> {
+        use std::hash::{Hash, Hasher};
+        let mut out = Vec::new();
+        for (ei, e) in self.inner.entities.iter().enumerate() {
+            for (pi, p) in e.prims.iter().enumerate() {
+                let Primitive::Brush(b) = p else { continue };
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                for f in &b.faces {
+                    for pt in &f.points {
+                        for c in pt {
+                            c.value().to_bits().hash(&mut h);
+                        }
+                    }
+                }
+                out.push((ei, pi, h.finish()));
+            }
+        }
+        out
+    }
+
     /// Set or clear the detail contents bit on whole brushes, leaving every other bit alone.
     ///
     /// Every brush is checked before any is changed, so a refusal leaves the map as it was. The
@@ -580,6 +605,10 @@ impl PyMap {
         yaw_deg = 0.0,
         eye_height = None,
         fov_deg = 55.0,
+        frame = None,
+        padding = 26.0,
+        tga = false,
+        cut_above = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn render<'py>(
@@ -599,6 +628,10 @@ impl PyMap {
         yaw_deg: f64,
         eye_height: Option<f64>,
         fov_deg: f64,
+        frame: Option<[f64; 4]>,
+        padding: f64,
+        tga: bool,
+        cut_above: Option<f64>,
     ) -> PyResult<(Bound<'py, pyo3::types::PyBytes>, Bound<'py, PyDict>)> {
         use nrc_render::camera::OrthoAxis;
         use nrc_render::{RenderOptions, SceneOptions, View};
@@ -678,6 +711,14 @@ impl PyMap {
                     grid_spacing: spacing,
                     annotate,
                     scene,
+                    // [xmin, ymin, xmax, ymax]; z spans everything, so only the plan matters.
+                    frame: frame.map(|[x0, y0, x1, y1]| nrc_core::math::Aabb {
+                        min: nrc_core::math::vec3(x0, y0, -65536.0),
+                        max: nrc_core::math::vec3(x1, y1, 65536.0),
+                    }),
+                    padding,
+                    tga,
+                    cut_above,
                 },
             )
         }
@@ -719,7 +760,9 @@ impl PyMap {
             _ => d.set_item("bounds", py.None())?,
         }
 
-        Ok((pyo3::types::PyBytes::new(py, &result.png), d))
+        // A TGA, when asked for, comes back in place of the PNG: it is what the caller writes.
+        let bytes = result.tga.as_deref().unwrap_or(&result.png);
+        Ok((pyo3::types::PyBytes::new(py, bytes), d))
     }
 
     #[getter]
@@ -796,6 +839,7 @@ fn nrc_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(round_trip_check, m)?)?;
     m.add_function(wrap_pyfunction!(solid_compile, m)?)?;
     m.add_function(wrap_pyfunction!(solid_commit, m)?)?;
+    m.add_function(wrap_pyfunction!(patch_commit, m)?)?;
     Ok(())
 }
 
@@ -1116,6 +1160,157 @@ fn texture_spec_from(d: Option<&Bound<'_, PyDict>>) -> PyResult<nrc_solid::emit:
     Ok(spec)
 }
 
+/// Add primitives to the entity they belong to: a named one, a new one, or the first of the
+/// class (created if there is none). A second entity of a class needs `new_entity`, since the
+/// first-of-class rule would otherwise pile every door into one. Returns the entity's index.
+fn place_prims(
+    map: &mut Map,
+    prims: Vec<Primitive>,
+    target_classname: &str,
+    new_entity: bool,
+    target_entity: Option<usize>,
+    d: &Bound<'_, PyDict>,
+) -> PyResult<usize> {
+    if let Some(i) = target_entity {
+        let n = map.entities.len();
+        let e = map.entities.get_mut(i).ok_or_else(|| {
+            err(format!(
+                "no entity {i}: this map has {n} (0 to {})",
+                n.saturating_sub(1)
+            ))
+        })?;
+        e.prims.extend(prims);
+        return Ok(i);
+    }
+    let found = if new_entity {
+        None
+    } else {
+        map.entities
+            .iter()
+            .position(|e| e.classname() == target_classname)
+    };
+    Ok(match found {
+        Some(i) => {
+            map.entities[i].prims.extend(prims);
+            i
+        }
+        None => {
+            let mut e = nrc_core::model::Entity::default();
+            e.set("classname", target_classname);
+            e.prims = prims;
+            map.entities.push(e);
+            d.set_item("created_entity", target_classname)?;
+            map.entities.len() - 1
+        }
+    })
+}
+
+/// Add a curved surface - a cylinder, an arch or a bevel - as a `patchDef2`.
+#[pyfunction]
+#[pyo3(signature = (map, spec, shader, target_classname="worldspawn", new_entity=false, target_entity=None, label=None))]
+#[allow(clippy::too_many_arguments)]
+fn patch_commit<'py>(
+    py: Python<'py>,
+    map: &Bound<'py, PyMap>,
+    spec: &Bound<'py, PyDict>,
+    shader: &str,
+    target_classname: &str,
+    new_entity: bool,
+    target_entity: Option<usize>,
+    label: Option<String>,
+) -> PyResult<Bound<'py, PyDict>> {
+    use nrc_solid::patch::{generate, Facing, PatchSpec};
+    if new_entity && target_entity.is_some() {
+        return Err(err("pass new_entity or target_entity, not both"));
+    }
+    let get = |k: &str| spec.get_item(k);
+    let kind: String = get("kind")?
+        .ok_or_else(|| err("spec needs a kind: cylinder, arch or bevel"))?
+        .extract()?;
+    let centre: [f64; 3] = get("centre")?
+        .ok_or_else(|| err("spec needs a centre [x, y, z]"))?
+        .extract()
+        .map_err(|_| err("centre must be three numbers"))?;
+    let radius: f64 = get("radius")?
+        .ok_or_else(|| err("spec needs a radius"))?
+        .extract()?;
+    let length: f64 = match get("length")? {
+        Some(v) => v.extract()?,
+        None => get("height")?
+            .ok_or_else(|| err("spec needs a length (or height)"))?
+            .extract()?,
+    };
+    let axis: String = match get("axis")? {
+        Some(v) => v.extract()?,
+        None => "z".into(),
+    };
+    let facing = match get("facing")? {
+        Some(v) => match v.extract::<String>()?.as_str() {
+            "out" => Facing::Out,
+            "in" => Facing::In,
+            other => return Err(err(format!("facing must be out or in, got {other:?}"))),
+        },
+        None if kind == "arch" => Facing::In,
+        None => Facing::Out,
+    };
+    let start_deg: f64 = match get("start_deg")? {
+        Some(v) => v.extract()?,
+        None => 0.0,
+    };
+    let texture_units: f64 = match get("texture_units")? {
+        Some(v) => v.extract()?,
+        None => 128.0,
+    };
+    let rows = generate(&PatchSpec {
+        kind: kind.clone(),
+        centre,
+        radius,
+        length,
+        axis: axis.chars().next().unwrap_or('z'),
+        start_deg,
+        facing,
+        texture_units,
+    })
+    .map_err(err)?;
+    let (w, h) = (rows.len(), rows.first().map_or(0, Vec::len));
+    let n = nrc_core::num::Num::new;
+    let patch = nrc_core::model::Patch {
+        leading: vec![format!(
+            "// nrc-mcp patch {kind}{}",
+            label
+                .as_deref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default()
+        )],
+        kind: "patchDef2".into(),
+        shader: shader.to_string(),
+        header: vec![n(w as f64), n(h as f64), n(0.0), n(0.0), n(0.0)],
+        rows: rows
+            .iter()
+            .map(|col| {
+                col.iter()
+                    .map(|p| p.iter().map(|&c| n(c)).collect())
+                    .collect()
+            })
+            .collect(),
+    };
+    let d = PyDict::new(py);
+    let mut m = map.borrow_mut();
+    let index = place_prims(
+        &mut m.inner,
+        vec![Primitive::Patch(patch)],
+        target_classname,
+        new_entity,
+        target_entity,
+        &d,
+    )?;
+    d.set_item("entity", index)?;
+    d.set_item("width", w)?;
+    d.set_item("height", h)?;
+    d.set_item("committed", true)?;
+    Ok(d)
+}
+
 /// Compile an IR tree and describe the result, without touching any map.
 #[pyfunction]
 #[pyo3(signature = (ir, textures=None, grid=1))]
@@ -1177,7 +1372,7 @@ fn solid_compile<'py>(
 /// `dry_run` compiles and reports without touching the map, which is what `solid_preview`
 /// uses. Nothing is written to disk here regardless — that still needs an explicit `save`.
 #[pyfunction]
-#[pyo3(signature = (map, ir, textures=None, grid=1, target_classname="worldspawn", dry_run=false, label=None))]
+#[pyo3(signature = (map, ir, textures=None, grid=1, target_classname="worldspawn", dry_run=false, label=None, new_entity=false, target_entity=None))]
 #[allow(clippy::too_many_arguments)]
 fn solid_commit<'py>(
     py: Python<'py>,
@@ -1188,7 +1383,12 @@ fn solid_commit<'py>(
     target_classname: &str,
     dry_run: bool,
     label: Option<String>,
+    new_entity: bool,
+    target_entity: Option<usize>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    if new_entity && target_entity.is_some() {
+        return Err(err("pass new_entity or target_entity, not both"));
+    }
     let node = node_from_dict(ir, 0)?;
     let evaluated = nrc_solid::ir::evaluate(&node).map_err(|e| err(e.to_string()))?;
     let spec = texture_spec_from(textures)?;
@@ -1232,21 +1432,15 @@ fn solid_commit<'py>(
             .push(format!("// nrc-mcp {} ({count} brushes)", node.kind()));
     }
 
-    let target = m
-        .inner
-        .entities
-        .iter_mut()
-        .find(|e| e.classname() == target_classname);
-    match target {
-        Some(e) => e.prims.extend(prims),
-        None => {
-            let mut e = nrc_core::model::Entity::default();
-            e.set("classname", target_classname);
-            e.prims = prims;
-            m.inner.entities.push(e);
-            d.set_item("created_entity", target_classname)?;
-        }
-    }
+    let index = place_prims(
+        &mut m.inner,
+        prims,
+        target_classname,
+        new_entity,
+        target_entity,
+        &d,
+    )?;
+    d.set_item("entity", index)?;
     d.set_item("committed", true)?;
     d.set_item("map_brushes_now", m.inner.brush_count())?;
     Ok(d)

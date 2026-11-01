@@ -20,6 +20,7 @@ from ..kernel import load_map, repo_root
 from ..runtime import (
     SESSION,
     _add_entity,
+    _kernel,
     _profile_error_text,
     active_profile,
     tool,
@@ -50,6 +51,7 @@ def map_open(path: str, grid: int = 8) -> dict:
 
     rt = m.round_trip()
     SESSION.opened_round_trip = rt
+    SESSION.opened_brushes = frozenset(h for _e, _p, h in m.brush_fingerprints())
     if not rt["identical"]:
         SESSION.warnings.append(
             "this map does not round-trip byte-identically; map_save will refuse to write"
@@ -440,12 +442,63 @@ def validate(grid: int | None = None, severity_min: str = "warning") -> dict:
     Scope note: these are the game-agnostic checks — degenerate brushes, duplicate and
     mirrored planes, off-grid vertices, thin brushes, patch problems. For the game's own rules
     (spawn arrangement, objective counts, gametype keys) call `validate_profile`.
+
+    Off-grid and too-thin are errors for geometry added or reshaped since `map_open` - new
+    work is held to the grid (an angled solid from `solid_commit` cannot be on it; `solid_help`
+    says which shapes are) - and warnings for brushes the map already had, summarised in one
+    finding per code: neither stops the compiler or the engine, and an existing map's angled
+    geometry is not this session's to fix.
     """
     m = SESSION.require()
-    return m.validate(
-        grid=grid if grid is not None else SESSION.grid,
-        severity_min=severity_min,
-    )
+    g = grid if grid is not None else SESSION.grid
+    report = m.validate(grid=g, severity_min="info")
+    report = _grade_by_provenance(m, report)
+    floor = rules.SEVERITIES.index(severity_min) if severity_min in rules.SEVERITIES else 0
+    report["findings"] = [
+        f for f in report["findings"] if rules.SEVERITIES.index(f["severity"]) >= floor
+    ]
+    return report
+
+
+#: Findings about how a brush sits on the grid, not whether the map works.
+GRID_CODES = ("BRUSH_OFF_GRID", "BRUSH_TOO_THIN")
+
+
+def _grade_by_provenance(m: Any, report: dict) -> dict:
+    """Grid findings on brushes the map was opened with become one warning per code."""
+    opened = SESSION.opened_brushes
+    if not opened:
+        return report
+    fingerprints = {(e, p): h for e, p, h in m.brush_fingerprints()}
+    kept, inherited = [], {}
+    for f in report.get("findings", []):
+        old = fingerprints.get((f.get("entity"), f.get("primitive"))) in opened
+        if f.get("code") in GRID_CODES and f.get("severity") == "error" and old:
+            inherited.setdefault(f["code"], []).append(f)
+        else:
+            kept.append(f)
+    for code, found in inherited.items():
+        kept.append(
+            {
+                **found[0],
+                "severity": "warning",
+                "primitive": None,
+                "face": None,
+                "location": f"{len(found)} brushes",
+                "message": f"{len(found)} brush(es) the map already had when it was opened: "
+                f"{code}, for example entity {found[0].get('entity')} brush "
+                f"{found[0].get('primitive')} ({found[0].get('message')}). Neither the compiler "
+                "nor the engine stops on it; new geometry is held to the grid as an error.",
+                "count": len(found),
+                "examples": [[x.get("entity"), x.get("primitive")] for x in found[:10]],
+            }
+        )
+    order = {"error": 0, "warning": 1, "info": 2}
+    kept.sort(key=lambda f: order.get(f.get("severity"), 3))
+    summary = {
+        s: sum(1 for f in kept if f.get("severity") == s) for s in ("error", "warning", "info")
+    }
+    return {**report, "findings": kept, "summary": summary}
 
 
 @tool("map", "Validate against game profile")
@@ -505,6 +558,12 @@ def _script_spec() -> tuple[str, dict, Path]:
     return pid, spec, mapscript.script_path(spec, SESSION.path)
 
 
+def _action_text(action: mapscript.Action) -> str:
+    """An action as a script line, quoting arguments with spaces, so it can be written back."""
+    args = [f'"{x}"' if (not x or any(c.isspace() for c in x)) else x for x in action.args]
+    return " ".join([action.name, *args])
+
+
 def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
     """The script as blocks and events, which blocks run, and what the checker says."""
     ents = SESSION.map.entities()
@@ -523,7 +582,7 @@ def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
                     {
                         "event": " ".join([e.name, *e.params]),
                         "line": e.line,
-                        "actions": [" ".join([a.name, *a.args]) for a in e.actions],
+                        "actions": [_action_text(a) for a in e.actions],
                     }
                     for e in b.events
                 ],
@@ -607,6 +666,139 @@ def script_remove(block: str, event: str | None = None, params: list[str] | None
     return {
         "removed": " ".join([block, *([event] if event else []), *(params or [])]),
         **_script_report(pid, spec, path, new),
+    }
+
+
+def _fill(value: Any, subs: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return value.format(**subs)
+    if isinstance(value, list):
+        return [_fill(v, subs) for v in value]
+    if isinstance(value, dict):
+        return {k: _fill(v, subs) for k, v in value.items()}
+    return value
+
+
+def _as_ir(shape: dict, what: str) -> dict:
+    """A box given as {min, max}, or any Solid IR tree."""
+    if not isinstance(shape, dict):
+        raise ToolError(f"{what} must be a box {{min, max}} or a Solid IR tree")
+    if "op" in shape:
+        return shape
+    if "min" in shape and "max" in shape:
+        return {"op": "box", "min": shape["min"], "max": shape["max"]}
+    raise ToolError(f"{what} must be a box {{min, max}} or a Solid IR tree")
+
+
+@tool("map", "Place an objective", writes=True)
+def objective_place(
+    kind: str,
+    name: str,
+    track: str,
+    team: str,
+    objective: dict,
+    trigger: dict,
+    texture: str = "",
+) -> dict:
+    """Build a whole objective in one call: its trigger, the objective entity, keys and script.
+
+    The kinds are the profile's (`objectives:` in `nrc://profile/{id}`); for ET: Legacy,
+    `dynamite` (the other team blows it up) and `constructible` (`team`'s engineers build it,
+    the other team can blow it up once built). `objective` and `trigger` are boxes
+    `{"min": [...], "max": [...]}` or Solid IR trees: the objective's own brushes, and the
+    volume players stand in to see "You are near <track>" and to plant or build. Make the
+    trigger enclose the objective with room to stand. `texture` goes on the objective's brushes.
+
+    The links the engine needs are made for you - the trigger targets the objective, the
+    objective carries the weapon class that lets dynamite destroy it - and the script gets the
+    objective's events, which you can extend with `script_set_event`. Nothing in the map reaches
+    disk until `map_save`; the script is written at once.
+    """
+    m = SESSION.require()
+    pid, spec, path = _script_spec()
+    recipes = profiles.load(pid).get("objectives")
+    if not isinstance(recipes, dict) or not recipes.get("kinds"):
+        raise ToolError(f"profile {pid} describes no objectives to build")
+    kinds = recipes["kinds"]
+    if kind not in kinds:
+        raise ToolError(f"unknown objective kind {kind!r}; the profile has: {', '.join(kinds)}")
+    teams = [str(t) for t in recipes.get("teams") or []]
+    if team not in teams:
+        raise ToolError(f"team must be one of {', '.join(teams)}, got {team!r}")
+    try:
+        mapscript._word(name, "objective name")
+    except mapscript.ScriptEditError as e:
+        raise ToolError(str(e)) from e
+    if not track.strip() or '"' in track or "\n" in track:
+        raise ToolError("track is the text shown in game: non-empty, one line, no double quotes")
+    taken = [
+        e["index"]
+        for e in m.entities()
+        if any(
+            k.lower() in ("targetname", "scriptname") and v.lower() == name.lower()
+            for k, v in e["keys"]
+        )
+    ]
+    if taken:
+        raise ToolError(f"entity {taken[0]} already uses the name {name!r}; pick another")
+
+    subs = {"name": name, "track": track, "team": team}
+    for key, by_team in (recipes.get("team_values") or {}).items():
+        subs[key] = str(by_team[team])
+    recipe = _fill(kinds[kind], subs)
+    shapes = {"trigger": _as_ir(trigger, "trigger"), "objective": _as_ir(objective, "objective")}
+
+    # The script edit is worked out first, so a refusal there changes nothing in the map.
+    text = path.read_text(errors="replace") if path.is_file() else ""
+    try:
+        for ev in recipe.get("script") or []:
+            text, _ = mapscript.set_event(
+                text,
+                spec,
+                ev["block"],
+                ev["event"],
+                list(ev.get("params") or []),
+                list(ev.get("actions") or []),
+            )
+    except (mapscript.ScriptEditError, mapscript.ScriptSyntaxError) as e:
+        raise ToolError(f"nothing changed: the script edit was refused ({e})") from e
+
+    k = _kernel()
+    made = []
+    for ent in recipe["entities"]:
+        role = ent["role"]
+        tex = ent.get("texture") or texture or "common/caulk"
+        r = k.solid_commit(
+            m,
+            shapes[role],
+            {"default": tex},
+            SESSION.grid,
+            ent["classname"],
+            False,
+            f"{name}_{role}",
+            True,
+            None,
+        )
+        m.set_keys(r["entity"], [(str(a), str(b)) for a, b in ent.get("keys", {}).items()])
+        made.append(
+            {
+                "role": role,
+                "classname": ent["classname"],
+                "entity": r["entity"],
+                "brushes": r["brushes_created"],
+            }
+        )
+    _write_script(path, text)
+
+    report = validate_profile()
+    return {
+        "kind": kind,
+        "name": name,
+        "entities": made,
+        "script": str(path),
+        "summary": report["summary"],
+        "findings": report["findings"],
+        "next": "map_save to write the map; script_set_event to add to the objective's events",
     }
 
 

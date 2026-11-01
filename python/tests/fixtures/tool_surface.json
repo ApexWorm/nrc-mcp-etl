@@ -3,6 +3,10 @@
     "doc": "Every recorded A/B comparison, oldest first.",
     "signature": "() -> 'dict'"
   },
+  "arena_write": {
+    "doc": "Write the map's arena file, which puts it in the game's map list with a name and briefing.\n\n`longname` is the name players see. `keys` adds any other key the profile lists (for\nET: Legacy: `briefing`, `timelimit`, `axisRespawnTime`, `alliedRespawnTime`,\n`mapposition_x`/`_y`, win texts, `type`); the map name and the profile's defaults are filled\nin. Written beside the map's folder, where `pack_pk3` picks it up. Replaces an existing one.",
+    "signature": "(longname: 'str', keys: 'dict | None' = None) -> 'dict'"
+  },
   "asset_plan": {
     "doc": "Decide whether a feature should be a brush, a patch or a mesh.\n\nThe decision rule, in order: *does it block movement, block vis, or need cheap clean\ncollision?* \u2192 brush. *Is it axis-aligned architecture?* \u2192 brush. *Is it curved but simple?*\n\u2192 patch. *Everything else* \u2192 Blender.\n\nThat ordering is not arbitrary. Brushes are the only representation that seals a map and\nblocks visibility, patches are never structural, and meshes are always non-structural \u2014 so\nanything load-bearing has to be a brush regardless of how it looks.",
     "signature": "(blocks_movement: 'bool', blocks_visibility: 'bool', is_axis_aligned: 'bool', is_curved: 'bool', needs_clean_collision: 'bool' = False, is_organic: 'bool' = False) -> 'dict'"
@@ -35,6 +39,10 @@
     "doc": "Read a compiled BSP's structure from an unpacked `-json` lump directory.\n\nProduce the directory with `task_run(\"bsp:json-unpack\", [path_to_bsp])`.\n\nReports surfaces per shader (which shader is eating draw calls), surface types, lightmap\ncoverage, unreferenced shaders, and headroom. Headroom comes in two parts and the\ndistinction matters: **compiler limits** are read from this fork's source and are real,\nbut most of the classic Quake 3 ceilings were removed upstream, so there is nothing to\nreport for them. **Engine limits** come from the profile and are what decide whether the\nmap loads at all \u2014 a map can compile cleanly and still be rejected in game.",
     "signature": "(lumps_path: 'str', profile_id: 'str | None' = None) -> 'dict'"
   },
+  "commandmap_make": {
+    "doc": "Draw the command map and tell the game where it lies.\n\nSets the worldspawn's map coordinates to a square around the map (plus `margin`), draws a\ntop-down section of the map into exactly that square - roofs cut away above `cut_height`,\nwalls in a dark section colour - and writes the image and the shaders the game draws it\nwith, beside the map's folder. Default `cut_height`: a standing player's height above the\nhighest spawn. Save the map afterwards: the coordinates are worldspawn keys.",
+    "signature": "(margin: 'int' = 128, cut_height: 'float | None' = None) -> 'dict'"
+  },
   "compile_ab": {
     "doc": "Compile two variants and diff the numbers that matter.\n\nReports per-stage wall time, draw surface count, leaf count, brush count and BSP size for each,\nand appends a row to `bench/ab-history.jsonl` so regressions stay visible over the life of a\nproject rather than being rediscovered.\n\nThis is how a structural_audit suggestion gets *confirmed* rather than assumed: apply it to a\ncopy, compile both, and read the portal delta.",
     "signature": "(map_a: 'str', map_b: 'str', preset: 'str' = 'draft') -> 'dict'"
@@ -62,6 +70,14 @@
   "leak_trace": {
     "doc": "Read a leak pointfile and report the path out of the map.\n\nq3map2 writes a `.lin` beside the map when the world is not sealed. The path runs from the\nentity that leaked to the void, so the first point is inside the map and the last is outside;\nthe gap is somewhere along it.\n\nDefaults to the `.lin` beside the open map.",
     "signature": "(lin_path: 'str | None' = None) -> 'dict'"
+  },
+  "levelshot_make": {
+    "doc": "Render the levelshot - the picture shown while the map loads and in the server browser.\n\nTaken from a standing player's eyes at the floor `position`, looking along `yaw_deg`\n(0 = +X, 90 = +Y), at the profile's preferred size. Written beside the map's folder.",
+    "signature": "(position: 'list[float]', yaw_deg: 'float' = 0.0) -> 'dict'"
+  },
+  "lighting_report": {
+    "doc": "What lights the map, and where players stand far from any light.\n\nRead the way q3map2 reads it: an entity whose classname starts with `light` is a light, at\nintensity 300 unless its `light`/`_light` key says otherwise (light.cpp:330, :439-442);\nthe worldspawn's `_ambient` (or `ambient`) lights everything evenly, and `_minlight` sets a\nfloor (light.cpp:1946, :1959). A map with none of these compiles black. Sky shaders that\nemit light are not read here.\n\n`reach` is a heuristic, not q3map2's falloff: walkable areas farther than that from every\nlight are listed as possibly dim. With ambient or minimum light set they are lit anyway.",
+    "signature": "(reach: 'float' = 512, cell: 'float' = 32, profile_id: 'str | None' = None) -> 'dict'"
   },
   "map_new": {
     "doc": "Create an empty `.map` holding only a worldspawn, and open it.\n\nThe start of a map built from nothing: then `solid_commit` for geometry, `entity_place`\nfor point entities, `map_save` to write. An existing file is never overwritten \u2014 open it\nwith `map_open` instead. Missing parent folders are created.\n\nArgs:\n    path: where to create it, ending in `.map`. Relative paths resolve against the repo root.\n    grid: authoring grid, as for `map_open`.",
@@ -103,9 +119,21 @@
     "doc": "Build the walkable grid and report its size and coverage.\n\nA cell is walkable when it is empty, the cell below is solid, and there is at least the\nprofile's standing height of clear space above it \u2014 so the grid is the space a player could\nactually occupy, not merely the empty space.\n\nThis is a **voxel approximation, not compiled AAS**. It is good enough for distances and\nreachability and will disagree with the engine at the margins. Everything else here is built on\nit, so run this first to see whether the map is tractable at the cell size you want.\n\nRead `reachable_share` before the rest: below 1.0, some standable floor cannot be reached\nfrom the largest region, and every distance the other reports derive is measured across a\nspace the player cannot actually cross.",
     "signature": "(cell: 'float' = 16, profile_id: 'str | None' = None) -> 'dict'"
   },
+  "objdata_write": {
+    "doc": "Write the descriptions players read in the limbo menu: the map's, and each objective's.\n\n`descriptions` maps a team (for ET: Legacy `axis`, `allied`, `neutral`) to its text;\n`objectives` maps a team to a list of texts, numbered in order from 1, matching the\nobjective numbers the map script uses. Replaces an existing file.",
+    "signature": "(descriptions: 'dict', objectives: 'dict | None' = None) -> 'dict'"
+  },
+  "objective_place": {
+    "doc": "Build a whole objective in one call: its trigger, the objective entity, keys and script.\n\nThe kinds are the profile's (`objectives:` in `nrc://profile/{id}`); for ET: Legacy,\n`dynamite` (the other team blows it up) and `constructible` (`team`'s engineers build it,\nthe other team can blow it up once built). `objective` and `trigger` are boxes\n`{\"min\": [...], \"max\": [...]}` or Solid IR trees: the objective's own brushes, and the\nvolume players stand in to see \"You are near <track>\" and to plant or build. Make the\ntrigger enclose the objective with room to stand. `texture` goes on the objective's brushes.\n\nThe links the engine needs are made for you - the trigger targets the objective, the\nobjective carries the weapon class that lets dynamite destroy it - and the script gets the\nobjective's events, which you can extend with `script_set_event`. Nothing in the map reaches\ndisk until `map_save`; the script is written at once.",
+    "signature": "(kind: 'str', name: 'str', track: 'str', team: 'str', objective: 'dict', trigger: 'dict', texture: 'str' = '') -> 'dict'"
+  },
   "pack_pk3": {
     "doc": "Build a release archive for a compiled BSP with `q3map2 -pk3` (\u00a76.4).\n\nThe packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a\nresource that is not on disk, so the map would show missing content on a server even\nthough it compiled. That is reported as a failure whatever the exit code.\n\nThe archive is then fixed up from the active profile: companion files and the arena that\nsit beside the map are added, files the base game already ships are dropped, and it is\nwritten next to the folder that holds `maps/`, never into the game install.",
     "signature": "(bsp: 'str', complevel: 'int | None' = None, png: 'bool' = False) -> 'dict'"
+  },
+  "patch_commit": {
+    "doc": "Add a curved surface - brushes cannot curve, so the engine draws curves from patches.\n\nKinds:\n  - `cylinder`: a vertical column. `centre` is the middle of its base, `length` its height.\n  - `arch`: a half-round vault spanning a doorway or corridor, running along `axis`\n    (`x` or `y`). `centre` is the middle of the circle at one end, on the springing line;\n    `length` is the depth along the axis.\n  - `bevel`: a quarter-round, vertical, for softening a corner. `start_deg` (0, 90, 180,\n    270) picks the quarter; `centre` and `length` as for a cylinder.\n\n`facing` is the side that is drawn: `out` (default for cylinder and bevel) or `in` (default\nfor an arch, seen from below). A patch is a surface, not a solid: it does not seal the map\nand players walk through it unless something solid - usually a clip brush - stands behind\nit. Nothing reaches disk until `map_save`.",
+    "signature": "(kind: 'str', centre: 'list[float]', radius: 'float', length: 'float', shader: 'str', axis: 'str' = 'z', facing: 'str | None' = None, start_deg: 'float' = 0.0, target_classname: 'str' = 'worldspawn', new_entity: 'bool' = False, target_entity: 'int | None' = None, label: 'str | None' = None) -> 'dict'"
   },
   "playable_space_diff": {
     "doc": "Compare the space a player can stand in, between two versions of a map.\n\nThis is the check that no amount of validating, compiling or leak-testing performs: all\nof those pass on a map whose streets have been filled with clip. Only a before/after\ncomparison sees it.\n\nTwo findings are errors rather than observations, because neither has a legitimate form:\n\n- `PLAYSPACE_INTERIOR_SEALED` \u2014 floor that had a ceiling over it is no longer standable.\n  A roof is sky-exposed by definition, so this is the inside of the map being closed off.\n- `PLAYSPACE_CLIP_SURFACE_WALKABLE` \u2014 you can now stand on top of a clip volume. Clip\n  stops the player, so capping something with clip does not remove the surface, it\n  raises it.\n\nArgs:\n    before: the earlier map.\n    after: the later map. Defaults to the map open in this session, including edits that\n        have not been written yet \u2014 which is how you check a change before committing it.\n    cell: voxel size. Coarser is faster and still comparable; both sides use the same one.\n    profile_id: game profile supplying the movement constants and clip shader names.",
@@ -172,8 +200,8 @@
     "signature": "(samples: 'int' = 200, cell: 'float' = 16, profile_id: 'str | None' = None) -> 'dict'"
   },
   "solid_commit": {
-    "doc": "Compile a Solid IR tree and add the brushes to the open map.\n\n`textures` picks shaders per face direction and can make the brushes detail; `solid_help`\nlists its keys (`default`, `top`, `bottom`, `north`/`south`/`east`/`west`, `scale`,\n`offset`, `rotate`, `detail`).\n\nNothing is written to disk: call `map_save` for that. The brushes are tagged with a comment\nnaming `label`, so a human reading the `.map` can see where they came from and delete them\nas a unit.\n\nWith `remember`, the IR is recorded in a `<map>.solids.json` sidecar under `label`, so the\nshape can be re-parameterized later with `solid_edit_param` \u2014 \"make that corridor 32 units\nwider\" instead of moving faces by hand. The `.map` stays canonical; the sidecar is\nadvisory and re-derivable.",
-    "signature": "(ir: 'dict', label: 'str', textures: 'dict | None' = None, grid: 'int | None' = None, target_classname: 'str' = 'worldspawn', remember: 'bool' = True) -> 'dict'"
+    "doc": "Compile a Solid IR tree and add the brushes to the open map.\n\nThe brushes go to the first entity of `target_classname` (created if there is none), to a\nfresh one with `new_entity` - needed for a second door, trigger or objective of a class -\nor to entity `target_entity` by index. The result's `entity` says which; give it keys with\n`entity_set_keys`.\n\n`textures` picks shaders per face direction and can make the brushes detail; `solid_help`\nlists its keys (`default`, `top`, `bottom`, `north`/`south`/`east`/`west`, `scale`,\n`offset`, `rotate`, `detail`).\n\nNothing is written to disk: call `map_save` for that. The brushes are tagged with a comment\nnaming `label`, so a human reading the `.map` can see where they came from and delete them\nas a unit.\n\nWith `remember`, the IR is recorded in a `<map>.solids.json` sidecar under `label`, so the\nshape can be re-parameterized later with `solid_edit_param` \u2014 \"make that corridor 32 units\nwider\" instead of moving faces by hand. The `.map` stays canonical; the sidecar is\nadvisory and re-derivable.",
+    "signature": "(ir: 'dict', label: 'str', textures: 'dict | None' = None, grid: 'int | None' = None, target_classname: 'str' = 'worldspawn', remember: 'bool' = True, new_entity: 'bool' = False, target_entity: 'int | None' = None) -> 'dict'"
   },
   "solid_compile": {
     "doc": "Compile a Solid IR tree and report what it would produce, touching nothing.\n\nUse this first. It returns brush and face counts, bounds, minimum thickness, off-grid\nvertex count and any warnings, so a shape can be checked before it is drawn or committed.\n\nErrors name the failing node by path (e.g. `subtract/cut[0]:box`), because a nested tree is\notherwise very hard to debug from the outside. Call `solid_help` for the operator list.",
@@ -228,7 +256,7 @@
     "signature": "() -> 'dict'"
   },
   "validate": {
-    "doc": "Validate the open map's geometry and file format.\n\nEvery finding carries a `rule_source` and a `confidence`. Only `verified` findings are\nsafe to treat as hard failures.\n\nScope note: these are the game-agnostic checks \u2014 degenerate brushes, duplicate and\nmirrored planes, off-grid vertices, thin brushes, patch problems. For the game's own rules\n(spawn arrangement, objective counts, gametype keys) call `validate_profile`.",
+    "doc": "Validate the open map's geometry and file format.\n\nEvery finding carries a `rule_source` and a `confidence`. Only `verified` findings are\nsafe to treat as hard failures.\n\nScope note: these are the game-agnostic checks \u2014 degenerate brushes, duplicate and\nmirrored planes, off-grid vertices, thin brushes, patch problems. For the game's own rules\n(spawn arrangement, objective counts, gametype keys) call `validate_profile`.\n\nOff-grid and too-thin are errors for geometry added or reshaped since `map_open` - new\nwork is held to the grid (an angled solid from `solid_commit` cannot be on it; `solid_help`\nsays which shapes are) - and warnings for brushes the map already had, summarised in one\nfinding per code: neither stops the compiler or the engine, and an existing map's angled\ngeometry is not this session's to fix.",
     "signature": "(grid: 'int | None' = None, severity_min: 'str' = 'warning') -> 'dict'"
   },
   "validate_profile": {
