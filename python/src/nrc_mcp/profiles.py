@@ -68,6 +68,46 @@ def verified_entities(profile_id: str) -> list[dict[str, Any]]:
     return [e for e in entities(profile_id) if e.get("confidence") == "verified"]
 
 
+def entity_def(profile_id: str, classname: str) -> dict[str, Any] | None:
+    """The profile's entry for `classname`, or None if the profile does not define it."""
+    for e in entities(profile_id):
+        if e.get("classname") == classname:
+            return e
+    return None
+
+
+def declared_keys(profile_id: str, entity: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every key the profile declares on an entity entry, by name.
+
+    Includes the shared `key_blocks` the entry names, which is where a profile puts keys that
+    many classes carry alike — leaving them out would report every compiler key as unknown.
+    A block marked `applies_to_all` holds keys the engine accepts on every entity, and counts
+    for every entry without being named. One marked `case_insensitive` is also matched by its
+    lowercase spelling, for an engine that compares key names without regard to case.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    blocks = load(profile_id).get("key_blocks") or {}
+    if not isinstance(blocks, dict):
+        blocks = {}
+    for block in blocks.values():
+        if not isinstance(block, dict) or block.get("applies_to_all") is not True:
+            continue
+        for k in block.get("keys") or []:
+            if isinstance(k, dict) and k.get("name"):
+                out[str(k["name"])] = k
+                if block.get("case_insensitive") is True:
+                    out.setdefault(str(k["name"]).lower(), k)
+    for block_name in entity.get("key_blocks") or []:
+        block = blocks.get(block_name) if isinstance(blocks, dict) else None
+        for k in (block or {}).get("keys") or []:
+            if isinstance(k, dict) and k.get("name"):
+                out[str(k["name"])] = k
+    for k in entity.get("keys") or []:
+        if isinstance(k, dict) and k.get("name"):
+            out[str(k["name"])] = k
+    return out
+
+
 def gametypes(profile_id: str) -> list[dict[str, Any]]:
     data = load(profile_id)
     return [g for g in (data.get("gametypes") or []) if isinstance(g, dict)]

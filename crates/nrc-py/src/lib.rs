@@ -13,7 +13,7 @@
 //! the source line, because a parse failure a mapper cannot locate is not much better than
 //! a crash.
 
-use nrc_core::model::Primitive;
+use nrc_core::model::{unwritable_pair, Entity, Primitive};
 use nrc_core::stats::map_stats;
 use nrc_core::validate::{validate_map, Severity, Thresholds};
 use nrc_core::{parse_map, write_map, Map};
@@ -288,6 +288,78 @@ impl PyMap {
             out.append(d)?;
         }
         Ok(out)
+    }
+
+    /// Append an entity with these keys, in this order, and return its index.
+    ///
+    /// Edits the map in place, so it keeps its path and the bytes it was loaded from:
+    /// `save()` still knows where to write, and `round_trip()` reports the edit as an edit.
+    /// Re-parsing the source with the entity spliced in loses both.
+    fn add_entity(&mut self, keys: Vec<(String, String)>) -> PyResult<usize> {
+        for (k, v) in &keys {
+            if let Some(why) = unwritable_pair(k, v) {
+                return Err(err(why));
+            }
+        }
+        let e = Entity {
+            keys,
+            ..Entity::default()
+        };
+        check_classname(&self.inner, None, e.classname())?;
+        self.inner.entities.push(e);
+        Ok(self.inner.entities.len() - 1)
+    }
+
+    /// Set keys on one entity, so each value is the one the engine reads.
+    ///
+    /// Every pair is checked before any is applied, so a refusal leaves the entity as it was.
+    /// Returns one dict per key: `key`, `previous` (the value read before, or None) and
+    /// `duplicates_removed` — a later duplicate is what the engine reads, so it has to go.
+    fn set_keys<'py>(
+        &mut self,
+        py: Python<'py>,
+        entity: usize,
+        keys: Vec<(String, String)>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        self.entity_index(entity)?;
+        for (k, v) in &keys {
+            if let Some(why) = unwritable_pair(k, v) {
+                return Err(err(why));
+            }
+            if k == "classname" {
+                check_classname(&self.inner, Some(entity), v)?;
+            }
+        }
+        let e = &mut self.inner.entities[entity];
+        let out = PyList::empty(py);
+        for (k, v) in keys {
+            let (previous, dropped) = e.set_effective(&k, v);
+            let d = PyDict::new(py);
+            d.set_item("key", k)?;
+            d.set_item("previous", previous)?;
+            d.set_item("duplicates_removed", dropped)?;
+            out.append(d)?;
+        }
+        Ok(out)
+    }
+
+    /// Remove keys from one entity, every occurrence of each. Returns `(key, removed)` pairs.
+    fn remove_keys(&mut self, entity: usize, keys: Vec<String>) -> PyResult<Vec<(String, bool)>> {
+        self.entity_index(entity)?;
+        if keys.iter().any(|k| k == "classname") {
+            return Err(err(
+                "refusing to remove classname: an entity without one is not an entity to the \
+                 engine. Set a different classname instead.",
+            ));
+        }
+        let e = &mut self.inner.entities[entity];
+        Ok(keys
+            .into_iter()
+            .map(|k| {
+                let removed = e.remove(&k);
+                (k, removed)
+            })
+            .collect())
     }
 
     /// Every patch in the map, with its shader and dimensions.
@@ -603,6 +675,44 @@ impl PyMap {
             }
         )
     }
+}
+
+impl PyMap {
+    fn entity_index(&self, entity: usize) -> PyResult<()> {
+        let n = self.inner.entities.len();
+        if entity >= n {
+            return Err(err(format!(
+                "no entity {entity}: this map has {n} (0 to {}); query_entities lists them",
+                n.saturating_sub(1)
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Refuse a classname that would break the map's one structural invariant: exactly one
+/// worldspawn, which every compiler reads as the world. `entity` is the one being changed, or
+/// None for an entity about to be added.
+fn check_classname(m: &Map, entity: Option<usize>, classname: &str) -> PyResult<()> {
+    if classname.is_empty() {
+        return Err(err("an entity needs a non-empty classname"));
+    }
+    let world = m.entities.iter().position(|e| e.is_worldspawn());
+    if let (Some(i), Some(w)) = (entity, world) {
+        if i == w && classname != "worldspawn" {
+            return Err(err(format!(
+                "refusing to change the classname of entity {w}: it is the worldspawn, and a \
+                 map without one does not compile"
+            )));
+        }
+    }
+    if classname == "worldspawn" && world.is_some() && world != entity {
+        return Err(err(format!(
+            "refusing a second worldspawn: entity {} already is one, and a map has exactly one",
+            world.unwrap_or_default()
+        )));
+    }
+    Ok(())
 }
 
 /// Parse and immediately re-serialize, reporting whether the bytes match.
