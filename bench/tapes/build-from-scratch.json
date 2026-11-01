@@ -1,6 +1,6 @@
 {
   "name": "build-from-scratch",
-  "note": "Start from a bare ground slab and author a two-room block: hollow a shell, cut a doorway through it, put a second room beside it. The shape of a first session.",
+  "note": "Start from a bare ground slab and author a two-room block: hollow a shell, cut a doorway through it, put a second room beside it. The shape of a first session. A light is placed inside before saving: q3map2 floods the map from its entities, so a map with none reports a leak and gets no portal file, and map_seals used to miss that.",
   "fixture": "bench/tapes/fixtures/seed_slab.map",
   "steps": [
     {
@@ -137,6 +137,26 @@
       "expect": {
         "brushes_created": {
           "$gte": 6
+        }
+      }
+    },
+    {
+      "tool": "entity_place",
+      "as": "light",
+      "args": {
+        "classname": "light",
+        "origin": [
+          256,
+          256,
+          128
+        ],
+        "keys": {
+          "light": 300
+        }
+      },
+      "expect": {
+        "entity": {
+          "$gte": 1
         }
       }
     },

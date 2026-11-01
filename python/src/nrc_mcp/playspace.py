@@ -817,11 +817,15 @@ def _map_seals(check: Check, preset: str = "draft") -> Outcome:
         result = opt._compile_variant(path, preset)
     except Exception as e:  # noqa: BLE001 — a missing or broken compiler is a skip, not a fail
         return Outcome("map_seals", True, f"no usable compiler: {e}", skipped=True)
+    # The wrapper reads q3map2's leak banner. A pointfile alone is not enough: a map with no
+    # entity inside "leaks" without writing one (portals.cpp:589-591). A leak also makes later
+    # stages fail, so it is the better explanation and is reported first.
+    lin = next((a for a in result.get("artifacts") or [] if a.lower().endswith(".lin")), None)
+    if result.get("leaked") or lin:
+        return Outcome("map_seals", False, result.get("hint") or f"leaked: {lin}")
     if not result.get("ok"):
         return Outcome("map_seals", False, str(result.get("error") or "the compile failed"))
-    # q3map2 writes a pointfile only when the map leaks, so its presence is the signal.
-    leak = next((a for a in result.get("artifacts") or [] if a.lower().endswith(".lin")), None)
-    return Outcome("map_seals", leak is None, "sealed" if leak is None else f"leaked: {leak}")
+    return Outcome("map_seals", True, "sealed")
 
 
 @invariant("pk3_contents")
