@@ -428,3 +428,35 @@ def test_solid_commit_can_make_a_second_entity_of_a_class(k, tmp_path):
     finally:
         srv.SESSION.map = None
         srv.SESSION.path = None
+
+
+def test_grid_findings_are_errors_for_new_work_and_one_warning_for_inherited(k, tmp_path):
+    from nrc_mcp import server as srv
+
+    prism = {"op": "prism", "min": [0, 0, 0], "max": [64, 64, 128], "axis": "z", "sides": 8}
+    srv.map_new(str(tmp_path / "g.map"))
+    try:
+        srv.solid_commit(prism, label="old")
+        srv.solid_commit(prism, label="old2")
+        new_work = srv.validate()
+        assert [f["code"] for f in new_work["findings"] if f["severity"] == "error"] == [
+            "BRUSH_OFF_GRID",
+            "BRUSH_OFF_GRID",
+        ], "made in this session: errors"
+        srv.map_save(allow_non_identical=True)
+
+        srv.map_open(str(tmp_path / "g.map"))
+        inherited = srv.validate()
+        assert inherited["summary"]["error"] == 0
+        (summary,) = [f for f in inherited["findings"] if f["code"] == "BRUSH_OFF_GRID"]
+        assert summary["severity"] == "warning" and summary["count"] == 2
+
+        srv.solid_commit({**prism, "min": [128, 0, 0], "max": [192, 64, 128]}, label="new")
+        mixed = srv.validate()
+        errors = [f for f in mixed["findings"] if f["severity"] == "error"]
+        assert len(errors) == 1 and errors[0]["primitive"] == 2, "only the new brush"
+        assert any(f.get("count") == 2 for f in mixed["findings"])
+    finally:
+        srv.SESSION.map = None
+        srv.SESSION.path = None
+        srv.SESSION.opened_brushes = None

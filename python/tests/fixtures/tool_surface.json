@@ -256,7 +256,7 @@
     "signature": "() -> 'dict'"
   },
   "validate": {
-    "doc": "Validate the open map's geometry and file format.\n\nEvery finding carries a `rule_source` and a `confidence`. Only `verified` findings are\nsafe to treat as hard failures.\n\nScope note: these are the game-agnostic checks \u2014 degenerate brushes, duplicate and\nmirrored planes, off-grid vertices, thin brushes, patch problems. For the game's own rules\n(spawn arrangement, objective counts, gametype keys) call `validate_profile`.",
+    "doc": "Validate the open map's geometry and file format.\n\nEvery finding carries a `rule_source` and a `confidence`. Only `verified` findings are\nsafe to treat as hard failures.\n\nScope note: these are the game-agnostic checks \u2014 degenerate brushes, duplicate and\nmirrored planes, off-grid vertices, thin brushes, patch problems. For the game's own rules\n(spawn arrangement, objective counts, gametype keys) call `validate_profile`.\n\nOff-grid and too-thin are errors for geometry added or reshaped since `map_open` - new\nwork is held to the grid (an angled solid from `solid_commit` cannot be on it; `solid_help`\nsays which shapes are) - and warnings for brushes the map already had, summarised in one\nfinding per code: neither stops the compiler or the engine, and an existing map's angled\ngeometry is not this session's to fix.",
     "signature": "(grid: 'int | None' = None, severity_min: 'str' = 'warning') -> 'dict'"
   },
   "validate_profile": {

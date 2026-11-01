@@ -100,6 +100,9 @@ class Session:
     #: `map_save` refuse every real change and taught callers to pass the override every
     #: time, which switched the guard off for the case it exists to catch.
     opened_round_trip: dict | None = None
+    #: Fingerprints of the brushes the map had at `map_open`. Grid findings on those are the
+    #: map's history, not this session's work, and `validate` reports them as warnings.
+    opened_brushes: frozenset[int] | None = None
 
     def require(self):
         if self.map is None:

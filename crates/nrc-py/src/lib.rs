@@ -343,6 +343,31 @@ impl PyMap {
         Ok(out)
     }
 
+    /// A fingerprint of every brush's geometry: `(entity, primitive, hash)`.
+    ///
+    /// The hash covers the plane points only, so a brush that moves or changes shape gets a new
+    /// one and a retextured brush keeps it. Stable within one process, which is all it is for:
+    /// telling the brushes a map was opened with from those added or reshaped since.
+    fn brush_fingerprints(&self) -> Vec<(usize, usize, u64)> {
+        use std::hash::{Hash, Hasher};
+        let mut out = Vec::new();
+        for (ei, e) in self.inner.entities.iter().enumerate() {
+            for (pi, p) in e.prims.iter().enumerate() {
+                let Primitive::Brush(b) = p else { continue };
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                for f in &b.faces {
+                    for pt in &f.points {
+                        for c in pt {
+                            c.value().to_bits().hash(&mut h);
+                        }
+                    }
+                }
+                out.push((ei, pi, h.finish()));
+            }
+        }
+        out
+    }
+
     /// Set or clear the detail contents bit on whole brushes, leaving every other bit alone.
     ///
     /// Every brush is checked before any is changed, so a refusal leaves the map as it was. The

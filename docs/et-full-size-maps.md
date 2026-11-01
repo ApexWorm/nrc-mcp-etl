@@ -37,8 +37,10 @@ Point `NRC_MAPSRC` at the unpacked folder and run `mise run corpus:import` to re
   search path); `import_corpus` and the differential harness carry them along.
 - `pack_pk3` moved the packer's output with a rename that fails across filesystems.
 
-## Still open
+## Grid findings on existing maps
 
-`validate` reports thousands of `BRUSH_OFF_GRID` and dozens of `BRUSH_TOO_THIN` errors on these
-shipped maps. The design spec makes off-grid an error on purpose (section 3.2), which suits
-geometry an agent writes but not editing an existing map; that is a decision for the owner.
+`validate` used to report every one of these maps' angled brushes as an error - 6,000 to 13,000
+`BRUSH_OFF_GRID` per map - although neither q3map2 nor the engine stops on them. Grid findings
+(off-grid, too thin) are now errors only for geometry added or reshaped since `map_open`; on
+brushes the map was opened with they are one summary warning per code. Opened, oasis goes from
+9,820 errors to 1: the brush that really lies outside the world.

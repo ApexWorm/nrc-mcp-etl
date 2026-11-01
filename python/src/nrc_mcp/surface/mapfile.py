@@ -51,6 +51,7 @@ def map_open(path: str, grid: int = 8) -> dict:
 
     rt = m.round_trip()
     SESSION.opened_round_trip = rt
+    SESSION.opened_brushes = frozenset(h for _e, _p, h in m.brush_fingerprints())
     if not rt["identical"]:
         SESSION.warnings.append(
             "this map does not round-trip byte-identically; map_save will refuse to write"
@@ -441,12 +442,63 @@ def validate(grid: int | None = None, severity_min: str = "warning") -> dict:
     Scope note: these are the game-agnostic checks — degenerate brushes, duplicate and
     mirrored planes, off-grid vertices, thin brushes, patch problems. For the game's own rules
     (spawn arrangement, objective counts, gametype keys) call `validate_profile`.
+
+    Off-grid and too-thin are errors for geometry added or reshaped since `map_open` - new
+    work is held to the grid (an angled solid from `solid_commit` cannot be on it; `solid_help`
+    says which shapes are) - and warnings for brushes the map already had, summarised in one
+    finding per code: neither stops the compiler or the engine, and an existing map's angled
+    geometry is not this session's to fix.
     """
     m = SESSION.require()
-    return m.validate(
-        grid=grid if grid is not None else SESSION.grid,
-        severity_min=severity_min,
-    )
+    g = grid if grid is not None else SESSION.grid
+    report = m.validate(grid=g, severity_min="info")
+    report = _grade_by_provenance(m, report)
+    floor = rules.SEVERITIES.index(severity_min) if severity_min in rules.SEVERITIES else 0
+    report["findings"] = [
+        f for f in report["findings"] if rules.SEVERITIES.index(f["severity"]) >= floor
+    ]
+    return report
+
+
+#: Findings about how a brush sits on the grid, not whether the map works.
+GRID_CODES = ("BRUSH_OFF_GRID", "BRUSH_TOO_THIN")
+
+
+def _grade_by_provenance(m: Any, report: dict) -> dict:
+    """Grid findings on brushes the map was opened with become one warning per code."""
+    opened = SESSION.opened_brushes
+    if not opened:
+        return report
+    fingerprints = {(e, p): h for e, p, h in m.brush_fingerprints()}
+    kept, inherited = [], {}
+    for f in report.get("findings", []):
+        old = fingerprints.get((f.get("entity"), f.get("primitive"))) in opened
+        if f.get("code") in GRID_CODES and f.get("severity") == "error" and old:
+            inherited.setdefault(f["code"], []).append(f)
+        else:
+            kept.append(f)
+    for code, found in inherited.items():
+        kept.append(
+            {
+                **found[0],
+                "severity": "warning",
+                "primitive": None,
+                "face": None,
+                "location": f"{len(found)} brushes",
+                "message": f"{len(found)} brush(es) the map already had when it was opened: "
+                f"{code}, for example entity {found[0].get('entity')} brush "
+                f"{found[0].get('primitive')} ({found[0].get('message')}). Neither the compiler "
+                "nor the engine stops on it; new geometry is held to the grid as an error.",
+                "count": len(found),
+                "examples": [[x.get("entity"), x.get("primitive")] for x in found[:10]],
+            }
+        )
+    order = {"error": 0, "warning": 1, "info": 2}
+    kept.sort(key=lambda f: order.get(f.get("severity"), 3))
+    summary = {
+        s: sum(1 for f in kept if f.get("severity") == s) for s in ("error", "warning", "info")
+    }
+    return {**report, "findings": kept, "summary": summary}
 
 
 @tool("map", "Validate against game profile")
