@@ -709,3 +709,26 @@ def test_tier2_stages_fixture_trees_and_passes_images_through(tmp_path, monkeypa
     assert blocks[0] == {"type": "text", "text": "notes"}
     assert blocks[1]["type"] == "image" and blocks[1]["source"]["data"] == "iVBOR"
     assert t2.DEFAULT_MODEL == "claude-opus-5-5"
+
+    # mcp 2 renamed the fields to snake_case; both spellings are read.
+    class Result2:
+        content = [Block(type="image", data="/9j/", mime_type="image/jpeg")]
+        is_error = True
+
+    assert t2._result_blocks(Result2())[0]["source"]["media_type"] == "image/jpeg"
+    assert t2._field(Result2(), "is_error", "isError") is True
+
+
+def test_tier2_skips_a_scenario_whose_fixture_is_not_on_disk():
+    """Game-install maps are absent on most machines; that is an absent input, not a fail,
+    and a run must not spend anything on it."""
+    t2 = _load_tool("tier2")
+    assert t2.fixture_missing({"fixture": "corpus/real/not_a_map.map"}).endswith("not_a_map.map")
+    assert t2.fixture_missing({"fixture_dir": "bench/tapes/fixtures/nrcroom", "map": "maps/x.map"})
+    assert (
+        t2.fixture_missing(
+            {"fixture_dir": "bench/tapes/fixtures/nrcroom", "map": "maps/nrcroom.map"}
+        )
+        is None
+    )
+    assert t2.fixture_missing({"map": "maps/new.map"}) is None, "starting from nothing needs none"

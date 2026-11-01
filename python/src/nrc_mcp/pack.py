@@ -57,6 +57,7 @@ def _q3map2(args: list[str], target: Path, timeout: int = 1800) -> dict[str, Any
     cmd = [
         sys.executable,
         str(repo_root() / "tools" / "q3map2.py"),
+        "--full-output",
         "--flags",
         *args,
         "--",
@@ -134,23 +135,42 @@ def pack_pk3(
         moved.append(dest)
     failed = [p for p in moved if p.name.endswith(FAILURE_SUFFIX)]
     good = [p for p in moved if p.name.endswith(SUCCESS_SUFFIX)]
+    console = _packer_text(run)
+    not_found = _not_found(console)
+    optional_missing = _not_found(console, "~fail")
 
     return {
         "ok": run["ok"] and not failed and bool(good),
         "packages": [str(p) for p in good],
         "failed_packages": [str(p) for p in failed],
         "missing_resources": bool(failed),
+        "not_found": not_found[:100],
+        "optional_not_found": optional_missing[:100],
         "added_companions": added,
         "dropped_basegame": dropped,
         "hint": (
-            f"a {FAILURE_SUFFIX} package means the BSP references a resource that is not on "
-            "disk; run repack_analyze to see what it asked for"
+            (
+                f"the packer could not find {len(not_found)} resource(s): "
+                + ", ".join(not_found[:8])
+                + ("..." if len(not_found) > 8 else "")
+                + "; for a texture, find a real name with texture_search"
+            )
+            if not_found
+            else f"a {FAILURE_SUFFIX} package means the BSP references a resource that is not "
+            "on disk; run repack_analyze to see what it asked for"
         )
         if failed
         else "",
         "returncode": run["returncode"],
         "output_tail": run["stdout"][-2000:] or run["stderr"][-2000:],
     }
+
+
+def _not_found(text: str, marker: str = "!FAIL!") -> list[str]:
+    """What the packer could not find. `!FAIL!` marks a resource whose absence fails the pack
+    (it sets packFAIL, autopk3.cpp:574-576, 589-591, 602-628, 640-641); `~fail` marks an optional
+    one - the levelshot, the .aas, .arena and .defi (autopk3.cpp:585-587, 643-653)."""
+    return sorted({ln.split(marker, 1)[1].strip() for ln in text.splitlines() if marker in ln})
 
 
 def _packaging(profile_id: str | None) -> dict:
@@ -275,11 +295,14 @@ def _packer_text(run: dict[str, Any]) -> str:
     for stage in envelope.get("stages", []):
         if not isinstance(stage, dict):
             continue
+        # Every line when the wrapper was asked for them (--full-output); the tail otherwise.
         # `tail` is a list of lines, but has been a string; accept either rather than
         # depend on which, since this is a seam between two of our own tools.
-        tail = stage.get("tail") or ""
-        parts.append("\n".join(tail) if isinstance(tail, list) else str(tail))
-    parts.append(text)
+        lines = stage.get("output") or stage.get("tail") or ""
+        parts.append("\n".join(lines) if isinstance(lines, list) else str(lines))
+    # The envelope itself is not console output: matched line by line it would repeat each
+    # line it quotes, escaped. Only stderr is added to what the stages held.
+    parts.append(run.get("stderr") or "")
     return "\n".join(p for p in parts if p)
 
 
@@ -317,47 +340,118 @@ def _find_packages(bsp: Path, output: str = "") -> list[Path]:
 
 #: Lines of `-repack -analyze` output that name a resource. The flag exists to dump what a
 #: BSP asks the filesystem for, which is why parsing it beats tracing dependencies ourselves.
-_RESOURCE_RE = re.compile(
-    r"(?:^|\s)((?:textures|models|sound|scripts|env|gfx|sprites)/[\w\-./]+\.\w+)"
-)
+#: A section header in `-repack -analyze` output: "\tDrawsurface+ent calls....2",
+#: "\tSounds....0" (autopk3.cpp:160-206), each followed by one name per line.
+_SECTION_RE = re.compile(r"^\t(?P<title>[A-Za-z][\w+ ]*?)\.{3,}(?P<count>\d+)\s*$")
+
+#: Section titles as the analyzer prints them, and what they hold.
+_SECTION_KINDS = {
+    "drawsurface+ent calls": "shaders",
+    "sounds": "sounds",
+    "schroider fileses": "shader_files",
+}
 
 
-def repack_analyze(bsp: str | Path) -> dict[str, Any]:
-    """Dump the resources a BSP references, via `-repack -analyze`."""
+def _analyze_sections(text: str) -> dict[str, list[str]]:
+    """The analyzer's lists, by kind. A blank line or the next header ends a list."""
+    found: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        m = _SECTION_RE.match(line)
+        if m:
+            title = m.group("title").strip().lower()
+            current = _SECTION_KINDS.get(title, title.replace(" ", "_"))
+            found.setdefault(current, [])
+            continue
+        if current is None:
+            continue
+        name = line.strip()
+        if not name or " " in name or name.endswith("elapsed"):
+            current = None if not name else current
+            continue
+        found[current].append(name)
+    return {k: sorted(set(v)) for k, v in found.items()}
+
+
+def _unresolved_shaders(
+    target: Path, shaders: list[str], profile_id: str | None
+) -> list[str] | None:
+    """Referenced shaders nothing supplies: not the base game, not the map's own scripts, not
+    an image beside it. None when the base game is not known, since then nothing can be said.
+    """
+    from . import optimize  # noqa: PLC0415
+
+    base = os.environ.get("NRC_FS_BASEPATH") or ""
+    pkg = _packaging(profile_id) if profile_id else {}
+    if not base or not pkg.get("basegame"):
+        return None
+    index = optimize.basegame_index([Path(base) / str(pkg["basegame"])], skip_prefix=target.stem)
+    if not index["archives"]:
+        return None
+    root = _map_root(target)
+    defined: set[str] = set()
+    for f in sorted((root / "scripts").glob("*.shader")):
+        try:
+            defined |= {sh["name"].lower() for sh in optimize.parse_shader_file(f)}
+        except (optimize.OptimizeError, OSError):
+            continue
+
+    def supplied(name: str) -> bool:
+        low = name.lower()
+        if low in index["shaders"] or low in index["images"] or low in defined:
+            return True
+        return any(
+            (root / f"{n}.{ext}").is_file()
+            for n in {name, low}
+            for ext in optimize.IMAGE_EXTENSIONS
+        )
+
+    # The levelshot rides in the shader list but its absence does not fail a pack: the packer
+    # treats the list's last entry, the levelshot, as optional (autopk3.cpp:585-587).
+    levelshot = f"levelshots/{target.stem}".lower()
+    return [n for n in shaders if n.lower() != levelshot and not supplied(n)]
+
+
+def repack_analyze(bsp: str | Path, profile_id: str | None = None) -> dict[str, Any]:
+    """The resources a BSP references, via `-repack -analyze`, and which of them nothing
+    supplies - the ones that turn a pack into a `_FAILEDpack` archive."""
     target = Path(bsp)
     if not target.is_file():
         raise PackError(f"{target} does not exist")
 
     run = _q3map2(["-repack", "-analyze"], target)
-    text = run["stdout"] + run["stderr"]
-
-    found: dict[str, list[str]] = {}
-    for m in _RESOURCE_RE.finditer(text):
-        res = m.group(1)
-        found.setdefault(res.split("/", 1)[0], []).append(res)
-    for k in found:
-        found[k] = sorted(set(found[k]))
-
-    missing = sorted(
-        {
-            line.strip()
-            for line in text.splitlines()
-            if "not found" in line.lower() or "missing" in line.lower()
-        }
-    )
-
-    return {
+    text = _packer_text(run)
+    sections = _analyze_sections(text)
+    result: dict[str, Any] = {
         "ok": run["ok"],
-        "resources_by_kind": {k: len(v) for k, v in sorted(found.items())},
-        "resources": {k: v[:200] for k, v in sorted(found.items())},
-        "total_resources": sum(len(v) for v in found.values()),
-        "reported_missing": missing[:40],
+        "resources_by_kind": {k: len(v) for k, v in sorted(sections.items())},
+        "resources": {k: v[:200] for k, v in sorted(sections.items())},
+        "total_resources": sum(len(v) for v in sections.values()),
         "returncode": run["returncode"],
         "note": (
-            "parsed from q3map2's own resource dump rather than traced independently — the "
+            "parsed from q3map2's own resource dump rather than traced independently - the "
             "compiler's view of what a BSP needs is the one that matters"
         ),
     }
+    if not run["ok"]:
+        result["error"] = (run["stderr"] or text)[-1500:].strip() or "q3map2 failed"
+        return result
+    unresolved = _unresolved_shaders(target, sections.get("shaders", []), profile_id)
+    if unresolved is None:
+        result["unresolved"] = None
+        result["unresolved_note"] = (
+            "base game not known (game path or profile packaging.basegame), so nothing is "
+            "judged missing"
+        )
+    else:
+        result["unresolved"] = unresolved
+        if unresolved:
+            result["hint"] = (
+                "nothing in the base game or beside the map supplies "
+                + ", ".join(unresolved[:8])
+                + "; the pack will fail. For a texture, find a real name with texture_search"
+            )
+    return result
 
 
 # ---------------------------------------------------------------------------

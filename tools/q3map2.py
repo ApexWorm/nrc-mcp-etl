@@ -98,6 +98,9 @@ class StageResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     tail: list[str] = field(default_factory=list)
+    # Every line, kept only on request (--full-output): -repack -analyze and -pk3 report their
+    # findings as lists far longer than the tail.
+    output: list[str] = field(default_factory=list)
     # The BSP stage's flood fill found the outside, or found no entity to flood from at all.
     leaked: bool = False
 
@@ -281,6 +284,7 @@ def run_stage(
             res.warnings.append(ln.strip())
     res.tail = [ln for ln in lines[-25:] if ln.strip()]
     res.leaked = any(LEAK_BANNER in ln for ln in lines)
+    res.output = lines
 
     if verbose:
         print(out, file=sys.stderr)
@@ -288,7 +292,13 @@ def run_stage(
 
 
 def compile_map(
-    map_path: Path, stages: list[list[str]], *, stage_dir: Path | None, verbose: bool, keep: bool
+    map_path: Path,
+    stages: list[list[str]],
+    *,
+    stage_dir: Path | None,
+    verbose: bool,
+    keep: bool,
+    full_output: bool = False,
 ) -> dict:
     exe = find_q3map2()
     map_path = map_path.resolve()
@@ -385,6 +395,7 @@ def compile_map(
                 "errors": r.errors[:20],
                 "warnings": r.warnings[:20],
                 "tail": r.tail if r.returncode != 0 else r.tail[-6:],
+                **({"output": r.output} if full_output else {}),
             }
             for r in results
         ],
@@ -415,6 +426,9 @@ def main() -> int:
         help="leave the staging directory in place for inspection",
     )
     ap.add_argument("-v", "--verbose", action="store_true", help="stream q3map2 output")
+    ap.add_argument(
+        "--full-output", action="store_true", help="include every output line of each stage"
+    )
     ap.add_argument("target", type=Path, help="the .map (or .bsp for --json-unpack)")
     args = ap.parse_args()
 
@@ -434,6 +448,7 @@ def main() -> int:
             stage_dir=args.stage_dir,
             verbose=args.verbose,
             keep=args.keep_staging,
+            full_output=args.full_output,
         )
     except Q3Map2Error as e:
         print(f"q3map2: {e}", file=sys.stderr)

@@ -105,6 +105,24 @@ class Tier2Error(RuntimeError):
     pass
 
 
+def fixture_missing(scenario: dict) -> str | None:
+    """The fixture path when the scenario names one that is not on disk, else None.
+
+    A missing fixture is an absent input, not a failing scenario: the real maps are game
+    installs and not redistributable, so they are absent on most machines. The tapes skip
+    them the same way (tools/tapes.py), and a run never spends anything on one.
+    """
+    if scenario.get("fixture_dir"):
+        src = Path(scenario["fixture_dir"]) / str(scenario.get("map") or "")
+    elif scenario.get("fixture"):
+        src = Path(scenario["fixture"])
+    else:
+        return None
+    if not src.is_absolute():
+        src = repo_root() / src
+    return None if src.is_file() else str(src)
+
+
 # ---------------------------------------------------------------------------
 # Scenarios
 # ---------------------------------------------------------------------------
@@ -485,6 +503,10 @@ async def check(scenarios: list[dict], *, allow_compile: bool) -> int:
         print(f"  server: {len(names)} tools over stdio")
 
         for scenario in scenarios:
+            absent = fixture_missing(scenario)
+            if absent:
+                print(f"  SKIP {scenario['name']:<24} fixture not available: {absent}")
+                continue
             problems = []
             for name in scenario.get("allowed_tools") or []:
                 if name not in names:
@@ -651,6 +673,10 @@ def main() -> int:
     print(f"tier2 run, model {args.model}, effort {args.effort} — THIS SPENDS TOKENS")
     results = []
     for scenario in scenarios:
+        absent = fixture_missing(scenario)
+        if absent:
+            print(f"  SKIP {scenario['name']:<24} fixture not available: {absent}")
+            continue
         results.append(
             asyncio.run(
                 run_scenario(

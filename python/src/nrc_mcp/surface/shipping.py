@@ -50,7 +50,7 @@ def repack_analyze(bsp: str) -> dict:
     of what a BSP needs is the one that decides whether the map works.
     """
     try:
-        return packmod.repack_analyze(bsp)
+        return packmod.repack_analyze(bsp, active_profile() or None)
     except packmod.PackError as e:
         raise ToolError(str(e)) from e
 

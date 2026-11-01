@@ -719,10 +719,47 @@ def test_pack_pk3_rejects_an_out_of_range_compression_level(tmp_path: Path):
         pack.pack_pk3(tmp_path / "a.bsp", complevel=99)
 
 
-def test_resource_regex_picks_out_referenced_files():
-    text = "reading textures/urt/wall_01.tga\nloading models/props/box.md3\nnoise here"
-    hits = {m.group(1) for m in pack._RESOURCE_RE.finditer(text)}
-    assert hits == {"textures/urt/wall_01.tga", "models/props/box.md3"}
+# Verbatim q3map2 -repack -analyze output (2.5.17n) for a map with one invented texture. The
+# names have no extension, which is why a regex demanding one found nothing at all.
+ANALYZE_OUTPUT = """VFS Init: /root/etlegacy/etmain/
+WARNING: Unable to load exclusions file /q3map2/install/repack.exclude.
+Loading /tmp/w/maps/smallmap.bsp
+
+\tDrawsurface+ent calls....2
+textures/egypt_floor_sd/sandfloor
+levelshots/smallmap
+
+\tSounds....1
+sound/world/wind.wav
+        0 seconds elapsed
+"""
+
+
+def test_the_analyzer_output_is_read_by_section():
+    sections = pack._analyze_sections(ANALYZE_OUTPUT)
+    assert sections == {
+        "shaders": ["levelshots/smallmap", "textures/egypt_floor_sd/sandfloor"],
+        "sounds": ["sound/world/wind.wav"],
+    }
+
+
+def test_the_packers_failures_are_named_apart_from_what_is_optional():
+    text = (
+        "\n\tPure textures....\n  !FAIL! textures/egypt_floor_sd/sandfloor\n"
+        "  ~fail  levelshots/m\n++maps/m.bsp\n  ~fail  maps/m.aas\n"
+    )
+    assert pack._not_found(text) == ["textures/egypt_floor_sd/sandfloor"]
+    assert pack._not_found(text, "~fail") == ["levelshots/m", "maps/m.aas"]
+
+
+def test_the_wrappers_full_output_is_preferred_over_its_tail():
+    import json
+
+    envelope = {
+        "stages": [{"tail": ["last line"], "output": ["first", "  !FAIL! x/y", "last line"]}]
+    }
+    text = pack._packer_text({"stdout": json.dumps(envelope), "stderr": ""})
+    assert pack._not_found(text) == ["x/y"]
 
 
 # ---------------------------------------------------------------------------
