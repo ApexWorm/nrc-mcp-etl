@@ -289,3 +289,34 @@ def test_removing_keys_reports_what_was_there(pid, room):
     assert [k for k, _ in _keys(point["entity"])] == ["classname", "origin", "nrc_b"]
     # Safe to repeat: the second time it is simply absent.
     assert srv.entity_remove_keys(point["entity"], ["nrc_a"])["absent"] == ["nrc_a"]
+
+
+def test_a_key_block_that_applies_to_all_counts_for_every_entity(monkeypatch):
+    """Keys the engine parses for any classname, in one block nobody has to name."""
+    data = {
+        "key_blocks": {
+            "everywhere": {
+                "applies_to_all": True,
+                "case_insensitive": True,
+                "keys": [{"name": "scriptName", "type": "string"}, {"name": "angle"}],
+            },
+            "named_only": {"keys": [{"name": "_cs"}]},
+            "flag_is_not_true": {"applies_to_all": "yes", "keys": [{"name": "nope"}]},
+        },
+        "entities": [{"classname": "spawn", "keys": [{"name": "angle", "type": "own"}]}],
+    }
+    monkeypatch.setattr(profiles, "load", lambda _pid: data)
+    declared = profiles.declared_keys("test", profiles.entity_def("test", "spawn"))
+    assert {"scriptName", "scriptname", "angle"} <= set(declared)
+    assert declared["angle"]["type"] == "own", "a class's own declaration wins"
+    assert "_cs" not in declared, "an ordinary block still has to be named"
+    assert "nope" not in declared, "only applies_to_all: true counts"
+    data["key_blocks"]["everywhere"]["case_insensitive"] = False
+    assert "scriptname" not in profiles.declared_keys("test", profiles.entity_def("test", "spawn"))
+
+
+def test_no_urt43_entity_gains_keys_from_an_applies_to_all_block():
+    if "urt43" not in profiles.available():
+        pytest.skip("no urt43 profile on disk")
+    blocks = profiles.load("urt43").get("key_blocks") or {}
+    assert not any(b.get("applies_to_all") for b in blocks.values() if isinstance(b, dict))
