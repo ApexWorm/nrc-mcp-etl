@@ -13,6 +13,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import bsp as bspmod
 from .. import optimize as optmod
+from .. import profiles
 from ..kernel import repo_root, run_mise_task
 from ..runtime import (
     SESSION,
@@ -192,28 +193,49 @@ def leak_trace(lin_path: str | None = None) -> dict:
 
 
 @tool("compiling", "Audit shader references")
-def shader_audit(shader_dirs: list[str] | None = None, profile_id: str | None = None) -> dict:
+def shader_audit(
+    shader_dirs: list[str] | None = None,
+    profile_id: str | None = None,
+    basegame_dir: str | None = None,
+) -> dict:
     """Audit shader references against the shader scripts on disk.
 
     Reports shaders the map references but nothing defines, shaders defined but never used,
     shaders shadowing a base-game path — a classic cause of "works for me, broken on the server" —
     and the watercaulk trap, where a visible surface's shader draws nothing.
 
-    `shader_dirs` defaults to the game's script directory from the environment.
+    `shader_dirs` defaults to the game's script directory from the environment. `basegame_dir`
+    is where the base game's `.pk3` archives live, so the shaders and textures they ship count as
+    defined; it defaults to the game path joined with the profile's `packaging.basegame`. With a
+    base game known, `shader_dirs` may be empty: a map that ships no shaders of its own.
     """
     _require_path()
+    pid = profile_id or active_profile() or None
+    base = os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH")
     dirs: list[str] = list(shader_dirs or [])
     if not dirs:
-        base = os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH")
         game = os.environ.get("NRC_FS_GAME")
         if base and game:
             dirs = [str(Path(base) / game / "scripts")]
-    if not dirs:
+    basegame = basegame_dir or _basegame_dir(base, pid)
+    if not dirs and not basegame:
         return {
             "error": "no shader directories given and none could be inferred",
-            "hint": "pass shader_dirs, or set the game path in mise.local.toml",
+            "hint": "pass shader_dirs or basegame_dir, or set the game path in mise.local.toml",
         }
     try:
-        return optmod.shader_audit(SESSION.path, dirs, profile_id or active_profile() or None)
+        return optmod.shader_audit(SESSION.path, dirs, pid, [basegame] if basegame else None)
     except (OSError, ValueError) as e:
         raise ToolError(str(e)) from e
+
+
+def _basegame_dir(base: str | None, profile_id: str | None) -> str | None:
+    """The base game's directory: the game path joined with the profile's `packaging.basegame`."""
+    if not base or not profile_id:
+        return None
+    try:
+        pkg = profiles.load(profile_id).get("packaging")
+    except profiles.ProfileError:
+        return None
+    name = pkg.get("basegame") if isinstance(pkg, dict) else None
+    return str(Path(base) / str(name)) if name else None

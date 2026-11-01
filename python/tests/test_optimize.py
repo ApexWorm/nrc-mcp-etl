@@ -748,6 +748,124 @@ def test_shader_audit_reports_duplicate_definitions(tmp_path, kernel_available):
     assert len(dupes[0]["detail"]["files"]) == 2
 
 
+# The base game ships its shaders and textures inside archives. These tests build small ones
+# and stand in for the kernel's reference count, so they run without the extension built.
+
+STOCK = "textures/stock/wall\n{\n\t{\n\t\tmap textures/stock/wall.tga\n\t}\n}\n"
+STOCK_CAULK = "textures/stock/caulk\n{\n\tsurfaceparm nodraw\n}\n"
+
+
+def pk3(path: Path, files: dict[str, str]) -> Path:
+    import zipfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as z:
+        for name, text in files.items():
+            z.writestr(name, text)
+    return path
+
+
+@pytest.fixture
+def references(monkeypatch):
+    """Make `shader_audit` see these references instead of asking the kernel for them."""
+
+    def use(counts: dict[str, int]) -> None:
+        monkeypatch.setattr(optimize, "load_map", lambda _p: None)
+        monkeypatch.setattr(optimize, "_referenced_shaders", lambda _mp: (counts, 0))
+
+    return use
+
+
+def test_basegame_index_reads_shaders_and_images_from_archives(tmp_path):
+    game = tmp_path / "basegame"
+    pk3(
+        game / "pak0.pk3",
+        {
+            "scripts/stock.shader": STOCK,
+            "textures/Stock/Plain.JPG": "",
+            "textures/stock/notes.txt": "",
+        },
+    )
+    pk3(game / "mymap_autopacked.pk3", {"scripts/mymap.shader": "textures/mymap/x\n{\n}\n"})
+    (game / "broken.pk3").write_text("not a zip")
+    shader_script(game / "scripts" / "loose.shader", "textures/loose/x\n{\n}\n")
+
+    index = optimize.basegame_index([game, tmp_path / "absent"], skip_prefix="mymap")
+
+    assert set(index["shaders"]) == {"textures/stock/wall"}
+    assert index["shaders"]["textures/stock/wall"]["file"].endswith("pak0.pk3:scripts/stock.shader")
+    assert index["images"] == {"textures/stock/plain"}, "lowercased, extension dropped"
+    assert [Path(a).name for a in index["archives"]] == ["broken.pk3", "pak0.pk3"]
+    assert [Path(a).name for a in index["skipped"]] == ["mymap_autopacked.pk3"]
+    assert any("broken.pk3" in e for e in index["errors"])
+    assert any("absent" in e for e in index["errors"])
+
+
+def test_shader_audit_counts_what_the_base_game_ships_as_defined(tmp_path, references):
+    game = tmp_path / "basegame"
+    pk3(
+        game / "pak0.pk3",
+        {"scripts/stock.shader": STOCK + STOCK_CAULK, "textures/stock/plain.jpg": ""},
+    )
+    references(
+        {
+            "textures/stock/wall": 6,
+            "textures/Stock/Plain": 2,
+            "textures/stock/caulk": 30,
+            "textures/mymap/absent": 1,
+        }
+    )
+    out = optimize.shader_audit(tmp_path / "m.map", [], profile_id=None, basegame_dirs=[game])
+
+    assert out["missing"] == ["textures/mymap/absent"]
+    assert out["from_basegame"] == [
+        "textures/Stock/Plain",
+        "textures/stock/caulk",
+        "textures/stock/wall",
+    ]
+    codes = [f["code"] for f in out["findings"]]
+    assert codes.count("SHADER_FROM_BASEGAME") == 1
+    assert "SHADER_DRAWS_NOTHING" not in codes, "the base game's own caulk is not the map's trap"
+    assert out["basegame_definitions"] == 2
+
+
+def test_shader_audit_reports_a_shipped_shader_the_base_game_also_defines(tmp_path, references):
+    game = tmp_path / "basegame"
+    pk3(game / "pak0.pk3", {"scripts/stock.shader": STOCK})
+    scripts = tmp_path / "scripts"
+    shader_script(scripts / "mymap.shader", STOCK.replace("wall.tga", "mine.tga"))
+    references({"textures/stock/wall": 6})
+
+    # No profile, so no reserved prefixes: the collision alone is the evidence.
+    out = optimize.shader_audit(
+        tmp_path / "m.map", [scripts], profile_id=None, basegame_dirs=[game]
+    )
+    (shadow,) = [f for f in out["findings"] if f["code"] == "SHADER_SHADOWS_BASEGAME"]
+    assert shadow["severity"] == "error"
+    assert shadow["confidence"] == "verified"
+    assert "pak0.pk3" in shadow["detail"]["basegame"]
+    assert out["from_basegame"] == [], "the map ships its own definition"
+
+
+def test_the_base_game_directory_comes_from_the_profile(monkeypatch):
+    pytest.importorskip("mcp")
+    from nrc_mcp.surface import compiling
+
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": {"basegame": "maingame"}})
+    assert compiling._basegame_dir("/games/x", "test") == str(Path("/games/x") / "maingame")
+    assert compiling._basegame_dir(None, "test") is None, "no game path, no base game"
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": {}})
+    assert compiling._basegame_dir("/games/x", "test") is None
+
+
+def test_shader_audit_without_a_base_game_is_unchanged(tmp_path, references):
+    references({"textures/stock/wall": 6})
+    out = optimize.shader_audit(tmp_path / "m.map", [], profile_id=None)
+    assert out["missing"] == ["textures/stock/wall"]
+    assert out["from_basegame"] == []
+    assert out["basegame_archives"] == []
+
+
 # ---------------------------------------------------------------------------
 # compile_ab
 # ---------------------------------------------------------------------------

@@ -128,8 +128,8 @@
     "signature": "() -> 'dict'"
   },
   "shader_audit": {
-    "doc": "Audit shader references against the shader scripts on disk.\n\nReports shaders the map references but nothing defines, shaders defined but never used,\nshaders shadowing a base-game path \u2014 a classic cause of \"works for me, broken on the server\" \u2014\nand the watercaulk trap, where a visible surface's shader draws nothing.\n\n`shader_dirs` defaults to the game's script directory from the environment.",
-    "signature": "(shader_dirs: 'list[str] | None' = None, profile_id: 'str | None' = None) -> 'dict'"
+    "doc": "Audit shader references against the shader scripts on disk.\n\nReports shaders the map references but nothing defines, shaders defined but never used,\nshaders shadowing a base-game path \u2014 a classic cause of \"works for me, broken on the server\" \u2014\nand the watercaulk trap, where a visible surface's shader draws nothing.\n\n`shader_dirs` defaults to the game's script directory from the environment. `basegame_dir`\nis where the base game's `.pk3` archives live, so the shaders and textures they ship count as\ndefined; it defaults to the game path joined with the profile's `packaging.basegame`. With a\nbase game known, `shader_dirs` may be empty: a map that ships no shaders of its own.",
+    "signature": "(shader_dirs: 'list[str] | None' = None, profile_id: 'str | None' = None, basegame_dir: 'str | None' = None) -> 'dict'"
   },
   "ship_check": {
     "doc": "Run the release checklist: naming, levelshot, arena file, package contents.\n\nConventions come from the profile's `packaging` section, and unverified ones produce\n`info` rather than failures \u2014 the levelshot size and arena key list are community practice\nrather than anything the gamepack documents.",
