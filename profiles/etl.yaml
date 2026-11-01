@@ -3095,6 +3095,51 @@ mapscript:
       severity: error
       consequence: "the game stops with 'constructible_class has a bad value' when it runs"
       locus: "game/g_script_actions.c:4310-4315"
+    # Found by a Tier 2 run: a model wrote `wm_number_of_objectives 0` for a map with none,
+    # validate_profile passed it, and the server stopped on load. Each range below is the
+    # engine's own test before its G_Error; the action names are g_script.c:74-85.
+    - action: wm_number_of_objectives
+      arg: 0
+      min: 1
+      max: 8   # MAX_OBJECTIVES (game/bg_public.h:229)
+      severity: error
+      consequence: "the game stops with 'Invalid number of objectives' when it runs"
+      locus: "game/g_script_actions.c:3336-3340"
+    - action: wm_objective_status
+      arg: 0
+      min: 1
+      max: 8   # MAX_OBJECTIVES (game/bg_public.h:229)
+      severity: error
+      consequence: "the game stops with 'Invalid objective number' when it runs"
+      locus: "game/g_script_actions.c:3427-3431"
+    - action: wm_objective_status
+      arg: 2
+      min: 0
+      max: 2
+      severity: error
+      consequence: "the game stops: status must be 0 (default), 1 (complete) or 2 (failed)"
+      locus: "game/g_script_actions.c:3446-3449"
+    - action: wm_setwinner
+      arg: 0
+      min: -1
+      max: 1
+      severity: error
+      consequence: "the game stops with 'Invalid team number' when it runs"
+      locus: "game/g_script_actions.c:3577-3581"
+    - action: wm_set_defending_team
+      arg: 0
+      min: 0
+      max: 1
+      severity: error
+      consequence: "the game stops with 'Invalid team number' when it runs"
+      locus: "game/g_script_actions.c:3622-3626"
+    - action: wm_voiceannounce
+      arg: 0
+      min: 0
+      max: 1
+      severity: error
+      consequence: "the game stops with 'Invalid team number' when it runs"
+      locus: "game/g_script_actions.c:3529-3533"
   # Calls a running block should make. Not enforced by the engine, so never an error.
   required_actions:
     - block: game_manager

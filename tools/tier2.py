@@ -195,6 +195,14 @@ def run_finish(scenario: dict, workspace: Path, *, allow_compile: bool) -> dict[
     return results
 
 
+def _step_summary(result: Any) -> dict[str, Any]:
+    """The parts of a finish step's result that say whether it worked and why not."""
+    if not isinstance(result, dict):
+        return {"result": str(result)[:500]}
+    keep = ("ok", "error", "hint", "leaked", "packages", "summary", "seconds")
+    return {k: result[k] for k in keep if k in result} or {"keys": sorted(result)[:20]}
+
+
 def grade(
     scenario: dict,
     workspace: Path,
@@ -428,7 +436,11 @@ async def run_scenario(
                 os.environ.pop("NRC_PROFILE", None)
             else:
                 os.environ["NRC_PROFILE"] = saved
-    shutil.rmtree(workspace, ignore_errors=True)
+    # A failed run keeps its workspace: the model's map is the only evidence of what went
+    # wrong, and it cost money to make.
+    passed = report["passed"] and outcome == "completed"
+    if passed:
+        shutil.rmtree(workspace, ignore_errors=True)
 
     return {
         "scenario": scenario["name"],
@@ -442,7 +454,9 @@ async def run_scenario(
         "usage": usage,
         "seconds": round(time.time() - started, 1),
         # A scenario that never finished has not been shown to fail at the task.
-        "passed": report["passed"] and outcome == "completed",
+        "passed": passed,
+        "workspace": None if passed else str(workspace),
+        "finish": {label: _step_summary(r) for label, r in finished.items()},
         "invariants": report["invariants"],
         "tools_used": sorted({t["tool"] for t in transcript}),
     }
@@ -570,6 +584,13 @@ def report(results: list[dict]) -> None:
             print(f"         {'.' if inv['ok'] else '!'} {inv['name']}: {inv['detail']}")
         if r["tools_used"]:
             print(f"         tools: {', '.join(r['tools_used'])}")
+        if not r["passed"]:
+            for label, step in (r.get("finish") or {}).items():
+                if step.get("error") or step.get("ok") is False:
+                    why = step.get("error") or step.get("hint") or "not ok"
+                    print(f"         finish {label}: {str(why)[:300]}")
+            if r.get("workspace"):
+                print(f"         kept: {r['workspace']}")
 
     passed = sum(1 for r in results if r["passed"])
     out = sum(r["usage"]["output"] for r in results)

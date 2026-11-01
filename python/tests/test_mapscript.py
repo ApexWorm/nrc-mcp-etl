@@ -356,6 +356,33 @@ def test_the_etl_profile_checks_a_small_map_end_to_end(tmp_path):
     assert "missing_thing" in found[0].message
 
 
+@pytest.mark.parametrize(
+    ("action", "bad", "good"),
+    [
+        # The script a Tier 2 run wrote for a map with no objectives; the server stopped.
+        ("wm_number_of_objectives", "0", "1"),
+        ("wm_number_of_objectives", "9", "8"),
+        ("wm_setwinner", "2", "-1"),
+        ("wm_set_defending_team", "-1", "0"),
+        ("wm_objective_status", "0 0 1", "1 0 1"),
+        ("wm_objective_status", "1 0 3", "1 0 2"),
+        ("wm_voiceannounce", '2 "x"', '1 "x"'),
+    ],
+)
+def test_the_etl_profile_refuses_the_numbers_the_engine_stops_on(tmp_path, action, bad, good):
+    pid = _etl()
+    entities = [ent(0, "worldspawn"), ent(1, "script_multiplayer")]
+
+    def ranged(args: str) -> list:
+        text = block("game_manager", ("spawn", [f"{action} {args}"]))
+        found = mapscript.check(pid, entities, tmp_path / "m.map", text=text)
+        return [f for f in found if f.code == "MAPSCRIPT_ARGUMENT_RANGE"]
+
+    (finding,) = ranged(bad)
+    assert finding.severity == "error"
+    assert not ranged(good)
+
+
 # ---------------------------------------------------------------------------
 # Editing
 # ---------------------------------------------------------------------------
