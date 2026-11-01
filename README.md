@@ -337,6 +337,26 @@ and tells you where the hole is.
 `structural_audit` is the biggest single lever on compile time and runtime visibility cost:
 structural brushes generate portals, and most brushes do not need to be structural.
 
+### Building an ET: Legacy map with the tools
+
+The whole map can be made through tool calls, with nothing written by hand. With
+`NRC_PROFILE=etl`, a working order:
+
+| Step | Tools |
+| --- | --- |
+| Start the file | `map_new` |
+| Rooms, walls, trim | `solid_commit` (`textures` per face direction; `detail` for trim and props), `patch_commit` for columns, arches and bevels |
+| Spawns, markers, intermission, lights | `entity_place` (team spawns, `team_WOLF_objective` markers with a description, `script_multiplayer`, `info_player_intermission`, `light`) |
+| Objectives | `objective_place` (`dynamite` or `constructible`): trigger, objective, links and script events in one call |
+| The map script | `script_set_event` (respawn times, `wm_setwinner`, `setautospawn`, the objectives' events), `script_show` to read it back |
+| Check | `validate`, `validate_profile`, `spawn_safety`, `balance_report`, `lighting_report`, `structural_audit` then `brush_set_detail` |
+| Release files | `arena_write`, `objdata_write`, `commandmap_make`, `levelshot_make` |
+| Build and ship | `map_save`, `compile_map`, `pack_pk3`, `ship_check`, then `mise run game:smoke -- <pk3> --client` |
+
+The `etl-build-from-nothing` tape is this list run end to end, and `--compile` loads the result in
+the engine with a client joined. `validate_profile` only calls something an error when ET: Legacy
+stops on it; each such rule names the engine source line and was checked by loading a map.
+
 ## Tool reference
 
 66 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
@@ -641,6 +661,13 @@ The honest summary: fully precise about axis-aligned and 45° geometry, partly b
 rotated geometry, and every report says which it is looking at. Closing the gap means either snapping
 input — which changes the map — or adaptive floating-point predicates. `crates/nrc-core/src/exact.rs`
 explains why the integer route came first.
+
+**No bot navigation.** Omni-bot waypoints are not generated or checked, so a map built here has no
+bots until someone waypoints it in game.
+
+**Decompiled or editor-asset-dependent sources are partial.** Splash Damage's released ET sources
+round-trip and compile, but reference editor-only models that the game does not ship: the packer
+reports them as missing, and battery leaks without them.
 
 **Limited patch authoring.** `patch_commit` makes cylinders, arches and quarter-round bevels as
 `patchDef2`; free-form curves and terrain are still editor work. A patch is a surface, not a solid,
