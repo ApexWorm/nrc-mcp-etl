@@ -313,6 +313,179 @@ def map_restore(name: str = "checkpoint") -> dict:
     return {"checkpoint": name, "revision": SESSION.receipt()}
 
 
+@tool("map", "Mirror the whole map", writes=True, destructive=True)
+def map_mirror(axis: str = "x", at: float = 0, vehicles: list[str] | None = None) -> dict:
+    """Mirror the open map across the plane `axis = at`: geometry, entities, facings.
+
+    Every brush and patch is reflected with its planes kept outward (the kernel swaps the
+    plane points' order, which a reflection otherwise turns inside out), its texture mapping
+    rewritten so the surface shows the mirror image of the original, and its patch grid
+    reordered so it keeps facing out. Then the entity keys the profile names (`mirror:` in
+    `nrc://profile/{id}`; ET: Legacy: `origin`, `angle`, `angles`, the command map corners)
+    are reflected: a facing `a` along x becomes `180 - a` (along y, `-a`), `angles`
+    `p y r` becomes `p 180-y -r` (`p -y -r`), and doors that swing are made to swing the
+    mirrored way. Special yaw values (ET: -1 up, -2 down) stay.
+
+    `vehicles` names (targetname or scriptname) brush entities the game turns to face their
+    direction of travel, such as an escort truck on a spline and the triggers riding on it.
+    Mirrored in place, their local "forward" would point backwards; each is given a half
+    turn about its own origin instead, so it drives forward along the mirrored path and is
+    the mirror image of itself across its own length.
+
+    What it cannot mirror, it reports: raw primitive blocks the kernel keeps as text, and
+    models (`misc_model` and the like), which turn to the mirrored facing but are drawn
+    unmirrored. A map script is not touched; coordinates or angles written in it (rotation
+    targets, `faceangles`) need mirroring by hand. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    axes = {"x": 0, "y": 1}
+    if axis not in axes:
+        raise ToolError("axis is 'x' or 'y' (a mirror in z would turn floors into ceilings)")
+    if not math.isfinite(at):
+        raise ToolError("at is a coordinate")
+    a = axes[axis]
+    pid = active_profile()
+    spec = (profiles.load(pid).get("mirror") if pid else None) or {}
+    point_keys = [str(k) for k in spec.get("point_keys") or ["origin"]]
+    yaw_key = str(spec.get("yaw_key") or "angle")
+    angles_key = str(spec.get("angles_key") or "angles")
+    yaw_special = {float(v) for v in spec.get("yaw_special") or []}
+    corner_pairs = [tuple(map(str, p)) for p in spec.get("corner_pairs") or []]
+    senses = spec.get("rotation_sense") or {}
+    origin_texture = str(spec.get("origin_texture") or "")
+
+    ents = m.entities(with_keys=True)
+    named: dict[str, int] = {}
+    for e in ents:
+        for k, v in e["keys"]:
+            if k.lower() in ("targetname", "scriptname"):
+                named.setdefault(v, e["index"])
+    missing = [n for n in vehicles or [] if n not in named]
+    if missing:
+        raise ToolError(f"no entity named {', '.join(missing)}")
+    turned = sorted({named[n] for n in vehicles or []})
+
+    candidate = m.copy()
+    try:
+        stats = dict(candidate.mirror_geometry(a, float(at)))
+    except ValueError as e:
+        raise ToolError(str(e)) from e
+
+    def flip(text: str, centre: float) -> str:
+        try:
+            value = float(text)
+        except ValueError:
+            return text
+        if centre == 0:
+            if value == 0:
+                return text
+            return text[1:] if text.startswith("-") else "-" + text.lstrip("+")
+        return _value_text("mirror", round(2 * centre - value, 6))
+
+    def angle_text(value: float) -> str:
+        value = round(value % 360, 6)
+        return _value_text("mirror", 0 if value == 360 else value)
+
+    changed_keys = 0
+    for e in ents:
+        keys = dict(e["keys"])  # the last copy is the one the engine reads
+        new: list[tuple[str, str]] = []
+        origin = None
+        for key in point_keys:
+            if key in keys:
+                parts = keys[key].split()
+                if len(parts) == 3:
+                    if key == "origin":
+                        with contextlib.suppress(ValueError):
+                            origin = [float(p) for p in parts]
+                    parts[a] = flip(parts[a], float(at))
+                    new.append((key, " ".join(parts)))
+        if yaw_key in keys:
+            with contextlib.suppress(ValueError):
+                yaw = float(keys[yaw_key])
+                if yaw not in yaw_special:
+                    new.append((yaw_key, angle_text(180 - yaw if a == 0 else -yaw)))
+        if angles_key in keys:
+            parts = keys[angles_key].split()
+            with contextlib.suppress(ValueError):
+                p, y, r = (float(v) for v in parts)
+                y = 180 - y if a == 0 else -y
+                new.append((angles_key, " ".join(angle_text(v) for v in (p, y, -r))))
+        for lo, hi in corner_pairs:
+            if lo in keys and hi in keys:
+                lo_v, hi_v = keys[lo].split(), keys[hi].split()
+                if len(lo_v) == 2 and len(hi_v) == 2:
+                    lo_v[a], hi_v[a] = flip(hi_v[a], float(at)), flip(lo_v[a], float(at))
+                    new += [(lo, " ".join(lo_v)), (hi, " ".join(hi_v))]
+        sense = senses.get(e["classname"])
+        if sense:
+            flags = int(float(keys.get("spawnflags", "0") or 0))
+            about_axis = int((sense.get("axis_flags") or {}).get(axis, 0))
+            if not (about_axis and flags & about_axis):
+                new.append(("spawnflags", str(flags ^ int(sense["flag"]))))
+        new = [(k, v) for k, v in new if keys.get(k) != v]
+        if new:
+            try:
+                candidate.set_keys(e["index"], new)
+            except ValueError as err:
+                raise ToolError(f"entity {e['index']}: {err}") from err
+            changed_keys += len(new)
+        if e["index"] in turned:
+            if origin is not None:
+                o = list(origin)
+                o[a] = 2 * float(at) - o[a]
+            else:
+                o = _origin_brush_centre(candidate, e["index"], origin_texture)
+            if o is None:
+                raise ToolError(f"entity {e['index']} has no origin key or brush to turn about")
+            # A half turn is two mirrors, about the (mirrored) origin's x and y.
+            for ax in (0, 1):
+                candidate.mirror_geometry(ax, o[ax], e["index"])
+
+    models = [
+        e["index"]
+        for e in ents
+        if any(k == "model" and not v.startswith("*") for k, v in e["keys"])
+        or any(k == "model2" for k, _ in e["keys"])
+    ]
+    SESSION.map = candidate
+    notes = []
+    if stats.get("raw_blocks"):
+        notes.append(f"{stats['raw_blocks']} raw primitive blocks were left unmirrored")
+    if stats.get("degenerate_faces"):
+        notes.append(f"{stats['degenerate_faces']} faces with collinear points kept their texdef")
+    if models:
+        notes.append(
+            f"{len(models)} entities draw a model: they face the mirrored way but the model "
+            "itself is not mirrored"
+        )
+    return {
+        "axis": axis,
+        "at": at,
+        "geometry": stats,
+        "entities_changed_keys": changed_keys,
+        "vehicles_turned": turned,
+        "models": models[:50],
+        "notes": notes,
+        "revision": SESSION.receipt(),
+        "next": "map_save (to a new path for a mirrored copy); mirror map-script coordinates by hand",
+    }
+
+
+def _origin_brush_centre(m: Any, entity: int, texture: str) -> list[float] | None:
+    """The centre of an entity's origin brush (every face `texture`), or None."""
+    if not texture:
+        return None
+    for ent, prim, _ in m.brush_sources():
+        if ent != entity:
+            continue
+        g = m.brush_geometry(ent, prim)
+        if g.get("usable") and all(s.lower() == texture.lower() for s in g["shaders"]):
+            vs = g["vertices"]
+            return [(min(v[i] for v in vs) + max(v[i] for v in vs)) / 2 for i in range(3)]
+    return None
+
+
 @tool("map", "Query entities")
 def query_entities(classname: str | None = None, with_keys: bool = True) -> dict:
     """Entities in the open map, optionally filtered by classname.

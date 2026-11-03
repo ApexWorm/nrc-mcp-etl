@@ -16,7 +16,7 @@ from .. import analysis, botnav, profiles, routes
 from .. import detail as detailmod
 from .. import pack as packmod
 from ..detail import Detail
-from ..kernel import parse_map
+from ..kernel import parse_map, repo_root
 from ..runtime import (
     SESSION,
     _require_profile,
@@ -25,12 +25,22 @@ from ..runtime import (
 )
 
 
+def _absolute(path: str) -> Path:
+    p = Path(path)
+    if not p.is_absolute():
+        p = repo_root() / p
+    if not p.is_file():
+        raise ToolError(f"{p} does not exist")
+    return p
+
+
 @tool("shipping", "Build a pk3 archive", writes=True)
 def pack_pk3(
     bsp: str,
     complevel: int | None = None,
     png: bool = False,
     ignore: list[str] | None = None,
+    depends: list[str] | None = None,
     detail: Detail = "summary",
 ) -> dict:
     """Build a release archive for a compiled BSP with `q3map2 -pk3` (§6.4).
@@ -52,6 +62,11 @@ def pack_pk3(
     files the base game already ships are dropped, and it is written next to the folder that
     holds `maps/`, never into the game install.
 
+    `depends` lists other archives the map is played alongside, whose textures, models and
+    sounds it uses (a map built on another map's assets): what they hold counts as found and
+    is not copied in. Load them with the package, e.g. `engine_playtest(depends=...)`. For the
+    compiler to see them, keep them beside the folder that holds `maps/`.
+
     `detail="summary"` (default) keeps `not_found` and `allowed_missing` whole and caps the
     other lists; `"full"` adds the packer's console tail and every row.
     """
@@ -63,6 +78,7 @@ def pack_pk3(
             png=png,
             profile_id=active_profile() or None,
             ignore=list(ignore or []),
+            depends=[_absolute(d) for d in depends or []],
         )
     except packmod.PackError as e:
         raise ToolError(str(e)) from e

@@ -909,6 +909,34 @@ paths:
     path_corner_2 and needs a targetname), game/bg_misc.c:4016-4069 (points are linked by target
     after spawning; a missing target or control is only a console warning)
 
+# What entity keys mean under a mirror (map_mirror). The brushes and patches are mirrored by the
+# kernel; these say which keys are positions, facings and turning senses.
+mirror:
+  confidence: verified
+  source: etlegacy_source
+  # Keys whose value is a point "x y z", reflected with the geometry.
+  point_keys: [origin]
+  # A brush entity without an origin key turns about its origin brush (q3map2 map.cpp:1640-1644).
+  origin_texture: common/origin
+  # A yaw ("angle") is a facing the engine reads as angles 0 yaw 0 (g_spawn.c:179, :771-776);
+  # -1 and -2 are not angles but "up" and "down" for movers (G_SetMovedir, g_utils.c:738-757).
+  yaw_key: angle
+  yaw_special: [-1, -2]
+  # "pitch yaw roll" (g_spawn.c:178).
+  angles_key: angles
+  # Pairs of 2D corners "x y": the command map's top-left and bottom-right (g_spawn.c:979-980,
+  # cg_spawn.c:555). Mirroring swaps which x belongs to which corner.
+  corner_pairs: [[mapcoordsmins, mapcoordsmaxs]]
+  # Classnames whose rotation sense a mirror reverses, by toggling `flag`, unless the entity
+  # turns about the mirror axis itself (`axis_flags` names the flag that picks that axis).
+  # func_door_rotating: REVERSE negates the turn; X_AXIS turns about x (rotate[2]), Y_AXIS
+  # about y (rotate[0]), neither about z (g_local.h:2617-2620; g_mover.c:4062-4101).
+  rotation_sense:
+    func_door_rotating: {flag: 16, axis_flags: {x: 4, y: 8}}
+  locus: >-
+    game/g_spawn.c:178-179,768-776 (angles and angle both fill s.angles), game/g_utils.c:738-757,
+    game/g_spawn.c:975-984, game/g_local.h:2617-2620, game/g_mover.c:4040-4110
+
 # What a category cannot say. Read by analysis.roles.
 roles:
   # An objective volume. Categorized `trigger` so its brushes are not collision, but it is

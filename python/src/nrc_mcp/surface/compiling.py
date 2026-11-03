@@ -200,6 +200,11 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
                 (build / name).symlink_to(root / name, target_is_directory=True)
         if (root / "scripts").is_dir():
             shutil.copytree(root / "scripts", build / "scripts")
+        # Archives kept beside `maps/` are on the compiler's search path there (-fs_pakpath);
+        # a map built on another package's textures and models resolves them through these.
+        for archive in root.iterdir():
+            if archive.suffix.lower() == ".pk3" and archive.is_file():
+                (build / archive.name).symlink_to(archive.resolve())
         for companion in source.parent.iterdir():
             if companion.resolve() in SESSION.baseline_files:
                 continue
