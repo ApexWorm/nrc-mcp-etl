@@ -268,15 +268,15 @@ mise run mcp:inspect    # the official MCP inspector, in a browser
 point a client straight at it.
 
 **Serve only what the session needs.** Every listed tool is sent to the model at the start of
-every session (the full list is ~71 KB of JSON). Name a session preset in `NRC_MCP_GROUPS`
+every session (the full list is ~83 KB of JSON). Name a session preset in `NRC_MCP_GROUPS`
 and the server lists only that subset:
 
 | Preset | For | Tools | `tools/list` |
 | --- | --- | --- | --- |
-| `build` | blocking out and wiring a map: solids, patches, entities, objectives, script, textures, renders | 32 | ~31 KB |
+| `build` | blocking out and wiring a map: solids, patches, entities, objectives, script, textures, renders | 36 | ~40 KB |
 | `analyse` | measuring how it plays: routes, balance, spawns, movement, sightlines, lighting, playable space | 25 | ~28 KB |
-| `ship` | compiling, packing, release files, ship check, `objective_playtests` and `engine_playtest` | 26 | ~23 KB |
-| `level` | all three, start to finish | 56 | ~57 KB |
+| `ship` | compiling, packing, release files, ship check, `objective_playtests` and `engine_playtest` | 26 | ~26 KB |
+| `level` | all three, start to finish | 60 | ~69 KB |
 
 Each preset also carries the core every session uses: `map_open`/`map_new`/`map_save`,
 checkpoints, `map_stats`, `query_entities`, `validate`, `validate_profile` and
@@ -614,7 +614,7 @@ fraction of it, so the server can be told which groups or session presets (see
 [Connect an MCP client](#connect-an-mcp-client)) to expose:
 
 ```bash
-NRC_MCP_GROUPS=build               # a level-design session: 32 tools, ~31 KB listed
+NRC_MCP_GROUPS=build               # a level-design session: 36 tools, ~40 KB listed
 NRC_MCP_GROUPS=map,render,sculpt   # by group instead: 33 tools
 NRC_MCP_READ_ONLY=1                # a review session: every writer dropped
 ```
