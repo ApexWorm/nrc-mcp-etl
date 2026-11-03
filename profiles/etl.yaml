@@ -353,10 +353,177 @@ objectives:
         game/g_mover.c:5614-5653 (team flag and constructible_class), game/g_trigger.c:1698-1706
         (trigger links to it), game/g_weapon.c:1068-1247 (buildstart/built events name a
         stage, here final), game/g_mover.c:5272-5313 (decayed)
+    # The stock command post (battery, goldrush, railgun: neutral; fueldump, oasis: one
+    # team's). One objective trigger with the command-post icon targets one func_constructible
+    # per team that may build it, under one targetname; the engine lets only one stand at a
+    # time. Built, the scripts cut the team's charge times to 0.75 and turn on the HQ status
+    # that reports enemy landmines; destroyed, they undo both. Destroyed by satchel or
+    # dynamite: constructible_class 2, as the stock scripts set it.
+    command_post:
+      teams: [neutral, axis, allies]
+      description: >-
+        A command post: built, it shortens its team's charge times and reports nearby enemy
+        landmines to it; destroyed, that stops. Neutral: either team builds it, one at a time.
+      entities:
+        - role: trigger
+          classname: trigger_objective_info
+          texture: common/trigger
+          keys: {track: "{track}", shortname: "{track}", target: "{name}", spawnflags: "{command_post_flags}"}
+        - role: objective
+          teams: [neutral, axis]
+          classname: func_constructible
+          keys: {targetname: "{name}", scriptname: "{name}_axis", constructible_class: "2", spawnflags: "4"}
+        - role: objective
+          teams: [neutral, allies]
+          classname: func_constructible
+          keys: {targetname: "{name}", scriptname: "{name}_allies", constructible_class: "2", spawnflags: "8"}
+      script:
+        - {teams: [neutral, axis], block: "{name}_axis", event: buildstart, params: [final], actions: []}
+        - teams: [neutral, axis]
+          block: "{name}_axis"
+          event: built
+          params: [final]
+          actions:
+            - setchargetimefactor 0 soldier 0.75
+            - setchargetimefactor 0 fieldops 0.75
+            - setchargetimefactor 0 medic 0.75
+            - setchargetimefactor 0 engineer 0.75
+            - setchargetimefactor 0 covertops 0.75
+            - sethqstatus 0 1
+            - 'wm_announce "Axis Command Post constructed. Charge speed increased!"'
+        - {teams: [neutral, axis], block: "{name}_axis", event: decayed, params: [final], actions: []}
+        - teams: [neutral, axis]
+          block: "{name}_axis"
+          event: death
+          actions:
+            - setchargetimefactor 0 soldier 1
+            - setchargetimefactor 0 fieldops 1
+            - setchargetimefactor 0 medic 1
+            - setchargetimefactor 0 engineer 1
+            - setchargetimefactor 0 covertops 1
+            - sethqstatus 0 0
+            - 'wm_announce "Allied team has destroyed the Axis Command Post!"'
+        - {teams: [neutral, allies], block: "{name}_allies", event: buildstart, params: [final], actions: []}
+        - teams: [neutral, allies]
+          block: "{name}_allies"
+          event: built
+          params: [final]
+          actions:
+            - setchargetimefactor 1 soldier 0.75
+            - setchargetimefactor 1 fieldops 0.75
+            - setchargetimefactor 1 medic 0.75
+            - setchargetimefactor 1 engineer 0.75
+            - setchargetimefactor 1 covertops 0.75
+            - sethqstatus 1 1
+            - 'wm_announce "Allied Command Post constructed. Charge speed increased!"'
+        - {teams: [neutral, allies], block: "{name}_allies", event: decayed, params: [final], actions: []}
+        - teams: [neutral, allies]
+          block: "{name}_allies"
+          event: death
+          actions:
+            - setchargetimefactor 1 soldier 1
+            - setchargetimefactor 1 fieldops 1
+            - setchargetimefactor 1 medic 1
+            - setchargetimefactor 1 engineer 1
+            - setchargetimefactor 1 covertops 1
+            - sethqstatus 1 0
+            - 'wm_announce "Axis team has destroyed the Allied Command Post!"'
+      locus: >-
+        game/g_trigger.c:1680-1719 (one trigger, a second func_constructible under the same
+        targetname, never of the same team), game/g_weapon.c:1000-1018 (only one of the pair
+        may be built or building), game/g_script_actions.c:992-1070 (setchargetimefactor:
+        team 0/1, factor 0-1; 'lieutenant' is the deprecated spelling of fieldops),
+        game/g_script_actions.c:4152-4192 and game/g_active.c:1621-1639 (sethqstatus: the team
+        is told of enemy landmines near it), game/g_mover.c:5585-5589 (class 2: weapon class 1,
+        satchel or dynamite); stock railgun_final.script, fueldump_final.script
+    # The stock forward spawn flag (oasis Old City, radar Forward Bunker). With SPAWNPOINT the
+    # flag itself switches its targeted spawns: the capturing team's on, the other team's
+    # off. The script keeps the spawn region marker's owner in step (alertentity on a
+    # team_WOLF_objective swaps its team) and makes the flag the capturing team's default
+    # spawn. accum 0 holds the owner, so touching your own flag changes nothing.
+    checkpoint:
+      description: >-
+        A forward spawn flag both teams capture. {team} holds it and its spawns at the start;
+        touching it hands the spawns and the spawn region to the toucher's team.
+      entities:
+        - role: flag
+          point: true
+          classname: team_WOLF_checkpoint
+          keys: {targetname: "{name}", scriptname: "{name}", target: "{name}_spawns", spawnflags: "1"}
+        - role: flag
+          point: true
+          classname: team_WOLF_objective
+          keys: {targetname: "{name}_wobj", scriptname: "{name}_wobj", description: "{track}", spawnflags: "{owner_flag}"}
+        - {role: spawns, point: true, optional: true, classname: "{team_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "3"}}
+        - {role: spawns, point: true, optional: true, classname: "{other_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "1"}}
+      script: &checkpoint_script
+        - {block: "{name}", event: spawn, actions: ["accum 0 set {script_team}"]}
+        - block: "{name}"
+          event: trigger
+          params: [axis_capture]
+          actions:
+            - accum 0 abort_if_equal 0
+            - accum 0 set 0
+            - 'wm_announce "Axis capture {track}!"'
+            - alertentity {name}_wobj
+            - 'setautospawn "{track}" 0'
+        - block: "{name}"
+          event: trigger
+          params: [allied_capture]
+          actions:
+            - accum 0 abort_if_equal 1
+            - accum 0 set 1
+            - 'wm_announce "Allies capture {track}!"'
+            - alertentity {name}_wobj
+            - 'setautospawn "{track}" 1'
+      links: &checkpoint_links
+        spawns_targetname: "{name}_spawns"
+        spawn_marker: "{name}_wobj"
+        note: >-
+          Spawns placed later join the flag with targetname {name}_spawns: the holder's with
+          spawnflags 3 (active), the other team's with 1. Keep them nearer this flag than any
+          other spawn region marker.
+      locus: &checkpoint_locus >-
+        game/g_team.c:1216-1398 (checkpoint_spawntouch: axis_capture / allied_capture, then the
+        targeted spawns of the capturing team on and the other team's off), :1413-1420 (the
+        scriptname is required), :888-901 (alertentity on the marker swaps its team),
+        :952-958 (DEFAULT_AXIS / DEFAULT_ALLIES), :455-537 (spawns need STARTACTIVE and go
+        nearest the marker); game/g_script_actions.c:176-217 (setautospawn finds the marker by
+        description); stock oasis_final.script oldcityflag, radar_final.script roadbunker
+    # SPAWNPOINT plus the AXIS_ONLY / ALLIED_ONLY bit of the team that does not hold it. Only
+    # checkpoint_spawntouch reads those bits: the holder touching the raised flag lowers it
+    # (WCP_ANIM_*_FALLING) rather than raising its own, and still runs its capture event and
+    # switches the spawns back. A permanent capture needs the flag taken away by script.
+    checkpoint_one_way:
+      description: >-
+        A forward spawn flag only the team that does not hold it can raise. {team} holds it and
+        its spawns at the start; {team} touching the raised flag lowers it and takes the spawns
+        back.
+      entities:
+        - role: flag
+          point: true
+          classname: team_WOLF_checkpoint
+          keys: {targetname: "{name}", scriptname: "{name}", target: "{name}_spawns", spawnflags: "{one_way_flag}"}
+        - role: flag
+          point: true
+          classname: team_WOLF_objective
+          keys: {targetname: "{name}_wobj", scriptname: "{name}_wobj", description: "{track}", spawnflags: "{owner_flag}"}
+        - {role: spawns, point: true, optional: true, classname: "{team_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "3"}}
+        - {role: spawns, point: true, optional: true, classname: "{other_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "1"}}
+      script: *checkpoint_script
+      links: *checkpoint_links
+      locus: *checkpoint_locus
   team_values:
     owner_flag: {axis: "1", allies: "2"}      # AXIS_OBJECTIVE / ALLIED_OBJECTIVE, g_local.h:2631-2632
     builder_flag: {axis: "4", allies: "8"}    # AXIS/ALLIED_CONSTRUCTIBLE, g_local.h:2637-2638
     script_team: {axis: "0", allies: "1"}     # the team number scripts use, g_script_actions.c:3560
+    # IS_COMMANDPOST (64, gamepack; g_trigger.c:1802) plus the owner bit, g_local.h:2631-2632
+    command_post_flags: {neutral: "64", axis: "65", allies: "66"}
+    # The team's spawn class and the other team's, g_team.c:469-473
+    team_spawn: {axis: team_CTF_redspawn, allies: team_CTF_bluespawn}
+    other_spawn: {axis: team_CTF_bluespawn, allies: team_CTF_redspawn}
+    # SPAWNPOINT (1) plus ALLIED_ONLY (8) when Axis hold it, AXIS_ONLY (4) when Allies do, g_team.c:963-966
+    one_way_flag: {axis: "9", allies: "5"}
 
 # What a category cannot say. Read by analysis.roles.
 roles:
@@ -469,6 +636,23 @@ key_blocks:
       - {name: baseAngle, type: angles3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:236"}
       - {name: baseOrigin, type: vec3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:237"}
       - {name: id, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:240"}
+  # Keys G_SpawnGEntityFromSpawnVars reads itself for every entity, outside fields[].
+  spawn_vars:
+    applies_to_all: true
+    confidence: verified
+    source: etlegacy_source
+    note: "game/g_spawn.c G_SpawnGEntityFromSpawnVars (ET: Legacy v2.86.2)"
+    keys:
+      - name: allowteams
+        type: string
+        confidence: verified
+        source: etlegacy_source
+        locus: "game/g_spawn.c:814-831; checked at game/g_mover.c:2337 (G_TryDoor) and game/g_utils.c:649 (G_UseEntity)"
+        description: >-
+          The teams that may open a door or use the entity: any of axis, allies and cvops
+          (a disguised covert op of the other team), as in "axis,cvops". Unset, everyone may.
+          Only doors opened with the use key and entities used by a player honour it: a
+          func_door with TOUCH opens for anyone (game/g_mover.c:2110-2125).
 
 enums:
   leakType:
@@ -2514,7 +2698,13 @@ focus:
     present: true
     confidence: verified
     source: gamepack_entities
-    finding: "Capturable flag. With SPAWNPOINT (1) it switches its targeted spawns to the capturing team. Calls allied_capture / axis_capture in the map script."
+    finding: "Capturable flag. With SPAWNPOINT (1) it switches its targeted spawns to the capturing team (that team's on, the other's off) and runs trigger allied_capture / axis_capture in its script block (g_team.c:1216-1398). AXIS_ONLY (4) / ALLIED_ONLY (8) work only with SPAWNPOINT: the other team then lowers the flag instead of raising its own, and still runs its capture event and takes the spawns. Without SPAWNPOINT those bits are ignored, and CP_HOLD (2) leaves the flag untouchable (g_team.c:1463-1476). objective_place builds the stock pattern as checkpoint / checkpoint_one_way."
+  - topic: "team-only doors"
+    classname: "func_door_rotating"
+    present: true
+    confidence: verified
+    source: etlegacy_source
+    finding: "A door only some teams open is an ordinary door with the allowteams key (any entity accepts it, g_spawn.c:814-831): the stock maps use func_door_rotating with allowteams \"axis,cvops\" and type 5. Players open doors with the use key, which checks allowteams (G_TryDoor, g_mover.c:2337); others see the locked hint (g_main.c:886-907). A func_door with TOUCH (8) and no targetname opens for whoever walks into it, allowteams or not (g_mover.c:2110-2125, 2242-2250). A door some other entity targets is locked until that entity fires (key -1, g_mover.c:2224-2229)."
   - topic: "objectives"
     classname: "team_CTF_redflag"
     present: true
@@ -3046,6 +3236,126 @@ rules:
       classname: team_WOLF_checkpoint
       key: scriptname
 
+  # --- command posts: one trigger, one func_constructible per team under one targetname ---
+
+  - id: ETL_OBJECTIVE_INFO_SECOND_TARGET_CLASS
+    check: second_target
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1680-1698 (G_Error \"targets multiple entities ... the second one isn't a 'func_constructible'\")"
+    message: >-
+      a trigger_objective_info targets a func_constructible, and its target names something
+      else too ({detail}); the game stops a few frames after load
+    fix_hint: "give the other entity its own targetname; only a second func_constructible may share it"
+    params:
+      classname: trigger_objective_info
+      key: target
+      first_classes: [func_constructible]
+      second_classes: [func_constructible]
+
+  - id: ETL_OBJECTIVE_INFO_CONSTRUCTIBLE_PAIR_TEAMS
+    check: second_target
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1689-1703 (a constructible's team is AXIS_CONSTRUCTIBLE, else Allies; G_Error \"constructible by the same team\")"
+    message: >-
+      a trigger_objective_info targets two func_constructibles that the same team builds
+      ({detail}); the game stops a few frames after load
+    fix_hint: "set AXIS_CONSTRUCTIBLE (4) on one and ALLIED_CONSTRUCTIBLE (8), without 4, on the other"
+    params:
+      classname: trigger_objective_info
+      key: target
+      first_classes: [func_constructible]
+      second_classes: [func_constructible]
+      distinct_flags: [4, 8]
+
+  # --- checkpoints (spawn flags) and the spawn regions they hand over ---
+
+  - id: ETL_CHECKPOINT_TEAM_ONLY_IGNORED
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:1463-1476 (without SPAWNPOINT the flag uses checkpoint_touch, :1135-1210, which never reads AXIS_ONLY / ALLIED_ONLY; only checkpoint_spawntouch does, :1247-1300)"
+    message: >-
+      {found} team_WOLF_checkpoint(s) set AXIS_ONLY (4) or ALLIED_ONLY (8) without SPAWNPOINT
+      (1); the bit is ignored and either team can raise the flag
+    fix_hint: "add SPAWNPOINT (1), or clear the team bit"
+    params:
+      classname: team_WOLF_checkpoint
+      when_flags_any: [4, 8]
+      when_flags_none: [1]
+
+  - id: ETL_CHECKPOINT_HOLD_NOT_TOUCHED
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:1463-1476 (CP_HOLD without SPAWNPOINT gives the flag a use function and no touch), :1118-1125 (nor after a capture)"
+    message: >-
+      {found} team_WOLF_checkpoint(s) set CP_HOLD (2) without SPAWNPOINT (1); touching the
+      flag does nothing, and it changes hands only when another entity uses it
+    fix_hint: "clear CP_HOLD (2); the gamepack calls it unused"
+    params:
+      classname: team_WOLF_checkpoint
+      when_flags_all: [2]
+      when_flags_none: [1]
+
+  - id: ETL_CHECKPOINT_NO_TEAM_RAISES
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:1243-1300 (each team's raise is skipped when the other team's ONLY bit is set)"
+    message: >-
+      {found} team_WOLF_checkpoint(s) set SPAWNPOINT with both AXIS_ONLY (4) and ALLIED_ONLY
+      (8); no flag is ever raised, though captures still fire and switch the spawns
+    fix_hint: "keep only the bit of the team that may raise the flag"
+    params:
+      classname: team_WOLF_checkpoint
+      when_flags_all: [1, 4, 8]
+
+  - id: ETL_SPAWN_REGION_OWNER
+    check: flags_any
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:952-958 (owner from DEFAULT_AXIS / DEFAULT_ALLIES), :2466 (the region's team), :888-901 (alertentity swaps only an Axis or Allied owner)"
+    message: >-
+      {found} team_WOLF_objective spawn marker(s) set neither DEFAULT_AXIS (1) nor
+      DEFAULT_ALLIES (2); no team can pick them in the limbo spawn list, and alertentity never
+      hands them over
+    fix_hint: "set spawnflags 1 for an Axis region or 2 for an Allied one"
+    params:
+      classname: team_WOLF_objective
+      flags: [1, 2]
+
+  # --- team-only doors: allowteams on a door (or anything a player uses) ---
+
+  - id: ETL_ALLOWTEAMS_NAMES_A_TEAM
+    check: key_pattern
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_spawn.c:814-831 (allowteams is lowercased and searched for 'axis', 'allies', 'cvops'; other words are ignored), game/g_utils.c:607-635 (no team bit lets everyone through; 'cvops' alone lets no team through)"
+    message: >-
+      allowteams names neither axis nor allies ({detail}); with no team in it the door opens
+      for everyone, or with only cvops for no one
+    fix_hint: "write the teams that may open it, as in \"axis\" or \"allies,cvops\" (not \"allied\")"
+    params:
+      key: allowteams
+      pattern: "(?is).*(axis|allies).*"
+
+  - id: ETL_TEAM_DOOR_OPENS_ON_TOUCH
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:2242-2250 (a func_door with TOUCH and no targetname or health gets a touch trigger), :2110-2125 (which opens it through Use_BinaryMover; allowteams is checked only by G_TryDoor, :2337, and G_UseEntity, game/g_utils.c:649)"
+    message: >-
+      {found} func_door(s) with allowteams also set TOUCH (8); walking into one opens it for
+      every team
+    fix_hint: "clear TOUCH (8): players of the allowed teams open it with the use key"
+    params:
+      classname: func_door
+      when_flags_all: [8]
+      when_keys: [allowteams]
+      when_keys_absent: [targetname, health]
+
 # ---------------------------------------------------------------------------
 # mapscript — maps/<map>.script, checked against the map by nrc_mcp.mapscript
 # ---------------------------------------------------------------------------
@@ -3249,6 +3559,13 @@ mapscript:
       severity: error
       consequence: "the game stops with 'Invalid team number' when it runs"
       locus: "game/g_script_actions.c:3529-3533"
+    - action: sethqstatus
+      arg: 0
+      min: 0
+      max: 1
+      severity: error
+      consequence: "the game stops with 'sethqstatus with bad team set' when it runs (with a script_multiplayer)"
+      locus: "game/g_script_actions.c:4180-4191"
   # Calls a running block should make. Not enforced by the engine, so never an error.
   required_actions:
     - block: game_manager
@@ -3346,6 +3663,8 @@ engine:
               note: "Press toggles prone; releasing stops the button but does not stand up. Press again to leave prone where clearance permits."}
       jump: {press: "+moveup", release: "-moveup"}
       sprint: {press: "+sprint", release: "-sprint"}
+      # The use key: doors (G_TryDoor checks allowteams), buttons, MG42s; client/cl_input.c:1497
+      activate: {press: "+activate", release: "-activate"}
     fields:
       player: [connected, team, role, alive, health, stance, weapon, weapon_id, speed,
                position.0, position.1, position.2, angles.0, angles.1, angles.2]
