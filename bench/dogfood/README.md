@@ -10,6 +10,7 @@ configured as described in the root README.
 mise run bench:dogfood -- depot
 mise run bench:dogfood -- constructible
 mise run bench:dogfood -- movement
+mise run bench:dogfood -- convoy
 ```
 
 | Scenario | Exercises |
@@ -17,6 +18,7 @@ mise run bench:dogfood -- movement
 | `depot` | Two routes through a warehouse, six spawns per team, dynamite objective and scripted win |
 | `constructible` | Workshop pit, stairs, constructible bridge, horizontal pipe, parametric editing and checkpoint restoration |
 | `movement` | Standing stair/arch route, crouch tunnel, prone vent, route changes after lowering a ceiling and restoring it |
+| `convoy` | A truck the Allies escort along a path with a curved bend (`path_place`, `objective_place` escort), and Axis orders they steal and deliver (`objective_place` steal) |
 
 These are small development maps. Compile and package success do not establish that an
 objective works in the engine or that a layout is balanced in multiplayer. Analysis omits
@@ -41,11 +43,19 @@ The MCP playtest scenarios replace fixed frame waits with fresh state conditions
 mise run bench:dogfood -- playtest workshop
 mise run bench:dogfood -- playtest depot
 mise run bench:dogfood -- playtest movement
+mise run bench:dogfood -- playtest convoy_escort --pk3 /absolute/path/nrc_convoy_autopacked.pk3
+mise run bench:dogfood -- playtest convoy_steal --pk3 /absolute/path/nrc_convoy_autopacked.pk3
 ```
 
 These call `engine_playtest` over stdio MCP, retain its JSON receipt and returned images,
-and use the example packages recorded in `out/dogfood/report.json`. The scenarios live in
+and use the example packages recorded in `out/dogfood/report.json` (the convoy scenarios take
+the package `convoy` printed). The scenarios live in
 `bench/dogfood/scenarios/`; read `nrc://playtest/etl` for supported actions and conditions.
+
+`convoy_escort` stands an Allied player in the moving escort volume, leaves the truck to stop
+at a path point, catches up, follows it round the curved segment and sees `arrived` win the
+round. `convoy_steal` walks onto the orders (their `stolen` event hides a lamp the observer
+watches) and carries them into the delivery volume, whose `death` event wins the round.
 The older direct-engine probe below remains useful for reproducing the original experiments.
 
 The optional engine probe uses an isolated game home and records screenshots, engine logs

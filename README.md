@@ -371,7 +371,7 @@ The whole map can be made through tool calls, with nothing written by hand. With
 | Start the file | `map_new` |
 | Rooms, walls, trim | `solid_commit` (`textures` per face direction; `detail` for trim and props), `patch_commit` for columns, arches and bevels |
 | Spawns, markers, intermission, lights | `entity_place` (team spawns, `team_WOLF_objective` markers with a description, `script_multiplayer`, `info_player_intermission`, `light`) |
-| Objectives | `objective_place` (`dynamite` or `constructible`): trigger, objective, links and script events in one call |
+| Objectives | `objective_place` (`dynamite`, `constructible`, `escort` or `steal`): trigger, objective, links and script events in one call; `path_place` first lays the path an escorted vehicle follows |
 | The map script | `script_set_event` (respawn times, `wm_setwinner`, `setautospawn`, the objectives' events), `script_show` to read it back |
 | Check | `validate`, `validate_profile`, `spawn_safety`, `balance_report`, `lighting_report`, `structural_audit` then `brush_set_detail` |
 | Release files | `arena_write`, `objdata_write`, `commandmap_make`, `levelshot_make` |
@@ -432,7 +432,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `validate` | Geometry and file-format findings. |
 | `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
 | `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
-| `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite` and `constructible`). |
+| `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite`, `constructible`, `escort` and `steal`). |
+| `path_place` | Lay a path for a mover: a chain of linked path points, straight or curved by control points, with long straight legs optionally split. Its `start` is what `objective_place(kind="escort")` follows. |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
 **Seeing it**

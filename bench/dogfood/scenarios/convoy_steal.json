@@ -1,0 +1,25 @@
+{
+  "watch": ["orders_lamp"],
+  "steps": [
+    {"action": "join", "team": "blue", "role": "covertops", "timeout": 40, "label": "an Allied thief"},
+    {"action": "position", "origin": [300, 200, 24], "angles": [20, 0, 0], "label": "walk onto the Axis orders"},
+    {
+      "action": "wait",
+      "label": "the stolen event ran",
+      "until": [{"scope": "entity", "name": "orders_lamp", "field": "state", "value": 1}],
+      "timeout": 10
+    },
+    {"action": "screenshot", "name": "stolen"},
+    {"action": "position", "origin": [1928, 176, 24], "angles": [10, 0, 0], "label": "carry them into the delivery volume"},
+    {
+      "action": "wait",
+      "label": "delivery runs the deliver block's death event, which wins",
+      "until": [
+        {"scope": "game", "field": "phase", "value": "intermission"},
+        {"scope": "game", "field": "winner", "value": "blue"}
+      ],
+      "timeout": 15
+    },
+    {"action": "screenshot", "name": "delivered"}
+  ]
+}

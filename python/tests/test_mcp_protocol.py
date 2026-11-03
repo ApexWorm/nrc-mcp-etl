@@ -158,6 +158,7 @@ WRITERS = {
     "script_set_event",
     "script_remove",
     "objective_place",
+    "path_place",
     "solid_commit",
     "brush_set_detail",
     "patch_commit",
