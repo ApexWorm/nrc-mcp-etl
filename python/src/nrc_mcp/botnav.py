@@ -678,6 +678,7 @@ def _span(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_at, ga
     that keeps furthest from the patch's sides, then the shortest. Returns the spans made."""
     made = 0
     seen: set = set()
+    banks = {(c[0], c[1]) for c in piece_of}
     for start in sorted(decks):
         if start in seen:
             continue
@@ -692,11 +693,13 @@ def _span(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_at, ga
                         seen.add(d)
                         todo.append(d)
         columns = {(c[0], c[1]) for c in patch}
-        # How far each column is from the patch's sides (0 on the side).
+        # How far each column is from the patch's sides (0 on the side): where it ends in
+        # neither more of it nor ground a piece stands on (the drop off a deck's edge).
+        held = columns | banks
         side = {
             (x, y): 0
             for x, y in columns
-            if any((x + dx, y + dy) not in columns for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+            if any((x + dx, y + dy) not in held for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
         }
         ring = deque(side)
         while ring:
