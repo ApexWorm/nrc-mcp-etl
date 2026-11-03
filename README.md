@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **69 tools, 6 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **75 tools, 7 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -249,6 +249,40 @@ mise run mcp:inspect    # the official MCP inspector, in a browser
 `mise run mcp:serve` writes only protocol on stdout — diagnostics go to stderr — so it is safe to
 point a client straight at it.
 
+**Serve only what the session needs.** Every listed tool is sent to the model at the start of
+every session (the full list is ~71 KB of JSON). Name a session preset in `NRC_MCP_GROUPS`
+and the server lists only that subset:
+
+| Preset | For | Tools | `tools/list` |
+| --- | --- | --- | --- |
+| `build` | blocking out and wiring a map: solids, patches, entities, objectives, script, textures, renders | 32 | ~31 KB |
+| `analyse` | measuring how it plays: routes, balance, spawns, movement, sightlines, lighting, playable space | 25 | ~28 KB |
+| `ship` | compiling, packing, release files, ship check and `engine_playtest` | 25 | ~23 KB |
+| `level` | all three, start to finish | 55 | ~57 KB |
+
+Each preset also carries the core every session uses: `map_open`/`map_new`/`map_save`,
+checkpoints, `map_stats`, `query_entities`, `validate`, `validate_profile` and
+`profile_summary`. The presets are drawn from the recorded dogfood sessions, which split into
+exactly these phases. Names combine with each other and with the groups below
+(`NRC_MCP_GROUPS=analyse,ship`, `NRC_MCP_GROUPS=build,assets`), and `NRC_MCP_READ_ONLY=1`
+still applies on top. For Claude Code:
+
+```sh
+claude mcp add nrc-ship -e NRC_MCP_GROUPS=ship -- mise -C /absolute/path/to/nrc-mcp run mcp:serve
+```
+
+or in a JSON config, `"env": {"NRC_MCP_GROUPS": "analyse"}` beside `"command"`. The lists live in
+`python/src/nrc_mcp/surface/__init__.py` (`PRESETS`); `mise run mcp:tools` prints them.
+
+**Responses are summaries by default.** The gameplay reports (`balance_report`, `spawn_safety`,
+`movement_check`, `sightline_report`, `route_report`, `route_render`) and `engine_playtest` take
+`detail="summary"` (the default) or `detail="full"`. A summary keeps counts, verdicts and the
+rows that need attention first, and drops what is the same on every call — the profile's
+constants with their descriptions, the voxel grid's model notes, the scenario echo. It never
+drops an `error` finding; other findings beyond ten are counted per severity, and every
+dropped field or capped list is named in the response's `omitted`. Tool results are sent as
+compact JSON.
+
 ## Your first session
 
 A complete pass, in the order that works. Every step is a tool call; the shell equivalents are shown
@@ -407,7 +441,7 @@ receipt. Gameplay reports use the same in-memory revision even before saving.
 
 ## Tool reference
 
-69 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+75 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -556,15 +590,18 @@ than assuming it", "read the profile before sizing anything" are all learned.
 ## Narrowing the surface
 
 The full tool inventory adds substantial description text to every session. Most sessions need a
-fraction of it, so the server can be told which groups to expose:
+fraction of it, so the server can be told which groups or session presets (see
+[Connect an MCP client](#connect-an-mcp-client)) to expose:
 
 ```bash
-NRC_MCP_GROUPS=map,render,sculpt   # a level-design session: 23 tools, 11k chars
+NRC_MCP_GROUPS=build               # a level-design session: 32 tools, ~31 KB listed
+NRC_MCP_GROUPS=map,render,sculpt   # by group instead: 33 tools
 NRC_MCP_READ_ONLY=1                # a review session: every writer dropped
 ```
 
 Groups are `map`, `render`, `sculpt`, `assets`, `compiling`, `gameplay`, `shipping`, `project`
-and `maintenance`. The default is everything. An unknown group name or a selection that would
+and `maintenance`; presets are `build`, `analyse`, `ship` and `level`. The default is
+everything. An unknown group name or a selection that would
 leave no tools at all stops the server with an error rather than quietly serving the wrong
 surface — a zero-tool server is indistinguishable from a broken one.
 
@@ -764,7 +801,7 @@ exactly why it costs nothing.
 
 `mise run bench:tier2` is the harness that closes that gap — a model driving this MCP over stdio
 against small fixtures, graded by the same invariants. Its free modes are exercised
-(`--check` starts the server, lists the 67 tools, and verifies every scenario's goal is false on
+(`--check` starts the server, lists the tools, and verifies every scenario's goal is false on
 the untouched fixture). **`--run` has never executed**: it spends tokens, and that is the
 owner's call to make, so nothing here reports a Tier 2 score and none should be inferred. Three
 ET: Legacy scenarios - build a map from nothing, add an objective, ship a map - are ready for it.

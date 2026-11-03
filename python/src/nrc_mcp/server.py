@@ -319,7 +319,8 @@ def describe_surface() -> str:
         "nrc-mcp surface",
         "",
         f"{len(registered)} tools in {len(by_group)} groups; {writers} of them write.",
-        "Narrow it with NRC_MCP_GROUPS=<group,...> or NRC_MCP_READ_ONLY=1.",
+        "Narrow it with NRC_MCP_GROUPS=<group or preset,...> or NRC_MCP_READ_ONLY=1.",
+        f"Presets: {', '.join(surface.PRESETS)}.",
         "",
         "TOOLS",
     ]
@@ -380,30 +381,43 @@ def all_groups() -> list[str]:
     return [g for g in seen if g]
 
 
-def select_surface(groups: str | None = None, read_only: bool = False) -> dict:
-    """Narrow the registered tools to the requested groups, and report what happened.
+def all_presets() -> dict[str, tuple[str, ...]]:
+    """The named session subsets (`surface.PRESETS`): build, analyse, ship, level."""
+    return dict(surface.PRESETS)
 
-    Unknown group names and an empty selection are both errors. Silently serving zero tools
+
+def select_surface(groups: str | None = None, read_only: bool = False) -> dict:
+    """Narrow the registered tools to the requested groups or presets, and report what happened.
+
+    Each name is a group (where tools live) or a preset (what one kind of session calls,
+    see `surface.PRESETS`); the selection is the union of all of them.
+
+    Unknown names and an empty selection are both errors. Silently serving zero tools
     would look exactly like a broken server to the client, and silently ignoring a typo
     would serve a surface nobody asked for — both are worse than refusing to start.
     """
     available = all_groups()
+    presets = all_presets()
     wanted = [g.strip() for g in (groups or "").split(",") if g.strip()]
 
     if groups is not None and groups.strip() and not wanted:
         raise SurfaceError(f"NRC_MCP_GROUPS={groups!r} names no groups")
     if wanted:
-        unknown = [g for g in wanted if g not in available]
+        unknown = [g for g in wanted if g not in available and g not in presets]
         if unknown:
             raise SurfaceError(
-                f"unknown tool group(s): {', '.join(unknown)}. Available: {', '.join(available)}"
+                f"unknown tool group(s): {', '.join(unknown)}. Available: {', '.join(available)}; "
+                f"presets: {', '.join(presets)}"
             )
+    wanted_groups = {g for g in wanted if g in available}
+    wanted_tools = {name for g in wanted if g in presets for name in presets[g]}
 
     dropped: list[str] = []
     for t in list(mcp._tool_manager.list_tools()):
         group = (t.meta or {}).get("group")
         writes = t.annotations is not None and t.annotations.read_only_hint is False
-        if (wanted and group not in wanted) or (read_only and writes):
+        selected = not wanted or group in wanted_groups or t.name in wanted_tools
+        if not selected or (read_only and writes):
             mcp.remove_tool(t.name)
             dropped.append(t.name)
 

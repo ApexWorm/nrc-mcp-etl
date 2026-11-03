@@ -15,10 +15,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis as anamod
 from .. import balance as balancemod
+from .. import detail as detailmod
 from .. import mapscript, profiles
 from .. import playspace as playspacemod
 from .. import routes as routesmod
 from .. import spawns as spawnsmod
+from ..detail import Detail
 from ..kernel import parse_map
 from ..project_state import digest
 from ..runtime import (
@@ -123,6 +125,7 @@ def route_report(
     transition_cost: float = 32,
     max_nodes: int = 100000,
     snap_radius: float | None = None,
+    detail: Detail = "summary",
 ) -> dict:
     """Find a directed route with a geometric witness and explicit stance changes.
 
@@ -146,7 +149,11 @@ def route_report(
     legs/turning, patch collision or script-state simulation. `max_nodes` (1..250000)
     bounds search; exhaustion returns reachable=null rather than claiming no route.
     `route_render` draws the same report over the map geometry.
+
+    `detail="summary"` (default) omits the model caveats, per-grid constants and the
+    per-vertex `path` (`segments` holds the same vertices); `"full"` returns everything.
     """
+    full = detailmod.wants_full(detail)
     try:
         report, _ = _route_query(
             start,
@@ -163,7 +170,7 @@ def route_report(
             max_nodes,
             snap_radius,
         )
-        return report
+        return report if full else detailmod.route_report(report)
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
@@ -185,6 +192,7 @@ def route_render(
     snap_radius: float | None = None,
     width: int = 1000,
     height: int = 800,
+    detail: Detail = "summary",
 ) -> list:
     """Draw a route over a top-down geometry view, coloured by stance with change markers.
 
@@ -192,8 +200,9 @@ def route_render(
     use the same immutable current-map snapshot and revision. All floors project onto XY:
     use the witness's Z coordinates to distinguish overlapping levels. Width/height must
     be integers from 256 to 2048. An unsuccessful search still returns map geometry and
-    the reason; it never draws an invented connection.
+    the reason; it never draws an invented connection. `detail` as in `route_report`.
     """
+    full = detailmod.wants_full(detail)
     try:
         for name, value in (("width", width), ("height", height)):
             if isinstance(value, bool) or not isinstance(value, int) or not 256 <= value <= 2048:
@@ -225,7 +234,8 @@ def route_render(
             route_segments=report["segments"],
             route_transitions=report["transitions"],
         )
-        return [_Image(data=png, format="png"), json.dumps({**report, "render": annotations})]
+        witness = report if full else detailmod.route_report(report)
+        return [_Image(data=png, format="png"), json.dumps({**witness, "render": annotations})]
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
@@ -267,6 +277,7 @@ def balance_report(
     team_sizes: dict[str, int] | None = None,
     run_speed: float | None = None,
     respawn_seconds: dict[str, float] | None = None,
+    detail: Detail = "summary",
 ) -> dict:
     """Per-team traversal distance from each spawn group to each objective.
 
@@ -285,7 +296,11 @@ def balance_report(
     Optional `stages`: [{"name": "after gate", "spawn_entities": [3, 4],
     "objective_entities": [8], "respawn_seconds": {"red": 20, "blue": 30}}]. These are
     explicit spawn/objective selections on the SAME geometry snapshot, not script simulation.
+
+    `detail="summary"` (default): verdicts, counts, every error finding, and the rows that
+    need attention first; `omitted` names what was left out. `"full"` returns everything.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
@@ -293,23 +308,29 @@ def balance_report(
         report = anamod.balance_report(map_path, pid, cell=cell, grid=grid)
         spec = profiles.load(pid).get("mapscript")
         data = SESSION.read_file(mapscript.script_path(spec, SESSION.path)) if spec else None
-        return _receipt(
-            balancemod.enrich(
-                report,
-                grid,
-                script_text=data.decode("utf-8", errors="replace") if data is not None else None,
-                stages=stages,
-                team_sizes=team_sizes,
-                run_speed=run_speed,
-                respawn_seconds=respawn_seconds,
-            )
+        report = balancemod.enrich(
+            report,
+            grid,
+            script_text=data.decode("utf-8", errors="replace") if data is not None else None,
+            stages=stages,
+            team_sizes=team_sizes,
+            run_speed=run_speed,
+            respawn_seconds=respawn_seconds,
         )
+        if not full:
+            report = detailmod.balance_report(report, frozenset(balancemod.MODEL_NOTES))
+        return _receipt(report)
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
 
 @tool("gameplay", "Sightline report")
-def sightline_report(samples: int = 200, cell: float = 16, profile_id: str | None = None) -> dict:
+def sightline_report(
+    samples: int = 200,
+    cell: float = 16,
+    profile_id: str | None = None,
+    detail: Detail = "summary",
+) -> dict:
     """Sightline length distribution and power positions.
 
     Samples walkable positions, casts rays between them at the profile's eye height, and reports how
@@ -317,54 +338,58 @@ def sightline_report(samples: int = 200, cell: float = 16, profile_id: str | Non
     game; "power positions" are the points that see the most of the map.
 
     Sampled, so the numbers move a little between runs. Read the distribution, not any single value.
+    `detail` as in `balance_report`.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
-        return _receipt(
-            anamod.sightline_report(
-                map_path, samples=samples, profile_id=pid, cell=cell, grid=_session_grid(cell, pid)
-            )
+        report = anamod.sightline_report(
+            map_path, samples=samples, profile_id=pid, cell=cell, grid=_session_grid(cell, pid)
         )
+        return _receipt(report if full else detailmod.sightline_report(report))
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
 
 @tool("gameplay", "Movement clearance check")
-def movement_check(cell: float = 16, profile_id: str | None = None) -> dict:
+def movement_check(
+    cell: float = 16, profile_id: str | None = None, detail: Detail = "summary"
+) -> dict:
     """Check clearances against the profile's movement constants.
 
     Standing headroom, crouch headroom, step height, doorway widths. Every finding names the
     constant it used and that constant's confidence, and **anything derived from an unverified
     constant is reported as info, never an error**.
 
-    That clamp is not ceremony. The design document's own standing height was wrong by 13 units, and
-    a corridor sized from it would pass every geometric check while being unusable.
+    `detail` as in `balance_report`.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
-        return _receipt(
-            anamod.movement_check(map_path, pid, cell=cell, grid=_session_grid(cell, pid))
-        )
+        report = anamod.movement_check(map_path, pid, cell=cell, grid=_session_grid(cell, pid))
+        return _receipt(report if full else detailmod.movement_check(report))
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
 
 @tool("gameplay", "Spawn safety report")
-def spawn_safety(cell: float = 16, profile_id: str | None = None) -> dict:
+def spawn_safety(
+    cell: float = 16, profile_id: str | None = None, detail: Detail = "summary"
+) -> dict:
     """Exits per spawn and distance to the nearest enemy spawn.
 
     A spawn with one exit is a spawn that can be held; a spawn close to an enemy spawn is a spawn
     that gets contested immediately. Both are design smells worth seeing before playtesting finds
-    them.
+    them. `detail="summary"` (default) lists the riskiest spawns first; `"full"` lists all.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
-        return _receipt(
-            anamod.spawn_safety(map_path, pid, cell=cell, grid=_session_grid(cell, pid))
-        )
+        report = anamod.spawn_safety(map_path, pid, cell=cell, grid=_session_grid(cell, pid))
+        return _receipt(report if full else detailmod.spawn_safety(report))
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 

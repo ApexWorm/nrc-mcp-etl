@@ -705,9 +705,8 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
     carry a script, that script against the map's entities.
 
     Every rule is data in the profile, and every finding carries a `confidence`. **An
-    unverified rule can never produce an error** — it is downgraded to `info` — because three
-    of the four spawn rules the design document called verified were wrong, and one would have
-    failed correct maps. `nrc://corrections` has the details.
+    unverified rule can never produce an error** — it is downgraded to `info`;
+    `nrc://corrections` says why.
     """
     m = SESSION.require()
     pid = profile_id or active_profile()
