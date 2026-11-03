@@ -93,16 +93,25 @@ def bot_playtest(
     port: int = 0,
     profile_id: str | None = None,
     keep: bool = False,
+    scripts: bool = True,
     detail: Detail = "summary",
 ) -> dict:
     """Load a packaged map with its bot waypoints on a dedicated server, add bots, watch them.
 
     `waypoints` is the file `bot_waypoints_write` staged (default: the open map's staged
-    file). The server runs for `seconds` (10..600) in a throwaway game home, with a
-    throwaway copy of the bot add-on's folder (`addon_dir`, default the game install's own,
-    for ET: Legacy `legacy/omni-bot`; it is only read) whose nav folder holds just this
-    file, so no stock or stale waypoints can stand in for it. `bots` (1..32) bots join via
-    the add-on's own command. `port` is the server's UDP port (0 picks a free one).
+    file). With `scripts` (default) the map goals and map script staged beside it go too
+    (ET: Legacy `<map>_goals.gm`, `<map>.gm`), when present. The server runs for `seconds`
+    (10..600) in a throwaway game home, with a throwaway copy of the bot add-on's folder
+    (`addon_dir`, default the game install's own, for ET: Legacy `legacy/omni-bot`; it is
+    only read) whose nav folder holds just these files, so no stock or stale ones can stand
+    in for them. `bots` (1..32) bots join via the add-on's own command. `port` is the
+    server's UDP port (0 picks a free one).
+
+    With the scripts, `scripts` reports how many goals the add-on loaded, any goal or
+    script errors it logged, the map script's own messages (map-script debugging is
+    switched on in the throwaway folder only) with the goals each one switched, and per
+    goal spot the seconds a bot of its team stood on it, so a spot switched off by an
+    objective event can be seen emptied.
 
     Reports what the add-on logged (`waypoints_loaded`, one count per map load; any
     `load_errors`), per bot how far it travelled, how many distinct waypoints it passed
@@ -113,6 +122,7 @@ def bot_playtest(
     the add-on's goal choices and the fight; read `events`, and run longer for more.
     `keep=true` retains the folders and names the logs. Needs the engine and game data.
 
+    `ok` also needs the goals loaded and no goal or script error when scripts went in.
     `detail="summary"` (default) leaves out the per-bot rows when more than 12 bots ran;
     `"full"` always returns them.
     """
@@ -140,10 +150,18 @@ def bot_playtest(
                 / str(spec["stage_dir"])
                 / botnav.install_path(spec, SESSION.path.stem)
             )
+        files = [Path(waypoints)]
+        if scripts:
+            stem = Path(waypoints).stem
+            for section in ("goals", "script"):
+                name = Path(str((spec.get(section) or {}).get("install_path", ""))).name
+                sibling = Path(waypoints).with_name(name.format(map=stem)) if name else None
+                if sibling is not None and sibling.is_file():
+                    files.append(sibling)
         report = botplay.run(
             path,
             pid,
-            [waypoints],
+            files,
             seconds=float(seconds),
             bots=int(bots),
             addon_dir=addon_dir,

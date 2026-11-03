@@ -198,9 +198,38 @@ the jump distance limits themselves (the course's ledge and gap sit inside them;
 come from the arc model, not from the engine).
 
 What is not seeded, so not tested: door use (a `func_door` is solid to the grids, so the
+<<<<<<< HEAD
 frontline Axis door carries no waypoint), and map scripts for goal priorities. Constructibles are as solid to the grids as any brush, so waypoints are seeded on
+=======
+frontline Axis door carries no waypoint), jumps, ladders, and goal priorities. Constructibles are as solid to the grids as any brush, so waypoints are seeded on
+>>>>>>> worktree-agent-aef0ce75a4d808f22
 the workshop bridge's deck before it is built; they are not flagged with Omni-bot's
 `BLOCKBRIDGE` (which would close those links while no floor is under them). Blown walls are
 handled: a state-changing brush that separates two areas keeps its cells, and connections
 through it get `BLOCKWALL`; one that separates nothing (the depot transmitter, the movement
 radio) gets no waypoint inside it.
+
+### Map goals and map scripts
+
+The same calls with the generated `<map>_goals.gm` and `<map>.gm` installed beside the `.way`
+(8 bots, 240-300 s, port 27963; `bot_playtest` switches map-script debugging on in its
+throwaway add-on folder, so the script's own lines reach the game log). On every map the
+add-on logged `N Goals Loaded, 0 Goals Deferred` at each map load (our spots plus the game's
+own objective goals), no goal error, no `E`/`W` line in its log, and registered every
+trigger. Each hooked event that happened ran its function:
+
+| Example | Spots | Events the script saw | Switching seen |
+| --- | --- | --- | --- |
+| depot | 2 DEFEND (Axis), 4 SNIPE | relay planted/defused (3x); in another run destroyed at 228 s | destroyed turned both DEFEND spots off; the round then ended, so no bot was left to watch |
+| frontline | 8 DEFEND (flag and command post, per team), 4 SNIPE | the flag captured 35 times | per capture, the holder's flag spots on and the other team's off; DEFEND_fwdflag_allies_1 held in 82% of samples while on, 0% while off |
+| convoy | 4 DEFEND (orders, then delivery), 4 SNIPE | orders stolen 5x, returned 5x | the orders spots held in 70% of samples while on, 0 of 4 while off; the delivery spots were on for 2-10 s at a time, too short for a bot to cross the map |
+| workshop | 2 DEFEND (Allies, after the bridge is built), 4 SNIPE | bridge built twice | the spots were turned on; the build ends the round 1 s later |
+| movement | 2 DEFEND (Allies), no SNIPE (no long sightline) | radio planted 2x, defused once | none to see (planting switches nothing) |
+
+Spots are held because they are goals, not because bots pass by: with no goal file or script
+(`scripts=false`) the same positions were stood on in 2 and 8 of 123 samples (depot DEFEND)
+against 59 and 42 with them, and the frontline flag spots in 12/7 of 122 against 63/34; the
+SNIPE spots in 0-1 samples against 8-28. What the samples cannot show: which goal a bot was
+on, or where it aimed. SNIPE goals are for sniper rifles only, so which bots take them
+depends on the classes the add-on picks. Every generated file also compiles with the
+GameMonkey core Omni-bot 0.93 embeds (`NRC_GM_CHECK`, see `test_bot_goals.py`).

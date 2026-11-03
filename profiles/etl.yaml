@@ -4553,6 +4553,195 @@ bots:
     events: [" popup: ", " announce: ", "Objective_Destroyed: ", "\\bExit: "]
     # The add-on's start-up line in the game log, naming its version.
     version_line: "Omni-bot (\\S+) initialized"
+    # Written into the isolated add-on folder: the add-on runs scripts/et_autoexec_user.gm
+    # after et_autoexec.gm (ET_Game.cpp:145-146), and DEBUG_MAP_SCRIPTS (false in
+    # et_autoexec.gm:19) makes Util.MapDebugPrint print (global_scripts/utilities.gm:1647-1663),
+    # so the map script's own messages reach the game log during a playtest only.
+    user_script_path: et/scripts/et_autoexec_user.gm
+    user_script: "global DEBUG_MAP_SCRIPTS = true;\n"
+    # The goal file's count, from GoalManager::Load's summary (GoalManager.cpp:1059-1061),
+    # printed to the game console: "^2N Goals Loaded, M Goals Deferred. ...".
+    goals_loaded: "(\\d+) Goals Loaded, (\\d+) Goals Deferred"
+    # Errors the add-on logs while loading the goal file or running the map script: its log
+    # writes errors as "E <date> <message>" and warnings as "W ..." (a parse error is "error
+    # (N) parse error" then "Could not parse file nav/<map>.gm"; a run-time error names
+    # nav/<map>.gm(line)). A SetAvailableMapGoals name that matches no goal is a warning,
+    # "goal query for X has no results" (GoalManager.cpp:1866-1868). Unknown goal types and
+    # goals that fail to load go only to the game console (GoalManager.cpp:1028, :1059).
+    # Seen in ET: Legacy 2.86.2 with Omni-bot 0.93 on deliberately broken files.
+    script_errors: ["^E ", "^W .*has no results"]
+    goal_errors: ["Unknown Goal Type", "Goals could not load", "Map Goals Script"]
+    # Script messages: the map script's Util.MapDebugPrint lines start with this.
+    script_marker: "nrc: "
+
+  # ---- Map goals and the per-map script ------------------------------------------------
+  # Besides nav/<map>.way, the add-on runs two scripts from the same folder at every map
+  # load: nav/<map>_goals.gm, which must set the global table _MG of map goals with
+  # Version = 1 (GoalManager.cpp:857, :909-1064; MapGoalVersion = 1, GoalManager.h:11), then
+  # nav/<map>.gm, after which it calls the script's global OnMapLoad (IGame.cpp:1069-1112).
+  # Both are loaded through the same file system as the .way (IGame.cpp:1089), so they are
+  # staged and installed beside it, never packed. All 662 goal files shipped with 0.93
+  # follow this layout. Every one of them, and 1338 of the 1339 shipped .gm files, compiles
+  # with the GameMonkey core 0.93 embeds (gmscriptex, as 0.83/Omnibot/dependencies pins it).
+  goals:
+    install_path: "et/nav/{map}_goals.gm"
+    table: _MG
+    version: 1
+    # A goal is named TYPE_tag: the loader takes the type from the name up to the first "_"
+    # (GoalManager.cpp:976-980) and the tag from the rest (MapGoal.cpp:1714-1718). Generated
+    # names keep to letters, digits and "_", as the add-on's own names do (MapGoal.cpp:290-302).
+    name_chars: "[A-Za-z0-9_]"
+    # Who may use a goal: TeamAvailability holds 1 << team (MapGoal.cpp:1750, default 30 =
+    # every team). ET teams are AXIS 1, ALLIES 2 (vendor/Omnibot/ET/ET_Config.h:242-248,
+    # Common/Omni-Bot_Types.h:217-226); scripts name them TEAM.AXIS and TEAM.ALLIES
+    # (ET_Game.cpp:162-167). `side` is the spawn label of the same team (teams.sides).
+    teams:
+      axis: {side: red, bit: 2, script: TEAM.AXIS}
+      allies: {side: blue, bit: 4, script: TEAM.ALLIES}
+    # Position is the player origin (the stock files' goal heights sit 24 above the floor,
+    # like waypoints; mapgoal_camp.gm upgrades only Version 0 goals by the waypoint offset).
+    # The camp family (et/scripts/mapgoals/mapgoal_camp.gm:33-38, and defend/attack/snipe
+    # built on it, global_scripts/mapgoals/mapgoal_defend.gm, mapgoal_attack.gm,
+    # et/scripts/mapgoals/mapgoal_snipe.gm) reads AimVectors (facings), Stance
+    # (stand/crouch/prone) and Min/MaxCampTime (seconds, defaults 20/40); SNIPE is limited to
+    # sniper weapons (mapgoal_snipe.gm:7-19), MOBILEMG42 reads AimVectors and camp times
+    # (mapgoal_mobilemg42.gm:30-33), MOBILEMORTAR needs at least one MortarAim
+    # (mapgoal_mobilemortar.gm:11, :78-84). goal_camp.gm:6 is the bot goal that uses CAMP,
+    # DEFEND, ATTACK and SNIPE.
+    types:
+      DEFEND: {aim: AimVectors, stance: true, camp_time: [20, 40]}
+      ATTACK: {aim: AimVectors, stance: true, camp_time: [20, 40]}
+      CAMP: {aim: AimVectors, stance: true, camp_time: [20, 40]}
+      SNIPE: {aim: AimVectors, stance: true, camp_time: [60, 120]}
+      MOBILEMG42: {aim: AimVectors, stance: false, camp_time: [30, 60]}
+      MOBILEMORTAR: {aim: MortarAim, stance: false}
+    stances: [stand, crouch, prone]
+    comment: "written by nrc-mcp bot_waypoints_write"
+    # Both scripts are GameMonkey, the add-on's script language. A vector is written with the
+    # vec3 constructor the add-on's GameMonkey build registers (gmscriptex binds/gmVec3Stack);
+    # shipped goal files write Vec3, older ones Vector3.
+    vector: Vec3
+    vector_names: [Vec3, Vector3]
+
+  # The map script: one function per objective event, registered with OnTrigger. The game
+  # hands the add-on a trigger with a tag name (Bot_Util_SendTrigger, etbot/
+  # g_etbot_interface.cpp:6769-6779, which cuts it to TriggerBufferSize - 1 = 71 bytes,
+  # Omni-Bot_Types.h:1160); a callback runs when its name equals the tag exactly
+  # (TriggerManager.cpp:541-571, gmBotLibrary.cpp:149-171). SetAvailableMapGoals(team, on,
+  # names) switches goals per team, team 0 meaning every team (gmBotLibrary.cpp:672-703,
+  # MapGoal.cpp:332-345); a name is matched whole and case-insensitively
+  # (Utilities.cpp:51-90).
+  script:
+    install_path: "et/nav/{map}.gm"
+    trigger_bytes: 71
+    # The two places a trigger name comes from:
+    # - the game's own popups: "Planted at <track>." when dynamite is armed on an objective
+    #   and "Defused at <track>." when it is defused, <track> being the objective trigger's
+    #   track (game/g_script.c:761-773; the objective is `hit`, g_weapon.c:2112, whose parent
+    #   is its trigger_objective_info, g_trigger.c:1677-1685);
+    # - the map script's wm_announce text, sent as the trigger name (g_script_actions.c:3865).
+    #   `announce` names an event of the map's own script; its first wm_announce (following
+    #   `trigger <block> <label>` calls, as objectives.playtest.script.call says) is used, so
+    #   a map whose author edited the text still matches. An event with no wm_announce is
+    #   reported as not hooked.
+    announce: {action: wm_announce, arg: 0}
+    # The script's statements: the global table holding the event functions (stock scripts
+    # call it Map), the global function the add-on calls after running the script
+    # (IGame.cpp:1094-1101), the trigger registration and goal switch the add-on binds
+    # (gmBotLibrary.cpp:2881, :2887), and the scripts' own debug print, which prints only
+    # while map-script debugging is on (global_scripts/utilities.gm:1647-1663).
+    map_table: Map
+    on_load: OnMapLoad
+    on_trigger: OnTrigger
+    set_available: SetAvailableMapGoals
+    debug_print: Util.MapDebugPrint
+    # Per objective kind: `groups` are the spot sets made for it, each at one part of the
+    # objective (a part of objectives.kinds.<kind>.playtest.find) for some teams (`owner` is
+    # the objective's team, both teams for a neutral one; `other` the team that is not),
+    # `initially` the teams it starts on for. `events` are what the script hooks, each with
+    # the groups it switches on or off, for which teams (`all` = the group's teams).
+    kinds:
+      dynamite:
+        groups:
+          - {at: anchor, teams: [owner], initially: [owner]}
+        events:
+          - {name: planted, trigger: "Planted at {trigger.track}."}
+          - {name: defused, trigger: "Defused at {trigger.track}."}
+          - {name: destroyed, announce: {block: "{name}", event: death}, disable: [{group: anchor, teams: all}]}
+      constructible:
+        # Built, it is the builders' to keep; they defend it until it is blown up.
+        groups:
+          - {at: anchor, teams: [owner], initially: []}
+        events:
+          - {name: built, announce: {block: "{name}", event: built, params: [final]}, enable: [{group: anchor, teams: all}]}
+          - {name: planted, trigger: "Planted at {trigger.track}."}
+          - {name: defused, trigger: "Defused at {trigger.track}."}
+          - {name: destroyed, announce: {block: "{name}", event: death}, disable: [{group: anchor, teams: all}]}
+      command_post:
+        groups:
+          - {at: anchor, teams: [owner], initially: []}
+        events:
+          - {name: axis_built, announce: {block: "{name}_axis", event: built, params: [final]}, enable: [{group: anchor, teams: [axis]}]}
+          - {name: axis_destroyed, announce: {block: "{name}_axis", event: death}, disable: [{group: anchor, teams: [axis]}]}
+          - {name: allies_built, announce: {block: "{name}_allies", event: built, params: [final]}, enable: [{group: anchor, teams: [allies]}]}
+          - {name: allies_destroyed, announce: {block: "{name}_allies", event: death}, disable: [{group: anchor, teams: [allies]}]}
+      checkpoint:
+        # Whoever holds the flag defends it.
+        groups:
+          - {at: anchor, teams: [axis, allies], initially: [owner]}
+        events:
+          - {name: axis_capture, announce: {block: "{name}", event: trigger, params: [axis_capture]},
+             enable: [{group: anchor, teams: [axis]}], disable: [{group: anchor, teams: [allies]}]}
+          - {name: allies_capture, announce: {block: "{name}", event: trigger, params: [allied_capture]},
+             enable: [{group: anchor, teams: [allies]}], disable: [{group: anchor, teams: [axis]}]}
+      checkpoint_one_way:
+        groups:
+          - {at: anchor, teams: [axis, allies], initially: [owner]}
+        events:
+          - {name: axis_capture, announce: {block: "{name}", event: trigger, params: [axis_capture]},
+             enable: [{group: anchor, teams: [axis]}], disable: [{group: anchor, teams: [allies]}]}
+          - {name: allies_capture, announce: {block: "{name}", event: trigger, params: [allied_capture]},
+             enable: [{group: anchor, teams: [allies]}], disable: [{group: anchor, teams: [axis]}]}
+      steal:
+        # The owners guard the item; once it is stolen, the place it is delivered to.
+        groups:
+          - {at: anchor, teams: [owner], initially: [owner]}
+          - {at: trigger, teams: [owner], initially: []}
+        events:
+          - {name: stolen, announce: {block: "{name}", event: trigger, params: [stolen]},
+             enable: [{group: trigger, teams: all}], disable: [{group: anchor, teams: all}]}
+          - {name: returned, announce: {block: "{name}", event: trigger, params: [returned]},
+             enable: [{group: anchor, teams: all}], disable: [{group: trigger, teams: all}]}
+          - {name: delivered, announce: {block: "{name}_deliver", event: death},
+             disable: [{group: anchor, teams: all}, {group: trigger, teams: all}]}
+      escort:
+        # A vehicle moves along its whole path, so no fixed spot guards it: the script only
+        # hooks its arrival (logged when map-script debugging is on).
+        groups: []
+        events:
+          - {name: arrived, announce: {block: "{name}", event: trigger, params: [arrived]}}
+
+  # How spots are chosen from the geometry. These are this server's heuristics, not the
+  # add-on's rules: every spot sits on a seeded standing waypoint its team reaches from its
+  # spawns, and its facing points at what it was chosen to watch.
+  # - defend: per group and team, waypoints min..max_distance from the guarded part with a
+  #   clear eye-height line to where the attackers use the objective (the waypoint nearest it
+  #   that their spawns reach); ranked by how many waypoints of the attackers' shortest
+  #   routes within approach_radius of it they see. Faces the mean of those it sees.
+  # - snipe: per team, waypoints with no enemy route waypoint within standoff, ranked by how
+  #   many enemy route waypoints they see between min_sight and max_sight (at least
+  #   min_points). Enemy routes run from the enemy's spawns to every guarded part.
+  # Chosen spots of a kind keep `separation` apart.
+  spots:
+    confidence: unverified
+    source: heuristic
+    defend: {type: DEFEND, per_group: 2, min_distance: 96, max_distance: 768, approach_radius: 1536}
+    snipe: {type: SNIPE, per_team: 2, min_sight: 768, max_sight: 4096, min_points: 3, standoff: 384}
+    separation: 192
+    # Bounds on the line-of-sight work per map: candidates and route points beyond these are
+    # thinned evenly.
+    max_candidates: 400
+    max_route_points: 160
 
 # ---------------------------------------------------------------------------
 # engine_limits — what decides whether the map LOADS, as opposed to compiles

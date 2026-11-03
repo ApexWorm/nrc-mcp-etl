@@ -82,6 +82,165 @@ def movement(samples: list[dict], waypoints: list[botnav.Waypoint], reach: float
     return rows
 
 
+_LOG_TIME = re.compile(r"^\s*(\d+)\s")
+_COLOR = re.compile(r"\^[0-9A-Za-z*]")
+
+
+def _log_time(line: str) -> int | None:
+    m = _LOG_TIME.match(line)
+    return int(m.group(1)) if m else None
+
+
+def occupancy(
+    text: str, token: str, spots: dict[str, dict], reach: float, height: float
+) -> dict[str, list[int]]:
+    """Per spot, the game-log times (ms) at which a living bot of a team the spot is for
+    stood within `reach` of it (horizontally, and within `height` vertically)."""
+    pattern = re.compile(rf"NRC_BOTS {re.escape(token)} (\{{.*\}})\s*$")
+    out: dict[str, list[int]] = {name: [] for name in spots}
+    for line in text.splitlines():
+        m = pattern.search(line)
+        t = _log_time(line)
+        if not m or t is None:
+            continue
+        try:
+            packet = json.loads(m.group(1))
+        except ValueError:
+            continue
+        for bot in packet.get("bots") or []:
+            if bot.get("dead"):
+                continue
+            x, y, z = bot["position"]
+            for name, spot in spots.items():
+                if bot.get("team") not in spot["sides"]:
+                    continue
+                sx, sy, sz = spot["position"]
+                near = math.hypot(x - sx, y - sy) <= reach and abs(z - sz) <= height
+                if near and (not out[name] or out[name][-1] != t):
+                    out[name].append(t)
+    return out
+
+
+def _intervals(times: list[int], gap: int) -> list[list[float]]:
+    """Times (ms) merged into [first, last] seconds runs, a run breaking at a gap over `gap` ms (a missed sample)."""
+    runs: list[list[int]] = []
+    for t in times:
+        if runs and t - runs[-1][1] <= gap:
+            runs[-1][1] = t
+        else:
+            runs.append([t, t])
+    return [[round(a / 1000, 1), round(b / 1000, 1)] for a, b in runs]
+
+
+def script_report(
+    spec: dict,
+    files: list[Path],
+    mapname: str,
+    text: str,
+    addon_text: str,
+    token: str,
+    interval_ms: int,
+) -> dict[str, Any] | None:
+    """What the add-on made of the map goals and the map script given among `files`: goal
+    counts and errors, script errors, the script's own messages with the goals each switched,
+    and per goal spot when a bot of its team stood on it."""
+    from . import botgoals
+
+    play = spec.get("playtest") or {}
+    goals_spec = spec.get("goals") or {}
+    script_spec = spec.get("script") or {}
+    by_name = {f.name: f for f in files}
+    goals_file = by_name.get(Path(str(goals_spec.get("install_path", ""))).name.format(map=mapname))
+    script_file = by_name.get(
+        Path(str(script_spec.get("install_path", ""))).name.format(map=mapname)
+    )
+    if goals_file is None and script_file is None:
+        return None
+    lines = text.splitlines()
+    loaded_rx = re.compile(str(play.get("goals_loaded") or "$^"))
+    goals_loaded = [
+        {"loaded": int(m.group(1)), "deferred": int(m.group(2))}
+        for m in (loaded_rx.search(_COLOR.sub("", line)) for line in lines)
+        if m
+    ]
+    goal_errors = [
+        _COLOR.sub("", line).strip()
+        for line in lines
+        if any(re.search(str(p), line) for p in play.get("goal_errors") or [])
+    ]
+    script_errors = [
+        line.strip()
+        for line in addon_text.splitlines()
+        if any(re.search(str(p), line) for p in play.get("script_errors") or [])
+    ]
+    marker = str(play.get("script_marker") or "")
+    messages = []
+    for line in lines:
+        clean = _COLOR.sub("", line)
+        if marker and marker in clean and "NRC_BOTS" not in clean:
+            messages.append((_log_time(line), clean[clean.index(marker) :].strip()))
+    spots: dict[str, dict] = {}
+    if goals_file is not None:
+        table = botgoals.read_goals(goals_file.read_text(), goals_spec)
+        table.pop("Version", None)
+        sides = {int(v["bit"]): str(v["side"]) for v in (goals_spec.get("teams") or {}).values()}
+        for name, row in table.items():
+            if isinstance(row, dict) and isinstance(row.get("Position"), tuple):
+                bits = int(row.get("TeamAvailability", 30))
+                spots[name] = {
+                    "position": row["Position"],
+                    "sides": [side for bit, side in sides.items() if bits & bit],
+                }
+    functions: dict = {}
+    triggers: list = []
+    if script_file is not None:
+        parsed = botgoals.read_script(script_file.read_text(), script_spec)
+        functions, triggers = parsed["functions"], parsed["triggers"]
+    switched = []
+    for t, msg in messages:
+        for f in functions.values():
+            if msg in f["messages"]:
+                switched.append(
+                    {
+                        "time": round(t / 1000, 1) if t is not None else None,
+                        "message": msg,
+                        "enabled": sorted(
+                            n for _team, on, names in f["switches"] if on for n in names
+                        ),
+                        "disabled": sorted(
+                            n for _team, on, names in f["switches"] if not on for n in names
+                        ),
+                    }
+                )
+                break
+        else:
+            switched.append({"time": round(t / 1000, 1) if t is not None else None, "message": msg})
+    reach = float(spec["format"]["default_radius"]) * 2
+    occupied = occupancy(text, token, spots, reach, float(spec.get("floor_offset", 24)) * 2)
+    rows = []
+    for name, spot in sorted(spots.items()):
+        times = occupied[name]
+        rows.append(
+            {
+                "name": name,
+                "teams": spot["sides"],
+                "samples": len(times),
+                "occupied": _intervals(times, int(interval_ms) * 3 // 2),
+            }
+        )
+    return {
+        "goals_file": str(goals_file) if goals_file else None,
+        "script_file": str(script_file) if script_file else None,
+        "goals_loaded": goals_loaded,
+        "goal_errors": goal_errors,
+        "script_errors": script_errors,
+        "triggers_registered": len(triggers),
+        "script_messages": switched,
+        "spots": rows,
+        "spot_reach": reach,
+    }
+
+
 def run(
     pk3: str | Path,
     profile_id: str,
@@ -139,6 +298,10 @@ def run(
         config = addon / str(spec["config_path"])
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(str(spec.get("config") or ""))
+        if play.get("user_script_path"):
+            user = addon / str(play["user_script_path"])
+            user.parent.mkdir(parents=True, exist_ok=True)
+            user.write_text(str(play.get("user_script") or ""))
 
         home = root / "home"
         gamedir = home / str(pkg.get("basegame") or eng.get("gamedir") or "")
@@ -204,8 +367,18 @@ def run(
         moves = movement(samples, waypoints, reach)
         log_check = engine.read_log(text, eng, mapname)
         moved = [m for m in moves if m["travelled"] > 0 and m["waypoints_passed"] > 1]
+        scripts = script_report(spec, files, mapname, text, addon_text, token, interval_ms)
+        scripts_ok = scripts is None or (
+            bool(scripts["goals_loaded"])
+            and not scripts["goal_errors"]
+            and not scripts["script_errors"]
+        )
         report = {
-            "ok": bool(loads) and not errors and not log_check["fatal"] and bool(moved),
+            "ok": bool(loads)
+            and not errors
+            and not log_check["fatal"]
+            and bool(moved)
+            and scripts_ok,
             "map": mapname,
             "package": str(pk3),
             "addon": version[0] if version else None,
@@ -222,13 +395,17 @@ def run(
             "samples": len(samples),
             "bots": moves,
             "events": events,
+            **({"scripts": scripts} if scripts is not None else {}),
             "waypoint_reach": reach,
             "home": str(root) if keep else None,
             "note": (
                 "bots_moving counts bots that travelled and passed within waypoint_reach of more "
                 "than one waypoint. Events are the game's own objective messages. This is a "
                 "bot run, not a balance verdict: bot skill, classes and the add-on's goal "
-                "choices decide what they attempt."
+                "choices decide what they attempt. scripts.spots[].occupied are the runs of "
+                "seconds a bot of the spot's team stood within spot_reach of it (sampled); "
+                "scripts.script_messages are the map script's own lines, with the goals each "
+                "switched."
             ),
         }
         if keep:
