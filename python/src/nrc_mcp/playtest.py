@@ -33,7 +33,7 @@ OPERATORS = ("eq", "ne", "gt", "gte", "lt", "lte", "near", "angle_near")
 ACTIONS = {
     "join": ({"team", "role"}, set()),
     "position": ({"origin"}, {"angles"}),
-    "aim": ({"angles"}, set()),
+    "aim": (set(), {"angles", "at"}),
     "weapon": ({"name"}, set()),
     "hold": ({"controls"}, {"until", "seconds"}),
     "wait": ({"until"}, set()),
@@ -54,6 +54,58 @@ def _vector(value: Any, name: str) -> list[float]:
     if not isinstance(value, list) or len(value) != 3:
         raise PlaytestError(f"{name} must have three finite numbers")
     return [_number(v, name, -1_000_000, 1_000_000) for v in value]
+
+
+def _target(at: Any, adapter: dict, watch: list) -> None:
+    """An `aim` target: a fixed point, or a three-component field of an observation."""
+    if isinstance(at, list):
+        _vector(at, "aim at")
+        return
+    if not isinstance(at, dict) or set(at) - {"scope", "field", "name", "offset"}:
+        raise PlaytestError(
+            "aim at is [x, y, z] or {scope, field, optional name and offset} naming a vector field"
+        )
+    scope, field = at.get("scope"), at.get("field")
+    fields = adapter["fields"].get(scope) if isinstance(scope, str) else None
+    if (
+        not isinstance(field, str)
+        or not fields
+        or any(f"{field}.{i}" not in fields for i in range(3))
+    ):
+        raise PlaytestError("aim at must name a vector field (field.0..2) the profile declares")
+    if scope == "entity" and at.get("name") not in watch:
+        raise PlaytestError("aim at an entity needs a name included in watch")
+    if scope != "entity" and "name" in at:
+        raise PlaytestError("name is only valid for an entity")
+    if "offset" in at:
+        _vector(at["offset"], "aim at offset")
+    if not adapter.get("eye_height"):
+        raise PlaytestError("the profile names no eye height field, so aim cannot look at a point")
+
+
+def _look(snapshot: dict, at: Any, adapter: dict) -> list[float]:
+    """Angles (pitch, yaw, roll) from the player's eye to `at` in this observation."""
+    player = snapshot.get("player", {})
+    position, height = player.get("position"), player.get(adapter["eye_height"])
+    if not isinstance(position, list) or not isinstance(height, (int, float)):
+        raise PlaytestError("the observation has no player position and eye height to aim from")
+    if isinstance(at, list):
+        point = list(at)
+    else:
+        row = (
+            snapshot.get("entities", {}).get(at["name"], {})
+            if at["scope"] == "entity"
+            else snapshot.get(at["scope"], {})
+        )
+        point = row.get(at["field"]) if isinstance(row, dict) else None
+        if not isinstance(point, list) or len(point) != 3:
+            raise PlaytestError(f"the observation has no {at['scope']} {at['field']} to aim at")
+        point = [p + o for p, o in zip(point, at.get("offset", [0, 0, 0]), strict=True)]
+    eye = [position[0], position[1], position[2] + height]
+    dx, dy, dz = (point[i] - eye[i] for i in range(3))
+    # Positive pitch looks down.
+    pitch = -math.degrees(math.atan2(dz, math.hypot(dx, dy)))
+    return [round(pitch, 2), round(math.degrees(math.atan2(dy, dx)), 2), 0.0]
 
 
 def spec(profile_id: str) -> dict:
@@ -108,6 +160,9 @@ def describe(profile_id: str) -> dict:
         "notes": [
             "join waits for a living player of the requested team and role",
             "position and aim wait for a living stationary player, and are recorded separately from gameplay",
+            "aim takes angles, or `at`: a point [x, y, z] or a vector field of the latest observation "
+            '({"scope": "game", "field": "charge_position"}, or an entity\'s "position" with its name), '
+            "optionally with an offset; it looks there from the player's eye",
             "hold has either until or seconds; held controls release on success and failure",
             "wait observes a condition until timeout; assert checks one fresh acknowledged snapshot",
             "screenshots and all failed runs are retained; arbitrary console commands are not accepted",
@@ -162,6 +217,11 @@ def validate(scenario: dict, adapter: dict) -> dict:
             if "origin" in step:
                 _vector(step["origin"], "origin")
             _vector(step.get("angles", [0, 0, 0]), "angles (pitch, yaw, roll)")
+        if action == "aim":
+            if ("angles" in step) == ("at" in step):
+                raise PlaytestError("aim takes exactly one of angles or at")
+            if "at" in step:
+                _target(step["at"], adapter, watch)
         if action == "weapon" and (
             not isinstance(step["name"], str) or step["name"] not in adapter["weapons"]
         ):
@@ -424,7 +484,9 @@ def _step(driver: Driver, step: dict, adapter: dict, home: Path, index: int) -> 
             timeout,
         )
         position = step.get("origin", snapshot["player"]["position"])
-        angles = step.get("angles", [0, 0, 0])
+        angles = (
+            _look(snapshot, step["at"], adapter) if "at" in step else step.get("angles", [0, 0, 0])
+        )
         driver.send(
             [
                 adapter["commands"]["position"].format(

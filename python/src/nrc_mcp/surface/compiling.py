@@ -48,8 +48,11 @@ def engine_playtest(
     one fresh observation, e.g. {"scope":"player","field":"alive","value":true}.
     Joins wait for a living player; holds release on success, timeout and failure.
 
-    `position` and `aim` are explicit test setup. Other actions use ordinary controls;
-    the profile observer reads state without changing entities or executing scripts.
+    `position` and `aim` are explicit test setup; `aim` takes angles, or `at` a point or a
+    vector field of the latest observation (e.g. where a dynamite charge landed). Other
+    actions use ordinary controls; the profile observer reads state without changing
+    entities or executing scripts. `objective_playtests` writes scenarios for a map's
+    objectives.
     Steps have bounded timeouts, with an overall limit of 600 seconds. An isolated game
     home, commands, observations, screenshots and result.json are retained even on failure.
     This tests a single client, not multiplayer balance. Requires a supported profile,

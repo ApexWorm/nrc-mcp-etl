@@ -17,6 +17,7 @@ from .. import analysis as anamod
 from .. import balance as balancemod
 from .. import detail as detailmod
 from .. import mapscript, profiles
+from .. import objective_tests as testsmod
 from .. import playspace as playspacemod
 from .. import routes as routesmod
 from .. import spawns as spawnsmod
@@ -727,3 +728,58 @@ def playable_space_diff(
         return playspacemod.diff(before, later, cell=cell, profile_id=profile_id)
     except (anamod.AnalysisError, playspacemod.PlayspaceError) as e:
         raise ToolError(str(e)) from e
+
+
+@tool("gameplay", "Generate engine playtests for the objectives")
+def objective_playtests(
+    objective: str | None = None, cell: float = 16, profile_id: str | None = None
+) -> dict:
+    """Write an `engine_playtest` scenario that plays every objective in the open map.
+
+    Objectives are recognised from the map's entities and script, not from how they were
+    made: each kind in the profile's `objectives:` (`nrc://profile/{id}`) carries a
+    `playtest:` template that says how to find one, which team and class play it, what they
+    do, and which observation proves it worked. For ET: Legacy: dynamite is planted, armed and
+    destroys the objective; a constructible or command post is built with pliers; a checkpoint
+    is captured and retaken, proved by where the attackers respawn; an escort vehicle is
+    followed to the end of its path and checked to stop without its escort; a stolen item is
+    picked up and delivered. When the objective's script events lead to a round end, the test
+    also waits for intermission and the winner its script sets.
+
+    Every standing position is floor the player box rests on with headroom, on the walkable
+    grid, inside the right volume and clear of the objective's brushes, and joined to one of
+    the team's spawns by a walkable route (`standing[].route`). `cell` is that grid's size.
+
+    `runs` are what to pass to `engine_playtest`: `scenario` and `timeout_seconds` each. A test
+    that ends the round closes its run, so a map with two winning objectives needs two runs.
+    `tests` lists each objective's test on its own, with what it `proves`; `skipped` lists the
+    objectives (and objective entities) no test could be made for, and why. `objective` limits
+    this to one objective, by name. Nothing is changed or launched; pack the map first.
+    """
+    pid = _require_profile(profile_id)
+    SESSION.require()
+    data = profiles.load(pid)
+    if not (data.get("objectives") or {}).get("playtest"):
+        raise ToolError(f"profile {pid} has no objective playtest templates")
+    spec = data.get("mapscript") or {}
+    text = ""
+    if SESSION.path is not None and spec:
+        raw = SESSION.read_file(mapscript.script_path(spec, SESSION.path))
+        text = (raw or b"").decode("utf-8", errors="replace")
+    try:
+        grid = _session_grid(cell, pid)
+        report = testsmod.generate(pid, grid, text, only=objective)
+    except (OSError, MemoryError, anamod.AnalysisError) as e:
+        raise ToolError(str(e)) from e
+    except (profiles.ProfileError, testsmod.playtestmod.PlaytestError) as e:
+        raise ToolError(str(e)) from e
+    if objective is not None and not report["tests"] and not report["skipped"]:
+        raise ToolError(f"no objective named {objective!r} is recognised in this map")
+    report["revision"] = SESSION.receipt()
+    report["next"] = (
+        "engine_playtest(pk3=<the packed map>, scenario=runs[i].scenario, "
+        "timeout_seconds=runs[i].timeout_seconds) for each run; pack after map_save"
+        if report["runs"]
+        else "nothing to run"
+    )
+    return report

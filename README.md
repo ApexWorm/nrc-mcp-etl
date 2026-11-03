@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **76 tools, 7 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **77 tools, 7 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -208,6 +208,18 @@ the MCP response includes the receipt and up to three screenshot images. Positio
 is explicitly recorded. This uses a single local client with POSIX console input and Lua
 telemetry; it does not measure multiplayer balance.
 
+`objective_playtests` writes those scenarios for you from the open map's objectives, whoever
+placed them: it recognises each objective by the links and flags its kind's profile template
+names, picks standing positions on floor the player box rests on and a walkable route reaches
+from the team's spawns, and returns `runs` to pass to `engine_playtest` (a test whose script
+ends the round closes its run) plus `skipped` objectives with the reason. For ET: Legacy,
+dynamite is planted, aimed at and armed until the explosive is gone; constructibles and
+command posts are built; a checkpoint is captured and retaken, proved by where the attackers
+respawn; an escort vehicle is followed point by point, checked to stop without its escort,
+and seen to the end of its path; a stolen item is picked up and delivered; and where the
+script ends the round, the test waits for intermission and the winner it sets.
+`mise run bench:dogfood -- objectives <example>` generates and runs them for an example map.
+
 ## Connect an MCP client
 
 The server speaks JSON-RPC on stdio.
@@ -257,8 +269,8 @@ and the server lists only that subset:
 | --- | --- | --- | --- |
 | `build` | blocking out and wiring a map: solids, patches, entities, objectives, script, textures, renders | 32 | ~31 KB |
 | `analyse` | measuring how it plays: routes, balance, spawns, movement, sightlines, lighting, playable space | 25 | ~28 KB |
-| `ship` | compiling, packing, release files, ship check and `engine_playtest` | 25 | ~23 KB |
-| `level` | all three, start to finish | 55 | ~57 KB |
+| `ship` | compiling, packing, release files, ship check, `objective_playtests` and `engine_playtest` | 26 | ~23 KB |
+| `level` | all three, start to finish | 56 | ~57 KB |
 
 Each preset also carries the core every session uses: `map_open`/`map_new`/`map_save`,
 checkpoints, `map_stats`, `query_entities`, `validate`, `validate_profile` and
@@ -441,7 +453,7 @@ receipt. Gameplay reports use the same in-memory revision even before saving.
 
 ## Tool reference
 
-76 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+77 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -533,6 +545,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `spawn_cluster` | Place N team spawns in an area at positions checked for floor, headroom and support with the full player box, facing a yaw, plus the region marker; classnames, flags and script names from the profile's `spawn_cluster` recipe. `group` names them for a script (`alertentity`) to toggle. |
 | `lighting_report` | Lights, ambient and minimum light as q3map2 reads them; warns on a map that would compile black, notes walkable areas far from any light. |
 | `playable_space_diff` | What an edit did to the space a player can stand in. |
+| `objective_playtests` | An `engine_playtest` scenario for every objective in the open map, recognised from its entities and script: who plays it, where they stand (reachable floor), what they do and what proves it; plus the objectives it could not test and why. Templates are the profile's (`objectives.kinds.*.playtest`). |
 
 `route_report` and `route_render` accept either coordinates (`start`, `end`) or entity
 indices (`start_entity`, `end_entity`). Mixed routes start/end standing by default and

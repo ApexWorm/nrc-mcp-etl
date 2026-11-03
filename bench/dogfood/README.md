@@ -74,6 +74,22 @@ the package `convoy` printed). The scenarios live in
 at a path point, catches up, follows it round the curved segment and sees `arrived` win the
 round. `convoy_steal` walks onto the orders (their `stolen` event hides a lamp the observer
 watches) and carries them into the delivery volume, whose `death` event wins the round.
+`objectives` generates the playtest from a built example's objectives instead of a
+hand-written file (`objective_playtests`), runs every resulting scenario with
+`engine_playtest`, and reports per objective whether a test was generated, ran and passed:
+
+```sh
+mise run bench:dogfood -- objectives depot      # also workshop, frontline, frontline_one_way, convoy
+```
+
+It uses the newest build of that example under `out/dogfood/` (or `--map` and `--pk3`). The
+generated tests check what the hand-written ones check about each objective, and more: the
+depot's charge is aimed at where it landed rather than at fixed angles, the one-way flag
+asserts that the holders' touch changed nothing, the escort is followed past every path point
+and checked to stop, and the frontline and convoy runs also build the command post and steal
+the orders. They do not check things that are not objectives (the frontline's team door) or a
+map's own script effects (the convoy's lamp); the stolen orders are proved by the carried item.
+
 The older direct-engine probe below remains useful for reproducing the original experiments.
 
 The optional engine probe uses an isolated game home and records screenshots, engine logs

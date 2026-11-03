@@ -113,6 +113,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
         "objdata_write",
         "commandmap_make",
         "levelshot_make",
+        "objective_playtests",
         "engine_playtest",
     ),
 }
