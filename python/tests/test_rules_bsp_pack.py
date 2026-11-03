@@ -80,6 +80,22 @@ def test_applies_when_keeps_a_rule_silent_on_maps_that_do_not_use_it(monkeypatch
     assert len(run(rule, [ent(0, "site")], monkeypatch)) == 1
 
 
+@pytest.mark.parametrize("absent", ["fallback", ["fallback", "alternate"]])
+def test_applies_when_absent_skips_if_any_declared_fallback_exists(monkeypatch, absent):
+    rule = {
+        "id": "R",
+        "check": "count_min",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "missing camera",
+        "applies_when": {"classname_absent": absent},
+        "params": {"classname": "camera", "count": 1},
+    }
+    assert len(run(rule, [ent(0, "other")], monkeypatch)) == 1
+    for name in absent if isinstance(absent, list) else [absent]:
+        assert run(rule, [ent(0, name)], monkeypatch) == []
+
+
 def test_distinct_group_per_team_is_the_corrected_survivor_rule(monkeypatch):
     rule = {
         "id": "R",
@@ -379,6 +395,44 @@ def test_the_etl_profile_refuses_a_map_a_spectator_cannot_join():
     assert codes(team_spawns)["ETL_SPECTATOR_POINT_REQUIRED"] == "error"
     for fallback in ("info_player_intermission", "info_player_deathmatch", "info_player_start"):
         assert "ETL_SPECTATOR_POINT_REQUIRED" not in codes([*team_spawns, ent(3, fallback)])
+
+
+@pytest.mark.parametrize(
+    ("flags", "missing"),
+    [
+        ([None], {"AXIS", "ALLIES"}),
+        (["0"], {"AXIS", "ALLIES"}),
+        (["1"], {"ALLIES"}),
+        (["2"], {"AXIS"}),
+        (["0", "1"], {"ALLIES"}),
+        (["1", "2"], set()),
+        (["3"], set()),
+        (["7"], set()),
+    ],
+)
+def test_etl_round_end_needs_a_camera_for_each_winner(flags, missing):
+    """A neutral camera joins fine but crashed a real workshop run on wm_endround."""
+    cameras = [
+        ent(i, "info_player_intermission", **({"SpawnFlags": flag} if flag is not None else {}))
+        for i, flag in enumerate(flags)
+    ]
+    findings = [f for f in rules.evaluate("etl", cameras) if f.code.startswith("ETL_INTERMISSION_")]
+    assert {f.code for f in findings} == {
+        f"ETL_INTERMISSION_{team}_POINT_REQUIRED" for team in missing
+    }
+    assert all(f.severity == "error" and f.confidence == "verified" for f in findings)
+    assert all("if " in f.message and "Couldn't find a spawn point" in f.message for f in findings)
+
+
+@pytest.mark.parametrize("fallback", ["info_player_deathmatch", "info_player_start"])
+@pytest.mark.parametrize("neutral_camera", [False, True])
+def test_etl_round_end_accepts_engine_fallback_spawns(fallback, neutral_camera):
+    entities = [ent(0, fallback)]
+    if neutral_camera:
+        entities.append(ent(1, "info_player_intermission"))
+    findings = rules.evaluate("etl", entities)
+    assert not any(f.code.startswith("ETL_INTERMISSION_") for f in findings)
+    assert not any(f.code == "ETL_SPECTATOR_POINT_REQUIRED" for f in findings)
 
 
 def test_the_etl_profile_errors_only_on_the_script_multiplayer_count_the_engine_stops_on():
@@ -916,6 +970,57 @@ def test_pack_pk3_drops_what_the_base_game_ships_and_says_so(packer):
     contents = names(r["packages"][0])
     assert "textures/mine/door.tga" in contents
     assert "maps/nrcroom.bsp" in contents, "the map's own BSP always ships"
+
+
+def test_pack_pk3_preserves_modified_asset_at_base_game_path(packer):
+    with zipfile.ZipFile(packer["install"] / "basedir" / "pak0.pk3", "w") as z:
+        z.writestr("textures/base/wall.TGA", b"original base texture")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+    with zipfile.ZipFile(r["packages"][0]) as z:
+        assert z.read("textures/base/wall.tga") == b"x", "the map's override must survive"
+
+
+@pytest.mark.parametrize("effective", [b"x", b"newer base texture"])
+def test_pack_pk3_compares_with_later_archive_not_shadowed_copy(packer, effective):
+    # Uppercase Z still sorts after lowercase pak0 in the engine's case-insensitive order.
+    with zipfile.ZipFile(packer["install"] / "basedir" / "Z_patch.pk3", "w") as z:
+        z.writestr("TEXTURES/BASE/WALL.tga", effective)
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == (["textures/base/wall.tga"] if effective == b"x" else [])
+    assert ("textures/base/wall.tga" in names(r["packages"][0])) == (effective != b"x")
+
+
+def test_pack_pk3_keeps_assets_when_base_archive_is_unreadable(packer):
+    (packer["install"] / "basedir" / "z_broken.pk3").write_bytes(b"not a zip")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+    assert "textures/base/wall.tga" in names(r["packages"][0])
+
+
+def test_pack_pk3_keeps_assets_with_ambiguous_case_colliding_archives(packer):
+    with zipfile.ZipFile(packer["install"] / "basedir" / "PAK0.pk3", "w") as z:
+        z.writestr("textures/base/wall.tga", b"x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+
+
+def test_pack_pk3_keeps_assets_with_ambiguous_members(packer):
+    with zipfile.ZipFile(packer["install"] / "basedir" / "z_patch.pk3", "w") as z:
+        z.writestr("textures/base/wall.tga", b"x")
+        z.writestr("TEXTURES/BASE/WALL.TGA", b"x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+
+
+def test_fix_up_never_treats_its_input_or_previous_output_as_base_game(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    produced = make_pk3(base / "z_packed.pk3", ["textures/mine/wall.tga"])
+    dest = make_pk3(base / "z_previous.pk3", ["textures/mine/wall.tga"])
+    _, dropped = pack._fix_up(produced, dest, tmp_path / "maps" / "m.bsp", {}, base)
+    assert dropped == []
+    assert names(dest) == ["textures/mine/wall.tga"]
 
 
 def test_pack_pk3_keeps_base_game_files_when_no_base_path_is_set(packer, monkeypatch):

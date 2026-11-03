@@ -29,6 +29,7 @@
 pub mod camera;
 pub mod canvas;
 pub mod font;
+pub mod route;
 pub mod scene;
 
 use camera::{clip_near, Camera, OrthoAxis};
@@ -45,12 +46,13 @@ pub const MAX_DIMENSION: u32 = 4096;
 pub enum RenderError {
     /// Requested size is outside [`MIN_DIMENSION`]..=[`MAX_DIMENSION`].
     BadSize(String),
+    BadRoute(String),
 }
 
 impl std::fmt::Display for RenderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RenderError::BadSize(m) => f.write_str(m),
+            RenderError::BadSize(m) | RenderError::BadRoute(m) => f.write_str(m),
         }
     }
 }
@@ -157,6 +159,8 @@ pub struct RenderOptions {
     /// Skip faces lying wholly above this height: a top-down view of a sealed map otherwise
     /// shows its roof. A command map is drawn with the roof cut away.
     pub cut_above: Option<f64>,
+    /// Top-down route witness, drawn over geometry without depth occlusion.
+    pub route: Option<route::RouteOverlay>,
 }
 
 impl Default for RenderOptions {
@@ -176,6 +180,7 @@ impl Default for RenderOptions {
             padding: 26.0,
             tga: false,
             cut_above: None,
+            route: None,
         }
     }
 }
@@ -340,6 +345,14 @@ fn build_camera_framed(
 /// Render one view.
 pub fn render(map: &Map, opts: &RenderOptions) -> Result<RenderResult, RenderError> {
     check_size(opts.width, opts.height)?;
+    if let Some(route) = &opts.route {
+        if !matches!(opts.view, View::Ortho(OrthoAxis::Top)) {
+            return Err(RenderError::BadRoute(
+                "route overlays require a top-down view".into(),
+            ));
+        }
+        route.validate().map_err(RenderError::BadRoute)?;
+    }
 
     let sc = scene::build(map, &opts.scene);
     let cam = build_camera_framed(
@@ -375,6 +388,10 @@ pub fn render(map: &Map, opts: &RenderOptions) -> Result<RenderResult, RenderErr
 
     if opts.annotate {
         annotate(&mut canvas, &cam, opts);
+    }
+
+    if let Some(route) = &opts.route {
+        route::draw(&mut canvas, &cam, route);
     }
 
     Ok(RenderResult {
@@ -628,6 +645,14 @@ fn annotations_for(sc: &scene::Scene, cam: &Camera, opts: &RenderOptions) -> Ann
         units_per_pixel: cam.pixels_per_unit().map(|p| 1.0 / p),
         ..Default::default()
     };
+
+    if let Some(route) = &opts.route {
+        a.notes.push(format!(
+            "route overlay: {} points, {} stance changes; colours show stance, S/E mark endpoints; drawn over geometry without depth occlusion",
+            route.segments.iter().map(|s| s.points.len()).sum::<usize>(),
+            route.transitions.len()
+        ));
+    }
 
     if !sc.bounds.is_empty() {
         a.bounds_min = Some(sc.bounds.min.to_array());

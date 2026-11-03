@@ -27,6 +27,7 @@ have failed correct maps (`nrc://corrections`).
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -89,6 +90,14 @@ def resource_conventions() -> str:
     return p.read_text() if p.is_file() else "docs/conventions.md is missing"
 
 
+@mcp.resource("nrc://playtest/{profile_id}", mime_type="application/json")
+def resource_playtest(profile_id: str) -> str:
+    """Supported playtest actions, state conditions and examples for a game profile."""
+    from . import playtest
+
+    return json.dumps(playtest.describe(profile_id), indent=2)
+
+
 @mcp.resource("nrc://corrections")
 def resource_corrections() -> str:
     """Design claims that turned out to be wrong when verified against real sources.
@@ -127,7 +136,9 @@ Work in this order, and do not skip the decision step.
    needs collision, then `render_camera` to look at it.
 5. `validate`, then `compile_map` with the draft preset, then `map_save`.
 
-Patches cannot be authored here. If the feature needs one, say so and stop.
+For a cylinder, arch or bevel, use `patch_commit`; check shader collision in game, or add
+simple clip geometry. Patches do not seal the map and are omitted from the analysis grid.
+Other patch shapes still require the editor.
 """
 
 
@@ -216,6 +227,8 @@ TOOL_NAMES = (
     "map_new",
     "map_stats",
     "map_save",
+    "map_checkpoint",
+    "map_restore",
     "query_entities",
     "entity_place",
     "entity_set_keys",
@@ -264,6 +277,8 @@ TOOL_NAMES = (
     "compile_ab",
     "ab_history",
     "navgrid_stats",
+    "route_report",
+    "route_render",
     "balance_report",
     "sightline_report",
     "movement_check",
@@ -278,6 +293,7 @@ TOOL_NAMES = (
     "task_list",
     "task_run",
     "compile_map",
+    "engine_playtest",
     "profile_summary",
 )
 
@@ -316,6 +332,7 @@ def describe_surface() -> str:
         "RESOURCES",
         "  nrc://tasks                the live mise task list",
         "  nrc://profile/{id}         a game profile as YAML",
+        "  nrc://playtest/{id}        playtest actions, state conditions and examples",
         "  nrc://conventions          design tiers, caulk, authoring order, what is not built",
         "  nrc://corrections          verified corrections to the design document",
         "  nrc://solid-ir             the Solid IR operator reference",
@@ -330,8 +347,8 @@ def describe_surface() -> str:
         "  reference sizes    there is no measured dimension corpus, so sizing comes from",
         "                     the profile's verified constants.",
         "  cover analysis     cover density and peek angles are not implemented.",
-        "  traversal time     no player speed is verified, so distances are in world units",
-        "                     and never in seconds.",
+        "  traversal time     reinforcement profiles estimate route and wave-wait times;",
+        "                     these are not engine measurements or combat simulation.",
         "  rotated geometry   brushes whose plane points are off-grid are reported as",
         "                     BRUSH_NOT_EXACT and excluded from analysis rather than",
         "                     approximated. Every report carries the count.",

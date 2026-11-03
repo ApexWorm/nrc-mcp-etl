@@ -257,6 +257,7 @@
           200
         ],
         "keys": {
+          "spawnflags": 3,
           "angles": [
             30,
             90,

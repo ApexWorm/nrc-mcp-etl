@@ -1,0 +1,83 @@
+{
+  "watch": [
+    "workshop_bridge"
+  ],
+  "steps": [
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40
+    },
+    {
+      "action": "screenshot",
+      "name": "red_spawn"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40
+    },
+    {
+      "action": "screenshot",
+      "name": "blue_spawn"
+    },
+    {
+      "action": "position",
+      "origin": [
+        928,
+        512,
+        24
+      ],
+      "angles": [
+        55,
+        180,
+        0
+      ]
+    },
+    {
+      "action": "weapon",
+      "name": "pliers"
+    },
+    {
+      "action": "screenshot",
+      "name": "before"
+    },
+    {
+      "action": "hold",
+      "until": [
+        {
+          "scope": "entity",
+          "field": "built",
+          "value": true,
+          "name": "workshop_bridge"
+        }
+      ],
+      "timeout": 45,
+      "controls": [
+        "attack"
+      ]
+    },
+    {
+      "action": "wait",
+      "until": [
+        {
+          "scope": "game",
+          "field": "phase",
+          "value": "intermission"
+        },
+        {
+          "scope": "game",
+          "field": "winner",
+          "value": "blue"
+        }
+      ],
+      "timeout": 10
+    },
+    {
+      "action": "screenshot",
+      "name": "victory"
+    }
+  ]
+}

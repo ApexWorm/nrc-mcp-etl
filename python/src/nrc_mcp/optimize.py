@@ -250,6 +250,7 @@ def structural_audit(
     interior_max_extent: float = 128.0,
     interior_max_fraction: float = 0.125,
     limit: int = 200,
+    game_map: Any = None,
 ) -> dict[str, Any]:
     """Structural brushes that look like they should be detail (§6.1).
 
@@ -290,7 +291,7 @@ def structural_audit(
     `stats()` counts with, so the audit and the totals beside it cannot disagree.
     """
     path = Path(map_path)
-    mp = load_map(path)
+    mp = game_map if game_map is not None else load_map(path)
     stats = mp.stats(grid=grid)
     entities = mp.entities(with_keys=False)
 

@@ -59,7 +59,7 @@ would have failed correct maps (`docs/spec-corrections.md`).
     `pattern` in full.
 
 Every check may carry `applies_when: {classname_present: X}` so a rule about one gametype
-stays silent on maps that do not use it. `classname_absent: X` and
+stays silent on maps that do not use it. `classname_absent: X` (or a list, all absent) and
 `flag_present: {classname: X, flag: N}` (or a list of those, any matching) narrow it further.
 """
 
@@ -169,7 +169,8 @@ def _applies(rule: dict, entities: list[dict]) -> bool:
     if present and not _of_class(entities, str(present)):
         return False
     absent = cond.get("classname_absent")
-    if absent and _of_class(entities, str(absent)):
+    absent_names = absent if isinstance(absent, list) else [absent] if absent else []
+    if any(_of_class(entities, str(name)) for name in absent_names):
         return False
     # `flag_present`: some entity of a class has a spawnflag set. A list means any of them.
     wanted = cond.get("flag_present")

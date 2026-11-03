@@ -28,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import profiles
+from . import profiles, script_lifetime
 from .rules import Finding, parse_spawnflags
 
 
@@ -321,6 +321,7 @@ def check(
     out += _arg_ranges(spec, live, by_name, path.name, finding)
     out += _required_actions(spec, live, by_name, path.name, finding)
     out += _objective_requirements(spec, entities, by_name, finding)
+    out += script_lifetime.check(spec, entities, by_name, path.name)
     return out
 
 

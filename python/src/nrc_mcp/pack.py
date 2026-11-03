@@ -22,7 +22,7 @@ q3map2 also packs only what it traces: it never adds a map's script, and finds a
 on its own search paths. Without `<game>.exclude` beside the binary it copies base-game
 textures in too. So `pack_pk3` rewrites the archive afterwards, from the profile's
 `packaging` section: the companion files and arena found beside the map go in, and entries the
-base game's own archives already hold at the same path come out.
+base game's own archives already hold at the same path with identical content come out.
 
 `ship_check` is driven by the profile's `packaging` section, because naming conventions,
 levelshot sizes and reserved shader prefixes are properties of a game, not of this tool.
@@ -30,6 +30,7 @@ levelshot sizes and reserved shader prefixes are properties of a game, not of th
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -237,27 +238,91 @@ def basegame_entries(basegame: Path) -> set[str]:
     return names
 
 
+def _basegame_digests(
+    basegame: Path | None, wanted: set[str], exclude: set[Path]
+) -> dict[str, bytes]:
+    """Hash only the effective archived copies of the files we might omit.
+
+    PK3 lookup prefers later names, case-insensitively (the compiler's VFS uses
+    `PakLess` in plugins/vfspk3/vfs.cpp). A match against an older, shadowed copy
+    is not sufficient. Loose development files are deliberately not dependencies.
+    Ambiguous or unreadable entries are retained in the output rather than guessed.
+    """
+    if basegame is None or not basegame.is_dir():
+        return {}
+    effective: dict[str, tuple[Path, zipfile.ZipInfo] | None] = {}
+    priorities: dict[str, str] = {}
+    archives = sorted(basegame.iterdir(), key=lambda p: (p.name.lower(), p.name))
+    for archive in archives:
+        if archive.suffix.lower() != ".pk3" or not archive.is_file():
+            continue
+        if archive.resolve() in exclude:
+            continue
+        try:
+            with zipfile.ZipFile(archive) as z:
+                for info in z.infolist():
+                    name = info.filename.lower()
+                    if name not in wanted or info.is_dir():
+                        continue
+                    priority = archive.name.lower()
+                    # Duplicate members or case-colliding archive names have no
+                    # portable winner; neither justifies dropping the author's copy.
+                    effective[name] = None if priorities.get(name) == priority else (archive, info)
+                    priorities[name] = priority
+        except (OSError, zipfile.BadZipFile):
+            # We cannot know which entries a broken archive was meant to override.
+            return {}
+
+    by_archive: dict[Path, list[tuple[str, zipfile.ZipInfo]]] = {}
+    for name, entry in effective.items():
+        if entry is None:
+            continue
+        archive, info = entry
+        by_archive.setdefault(archive, []).append((name, info))
+    digests = {}
+    for archive, entries in by_archive.items():
+        try:
+            with zipfile.ZipFile(archive) as z:
+                for name, info in entries:
+                    try:
+                        with z.open(info) as f:
+                            digests[name] = hashlib.file_digest(f, "sha256").digest()
+                    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
+                        # Never fall back to a shadowed copy for an unreadable winner.
+                        continue
+        except (OSError, zipfile.BadZipFile):
+            continue
+    return digests
+
+
 def _fix_up(
     produced: Path, dest: Path, bsp: Path, pkg: dict, basegame: Path | None
 ) -> tuple[list[str], list[str]]:
     """Rewrite the packer's archive at `dest`: companions in, base-game duplicates out."""
-    shipped = basegame_entries(basegame) if basegame else set()
     root = _map_root(bsp)
     added: list[str] = []
     dropped: list[str] = []
     tmp = dest.with_name(dest.name + ".tmp")
     dest.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(produced) as src, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+        shipped = _basegame_digests(
+            basegame,
+            {info.filename.lower() for info in src.infolist()},
+            {produced.resolve(), dest.resolve()},
+        )
         present: set[str] = set()
         for info in src.infolist():
             name = info.filename
+            data = src.read(info)
             # The map's own BSP is never dropped, even if a base archive happens to hold one.
-            if name.lower() in shipped and not name.lower().endswith(
-                f"maps/{bsp.stem}.bsp".lower()
+            if (
+                name.lower() in shipped
+                and not name.lower().endswith(f"maps/{bsp.stem}.bsp".lower())
+                and hashlib.sha256(data).digest() == shipped[name.lower()]
             ):
                 dropped.append(name)
                 continue
-            out.writestr(info, src.read(info))
+            out.writestr(info, data)
             present.add(name.lower())
         for options in _companion_paths(bsp.stem, pkg):
             if any(o.lower() in present for o in options):

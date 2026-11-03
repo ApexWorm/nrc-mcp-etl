@@ -61,6 +61,31 @@ def test_facing_in_reverses_the_grid_and_bad_kinds_are_refused(tmp_path):
         srv.patch_commit("arch", [0, 0, 0], 32, 64, "t/a", facing="up")
 
 
+@pytest.mark.parametrize(
+    ("axis", "lo", "hi"),
+    [
+        ("x", [10, -12, -2], [138, 52, 62]),
+        ("y", [-22, 20, -2], [42, 148, 62]),
+        ("z", [-22, -12, 30], [42, 52, 158]),
+    ],
+)
+def test_cylinder_axis_controls_extrusion_bounds(tmp_path, axis, lo, hi):
+    srv.map_new(str(tmp_path / f"pipe_{axis}.map"))
+    srv.patch_commit("cylinder", [10, 20, 30], 32, 128, "t/pipe", axis=axis)
+    assert srv.SESSION.map.patches()[0]["bounds"] == (lo, hi)
+    srv.map_save(allow_non_identical=True)
+    srv.map_open(str(tmp_path / f"pipe_{axis}.map"))
+    assert srv.SESSION.map.patches()[0]["bounds"] == (lo, hi)
+
+
+@pytest.mark.parametrize("axis", ["", "xy", "X", "q"])
+def test_invalid_patch_axis_is_refused_before_mutation(tmp_path, axis):
+    srv.map_new(str(tmp_path / "invalid_axis.map"))
+    with pytest.raises(ToolError, match="axis must be x, y or z"):
+        srv.patch_commit("cylinder", [0, 0, 0], 32, 64, "t/a", axis=axis)
+    assert srv.SESSION.map.patches() == []
+
+
 def test_the_lighting_report_reads_lights_as_q3map2_does(tmp_path):
     srv.map_new(str(tmp_path / "l.map"))
     srv.solid_commit(ROOM, label="room")

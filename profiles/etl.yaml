@@ -148,7 +148,8 @@ movement:
   source: etlegacy_source
   note: >-
     Literal constants from the movement code. ET has no ledge grab or wall jump, so those
-    entries are absent rather than zero. It does have prone, which no tool checks yet.
+    entries are absent rather than zero. Stance analysis checks the main prone body box;
+    separate leg collision and turning clearance are not modelled.
   step_height:
     value: 18
     description: "Max height a player can walk up without needing to jump."
@@ -173,6 +174,14 @@ movement:
     confidence: verified
     source: etlegacy_source
     locus: "game/bg_pmove.c:1098, game/bg_public.h:89"
+  floor_separation:
+    value: 0.125
+    description: >-
+      Collision traces stop this far before entering a brush. On a flat floor the main body
+      rests this far above the floor, so overhead clearance must include this separation.
+    confidence: verified
+    source: etlegacy_source
+    locus: "qcommon/cm_local.h:184 SURFACE_CLIP_EPSILON; qcommon/cm_trace.c:685,751 (entering fraction backoff)"
   eye_height:
     value: 64
     description: "Standing eye height above the floor."
@@ -225,10 +234,30 @@ movement:
     locus: "game/bg_public.h:55 DEFAULT_GRAVITY; g_gravity default at game/g_cvars.c:434"
   run_speed:
     value: 320
-    description: "Default g_speed, in units per second. Not read by any tool yet."
+    description: "Default g_speed, in units per second; an input to idealized route-time estimates."
     confidence: verified
     source: etlegacy_source
     locus: "game/g_cvars.c:433"
+
+# Reinforcement analysis describes assumptions, not a replay of script execution. Server
+# g_userAxisRespawnTime/g_userAlliedRespawnTime can override these script assignments.
+balance:
+  model: reinforcement_objectives
+  confidence: verified
+  source: etlegacy_source
+  initial_spawn_flag: 2
+  initial_spawn_locus: "game/g_team.c:496; entstate is checked at :502 too"
+  startup_event: spawn
+  respawn_actions:
+    red: wm_axis_respawntime
+    blue: wm_allied_respawntime
+  respawn_action_locus: "game/g_script_actions.c:3260-3311; arguments in seconds"
+  default_respawn_seconds: {red: 30, blue: 30}
+  default_respawn_locus: "game/g_cvars.c:379-380; g_redlimbotime/g_bluelimbotime default 30000 ms"
+  note: >-
+    STARTACTIVE is a static initial-state hint. Scripts, checkpoints, entity states and server
+    overrides can change available spawns and wave times. Explicit stage inputs describe those
+    states; this analysis does not execute scripts or infer a whole mission's progression.
 
 # ---------------------------------------------------------------------------
 # gametypes
@@ -334,6 +363,18 @@ roles:
   # An objective volume. Categorized `trigger` so its brushes are not collision, but it is
   # where the fighting is, so balance_report measures to it (from its brushes' centre).
   objectives_also: [trigger_objective_info]
+  # The trigger is the accessible interaction area and carries objective ownership. Its
+  # uniquely linked constructible is the same objective, not a second neutral destination.
+  # Keep shared/multiple targets separate until their staged/team-specific states are modelled.
+  objective_links:
+    - classname: trigger_objective_info
+      target_key: target
+      target_name_key: targetname
+      target_classnames: [func_constructible]
+      case_sensitive: false
+      confidence: verified
+      source: etlegacy_source
+      locus: "game/g_trigger.c:1680-1719 (constructible parent and optional second target); game/g_utils.c:475-509 (case-insensitive target lookup)"
   # No group key: a team spawns at its active spawns nearest the selected marker
   # (game/g_team.c:455 onward), so spawns are grouped by their nearest marker.
   spawn_groups:
@@ -2748,11 +2789,46 @@ rules:
     message: >-
       the map has no intermission or deathmatch point ({expected}); every client joins as a
       spectator, and the first one to connect stops the server with "Couldn't find a spawn point"
-    fix_hint: "add an info_player_intermission with no spawnflags, looking over the map"
+    fix_hint: "add an info_player_intermission looking over the map with spawnflags 3, covering both winning teams as well as spectators; a neutral camera alone cannot cover round end"
     # Team spawns do not count: a spectator never uses them. info_player_start spawns as
     # info_player_deathmatch (g_client.c:203-207).
     params:
       classnames: [info_player_intermission, info_player_deathmatch, info_player_start]
+
+  # Neutral cameras are searched only before intermissiontime is set. Round end needs a
+  # winner-matching bit, even when a neutral camera let spectators join successfully. Either
+  # fallback class avoids the fatal SelectSpawnPoint path (start is renamed at spawn).
+  - id: ETL_INTERMISSION_AXIS_POINT_REQUIRED
+    check: flag_count_min
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_main.c:2414-2468 FindIntermissionPoint (neutral cameras only before intermission, winner flag 1); game/g_client.c:203-207 (start becomes deathmatch), :317-340 (fatal without fallback)"
+    message: >-
+      no info_player_intermission has the Axis winner flag ({flag}) and no deathmatch/start
+      fallback exists; if Axis wins, round end stops the server with "Couldn't find a spawn point"
+    fix_hint: "add an Axis camera with spawnflags 1, or use spawnflags 3 on a shared winner camera"
+    applies_when:
+      classname_absent: [info_player_deathmatch, info_player_start]
+    params:
+      classname: info_player_intermission
+      flag: 1
+      count: 1
+
+  - id: ETL_INTERMISSION_ALLIES_POINT_REQUIRED
+    check: flag_count_min
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_main.c:2414-2468 FindIntermissionPoint (neutral cameras only before intermission, winner flag 2); game/g_client.c:203-207 (start becomes deathmatch), :317-340 (fatal without fallback)"
+    message: >-
+      no info_player_intermission has the Allies winner flag ({flag}) and no deathmatch/start
+      fallback exists; if Allies wins, round end stops the server with "Couldn't find a spawn point"
+    fix_hint: "add an Allied camera with spawnflags 2, or use spawnflags 3 on a shared winner camera"
+    applies_when:
+      classname_absent: [info_player_deathmatch, info_player_start]
+    params:
+      classname: info_player_intermission
+      flag: 2
+      count: 1
 
   - id: ETL_OBJECTIVE_INFO_TRACK_REQUIRED
     check: key_required
@@ -3029,6 +3105,39 @@ mapscript:
       also_targets: targetname
       severity: warning
       locus: "game/g_target.c:1276-1303 (ainame's block first, then its own scriptname's)"
+  # Delayed actions belong to the entity running the event. Destruction can remove that
+  # owner before a wait resumes; hand delayed work to a persistent manager instead.
+  # FRAMETIME is 100ms, not the server's current frame duration. G_RunThink runs scripts
+  # before think/removal, so short waits are timing-dependent and are only informational.
+  lifetime:
+    wait_locus: "game/g_script_actions.c:1651-1720 (wait, sv_fps quantization, sudden-death bypass); game/g_main.c:3908-3941 (scripts before think); game/g_script.c:632-654,840-855 (yielded self-trigger replaces caller)"
+    fix_hint: "trigger a persistent game_manager event immediately, and put the wait and delayed actions in that event; triggering self keeps the same expiring owner"
+    event_lifetimes:
+      - classname: func_explosive
+        events: [death, exploded]
+        remove_after_ms: 100
+        confidence: verified
+        locus: "game/g_combat.c:2019 (death event); game/g_mover.c:4279-4305,4358 (BecomeExplosion/free and exploded event); qcommon/q_math.h:123 (FRAMETIME=100)"
+    removal_actions:
+      - action: remove
+        remove_after_ms: 100
+        confidence: verified
+        locus: "game/g_script_actions.c:3952-3957 (remove schedules G_FreeEntity); qcommon/q_math.h:123 (FRAMETIME=100)"
+    wait_actions:
+      - {action: wait, duration_arg: 0, range_keyword: random, minimum_arg: 1, maximum_arg: 2}
+    conditional_wait_actions:
+      - {action: accum, args_equal: {1: wait_while_equal}}
+      - {action: globalaccum, args_equal: {1: wait_while_equal}}
+      - {action: cvar, args_equal: {1: wait_while_equal}}
+      - {action: gotomarker}
+      - {action: followspline}
+      - {action: followpath}
+      - {action: faceangles}
+      - {action: playanim}
+      - {action: halt}
+    call_actions:
+      - {action: trigger, target_arg: 0, label_arg: 1, event: trigger, self_names: [self]}
+    uncertain_actions: [accum, globalaccum, cvar, abortifwarmup, abortifnotsingleplayer, resetscript, kill, delete, set, setstate, entityscriptname, gotomarker, followspline, followpath, faceangles, playanim, halt]
   # Action arguments that name something in the map.
   references:
     - action: trigger
@@ -3196,12 +3305,67 @@ engine:
   log: "legacy/etconsole.log"
   # Proof the map loaded.
   loaded: "Loaded entities from maps/{map}.bsp"
+  client_connected: "Going from CS_PRIMED to CS_ACTIVE"
   # The game stopped: G_Error prints "ERROR: <message>" at the start of a line, then the server
   # shuts down "Server crashed". Harmless complaints ("^1ERROR: Can't find hunkusage.dat") carry
   # a timestamp and a colour code, so they never match.
   fatal: ["^ERROR: ", "Server crashed", "Received signal (4|6|8|11)\\b"]
   # Worth reading, never failing: the game's own non-fatal complaints about the map.
   noted: ["\\^1ERROR No ", "G_Script.*warning"]
+  playtest:
+    observer: etl-playtest.lua
+    observer_target: legacy/nrc_playtest.lua
+    screenshot_path: legacy/screenshots/{name}.jpg
+    # Read-only game-side telemetry; client stdin carries normal controls.
+    args: ["+set", "lua_modules", "nrc_playtest.lua", "+set", "g_doWarmup", "0",
+           "+set", "g_warmup", "0", "+set", "g_teamForceBalance", "0",
+           "+set", "g_inactivity", "0", "+set", "g_spectatorInactivity", "0",
+           "+set", "net_ip", "127.0.0.1", "+set", "net_enabled", "1", "+set", "net_port", "0",
+           "+set", "sv_maxclients", "1", "+set", "g_gametype", "2"]
+    bootstrap: ["map_restart 0"]
+    commands:
+      join: "team {team} {role}"
+      position: "setviewpos {x} {y} {z} {pitch} {yaw} {roll} 0"
+      screenshot: "screenshotJPEG {name}"
+      sync: "nrc_playtest_sync {sequence}"
+      quit: quit
+    teams: {red: axis, blue: allies}
+    roles: {soldier: 0, medic: 1, engineer: 2, fieldops: 3, covertops: 4}
+    weapons:
+      pliers: {command: "weaponbank 5"}
+      dynamite: {command: "weaponbank 6"}
+      knife: {command: "weaponbank 1"}
+    controls:
+      attack: {press: "+attack", release: "-attack"}
+      forward: {press: "+forward", release: "-forward"}
+      back: {press: "+back", release: "-back"}
+      left: {press: "+moveleft", release: "-moveleft"}
+      right: {press: "+moveright", release: "-moveright"}
+      crouch: {press: "+movedown", release: "-movedown"}
+      prone: {press: "+prone", release: "-prone", mode: toggle,
+              note: "Press toggles prone; releasing stops the button but does not stand up. Press again to leave prone where clearance permits."}
+      jump: {press: "+moveup", release: "-moveup"}
+      sprint: {press: "+sprint", release: "-sprint"}
+    fields:
+      player: [connected, team, role, alive, health, stance, weapon, weapon_id, speed,
+               position.0, position.1, position.2, angles.0, angles.1, angles.2]
+      game: [phase, winner, charge_count, armed_charges]
+      entity: [present, seen, count, health, state, classname, progress, built,
+               position.0, position.1, position.2]
+    example:
+      watch: [workshop_bridge]
+      steps:
+        - {action: join, team: blue, role: engineer, timeout: 40}
+        - {action: position, origin: [928, 512, 24], angles: [55, 180, 0]}
+        - {action: weapon, name: pliers}
+        - action: hold
+          controls: [attack]
+          timeout: 45
+          until: [{scope: entity, name: workshop_bridge, field: built, value: true}]
+        - action: wait
+          timeout: 10
+          until: [{scope: game, field: phase, value: intermission}, {scope: game, field: winner, value: blue}]
+        - {action: screenshot, name: victory}
 
 # ---------------------------------------------------------------------------
 # engine_limits — what decides whether the map LOADS, as opposed to compiles

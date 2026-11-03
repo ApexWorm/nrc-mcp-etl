@@ -56,6 +56,40 @@ def test_stats_describe_the_box(k):
     assert (s["structural_brushes"], s["detail_brushes"]) == (1, 0)
 
 
+def test_native_route_overlay_uses_the_map_frame_without_mutating_geometry(k):
+    m = k.Map.parse(BOX)
+    before, before_meta = m.render(width=400, height=300)
+    after, after_meta = m.render(
+        width=400,
+        height=300,
+        route_segments=[
+            {"stance": "stand", "points": [[8, 16, 0], [32, 16, 0]]},
+            {"stance": "crouch", "points": [[32, 16, 0], [56, 48, 0]]},
+        ],
+        route_transitions=[
+            {"position": [32, 16, 0], "from_stance": "stand", "to_stance": "crouch"}
+        ],
+    )
+    assert after.startswith(b"\x89PNG") and after != before
+    assert after_meta["bounds"] == before_meta["bounds"]
+    assert after_meta["counts"] == before_meta["counts"]
+    assert any("4 points, 1 stance changes" in note for note in after_meta["notes"])
+    assert m.source() == BOX
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ({"route_segments": [{"stance": "fly", "points": [[0, 0, 0]]}]}, "stance"),
+        ({"route_segments": [{"stance": "stand", "points": [[float("nan"), 0, 0]]}]}, "finite"),
+        ({"route_segments": [], "view": "sheet"}, "top"),
+    ],
+)
+def test_native_route_overlay_refuses_invalid_or_misleading_inputs(k, options, message):
+    with pytest.raises(ValueError, match=message):
+        k.Map.parse(BOX).render(**options)
+
+
 def test_shader_histogram_ranks_by_face_count(k):
     top = k.Map.parse(BOX).stats()["top_shaders"]
     assert top[0]["shader"] == "t/side"

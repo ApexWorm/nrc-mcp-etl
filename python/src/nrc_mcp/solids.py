@@ -39,23 +39,39 @@ def load(map_path: str | Path) -> dict[str, Any]:
     if not p.is_file():
         return {"version": SIDECAR_VERSION, "solids": {}}
     try:
-        data = json.loads(p.read_text())
-    except (OSError, json.JSONDecodeError) as e:
+        return decode(p.read_bytes(), p)
+    except OSError as e:
+        raise SolidStoreError(f"{p} is unreadable ({e}); the .map itself is unaffected") from e
+
+
+def decode(raw: bytes | None, path: Path) -> dict[str, Any]:
+    """Decode disk or session-staged sidecar bytes without changing either."""
+    if raw is None:
+        return {"version": SIDECAR_VERSION, "solids": {}}
+    try:
+        data = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
         # Never fatal: the map is still usable, only the parametric history is lost. Saying so
         # beats refusing to open a map because an advisory file got corrupted.
         raise SolidStoreError(
-            f"{p} is unreadable ({e}). The .map itself is unaffected — delete or fix the "
+            f"{path} is unreadable ({e}). The .map itself is unaffected — delete or fix the "
             f"sidecar to carry on; only the ability to re-edit parameters is lost."
         ) from e
     if not isinstance(data, dict) or not isinstance(data.get("solids"), dict):
-        raise SolidStoreError(f"{p} is not a solids sidecar")
+        raise SolidStoreError(f"{path} is not a solids sidecar")
     return data
+
+
+def encode(store: dict[str, Any]) -> bytes:
+    return (
+        json.dumps({**store, "version": SIDECAR_VERSION}, indent=2, sort_keys=True) + "\n"
+    ).encode()
 
 
 def save(map_path: str | Path, store: dict[str, Any]) -> Path:
     p = sidecar_path(map_path)
     store["version"] = SIDECAR_VERSION
-    p.write_text(json.dumps(store, indent=2, sort_keys=True) + "\n")
+    p.write_bytes(encode(store))
     return p
 
 
@@ -72,23 +88,32 @@ def put(
     The previous version is kept as `superseded`, one deep. Enough to undo a bad parameter
     change, without turning an advisory file into a version-control system.
     """
+    store = load(map_path)
+    entry = record(store, name, ir, brushes=brushes, notes=notes)
+    save(map_path, store)
+    return entry
+
+
+def record(
+    store: dict, name: str, ir: dict, *, brushes: int = 0, notes: str = "", **metadata: Any
+) -> dict[str, Any]:
+    """Update a decoded store; the caller decides whether to stage or persist it."""
     if not name or not name.replace("_", "").replace("-", "").isalnum():
         raise SolidStoreError(
             f"solid name {name!r} should be alphanumeric with dashes or underscores, so it can "
             f"be used in a filename and a brush comment"
         )
-    store = load(map_path)
     previous = store["solids"].get(name)
     entry: dict[str, Any] = {
         "ir": ir,
         "brushes": brushes,
         "notes": notes,
         "updated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **metadata,
     }
     if previous is not None:
         entry["superseded"] = {k: previous[k] for k in ("ir", "updated") if k in previous}
     store["solids"][name] = entry
-    save(map_path, store)
     return entry
 
 

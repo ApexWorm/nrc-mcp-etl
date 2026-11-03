@@ -17,7 +17,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from .. import analysis as anamod
 from .. import mapscript, profiles, rules
 from .. import playspace as playspacemod
-from ..kernel import load_map, repo_root
+from ..kernel import parse_map, repo_root
+from ..project_state import write_batch
 from ..runtime import (
     SESSION,
     _add_entity,
@@ -43,12 +44,24 @@ def map_open(path: str, grid: int = 8) -> dict:
     p = Path(path)
     if not p.is_absolute():
         p = repo_root() / p
-    m = load_map(p)
+    p = p.resolve()
+    loaded = p.read_bytes()
+    m = parse_map(loaded.decode("utf-8"))
 
     SESSION.map = m
     SESSION.path = p
     SESSION.grid = grid
     SESSION.warnings = []
+    SESSION.baseline_files = {p: loaded}
+    SESSION.pending_files = {}
+    SESSION.checkpoints = {}
+    SESSION.grids = {}
+    SESSION.last_compile = None
+    SESSION.read_file(p.with_suffix(".solids.json"))
+    pid = active_profile()
+    spec = profiles.load(pid).get("mapscript") if pid else None
+    if spec:
+        SESSION.read_file(mapscript.script_path(spec, p))
 
     rt = m.round_trip()
     SESSION.opened_round_trip = rt
@@ -61,6 +74,7 @@ def map_open(path: str, grid: int = 8) -> dict:
     stats = m.stats(grid=grid)
     return {
         "path": str(p),
+        "revision": SESSION.receipt(),
         "round_trip": rt,
         "entities": stats["entities"],
         "brushes": stats["brushes"],
@@ -130,7 +144,7 @@ def map_save(
 ) -> dict:
     """Write the open map back to disk, if it is safe to.
 
-    Two gates, guarding two different things.
+    Staged script and generated-solid sidecars are saved with the map. Three gates apply.
 
     **The file.** If the kernel could not reproduce the bytes it *loaded*, it misunderstands
     something in this file and writing would silently discard it. That check is taken at
@@ -143,12 +157,18 @@ def map_save(
     compiles, still seals, still validates, and is unplayable. See `playable_space_diff` for
     the same report on its own.
 
+    **Other edits.** Refuse if a destination changed on disk since this session read it.
+    All writes are prepared before replacing files; a write failure rolls replacements back.
+    A successful save clears checkpoints. Individual replacements are atomic, but this is
+    not a filesystem-wide transaction across multiple files.
+
     The comparison costs a second or two on a city-sized map. If it cannot be made at all —
     a map too large to voxelize, or one with no evaluable brush — the write proceeds and
     says so, because a check that cannot run has not found anything.
 
     Args:
-        path: destination. Defaults to the file the map was opened from.
+        path: destination. Defaults to the open map. Save As requires a new destination,
+            copies known companions and makes the new path current.
         allow_non_identical: write even though the map did not round-trip when it was opened.
         check_playable_space: run the before/after comparison. Off skips it entirely.
         acknowledge_regression: write anyway despite a playable-space error. Use it when you
@@ -157,7 +177,7 @@ def map_save(
     m = SESSION.require()
     opened = SESSION.opened_round_trip or m.round_trip()
     current = m.round_trip()
-    edited = not current["identical"] and bool(opened["identical"])
+    edited = SESSION.receipt()["dirty"]
 
     if not opened["identical"] and not allow_non_identical:
         # A refused write is an anticipated failure, so it is an error rather than a
@@ -198,18 +218,97 @@ def map_save(
             "wrote a map with a playable-space regression, acknowledged by the caller"
         )
 
-    written = m.save(path)
+    target = Path(path) if path else SESSION.path
+    if target is None:
+        raise ToolError("no destination for the open map")
+    if not target.is_absolute():
+        target = repo_root() / target
+    target = target.resolve()
+    source_path = SESSION.path.resolve()
+    changes = {target: m.source().encode("utf-8")}
+    expected = {target: SESSION.baseline_files.get(source_path)}
+    if target != source_path:
+        if target.exists():
+            raise ToolError(f"save-copy destination already exists: {target}")
+        expected[target] = None
+    companions = dict(SESSION.pending_files)
+    if target != source_path:
+        companions = {
+            p: data
+            for p, data in {**SESSION.baseline_files, **companions}.items()
+            if p != source_path and data is not None
+        }
+    for companion, data in companions.items():
+        dest = companion
+        if target != source_path:
+            # Companions beside the source follow Save As, including compound suffixes.
+            if companion.parent != source_path.parent or not companion.name.startswith(
+                source_path.stem + "."
+            ):
+                raise ToolError(
+                    f"cannot relocate staged companion {companion}; save to the original path"
+                )
+            dest = target.with_name(target.stem + companion.name[len(source_path.stem) :])
+            if dest.exists():
+                raise ToolError(f"save-copy companion already exists: {dest}")
+        changes[dest] = data
+        expected[dest] = SESSION.baseline_files.get(companion) if dest == companion else None
+    try:
+        write_batch(changes, expected)
+    except OSError as e:
+        raise ToolError(f"save failed; staged changes remain available: {e}") from e
+    SESSION.path = target
+    if target != source_path:
+        relocated = {}
+        for companion, data in SESSION.baseline_files.items():
+            if companion.parent == source_path.parent and companion.name.startswith(
+                source_path.stem + "."
+            ):
+                dest = target.with_name(target.stem + companion.name[len(source_path.stem) :])
+                relocated[dest] = data
+        SESSION.baseline_files = {**relocated, **changes}
+    else:
+        SESSION.baseline_files.update(changes)
+    SESSION.pending_files.clear()
+    SESSION.checkpoints.clear()
+    written = str(target)
     out: dict[str, Any] = {
         "written": True,
         "path": written,
         "round_trip": current,
         "modified_since_open": edited,
+        "files_written": [str(p) for p in changes],
+        "revision": SESSION.receipt(),
     }
     if playspace_report is not None:
         out["playable_space"] = playspacemod.brief(playspace_report)
     if playspace_note:
         out["playable_space_note"] = playspace_note
     return out
+
+
+@tool("map", "Checkpoint staged map and companions", writes=True, destructive=True, idempotent=True)
+def map_checkpoint(name: str = "checkpoint") -> dict:
+    """Remember the current geometry and staged companions under a name, without saving.
+
+    Use map_restore to undo back to it. Checkpoints last until a save or another map is opened.
+    """
+    SESSION.checkpoints[name] = (SESSION.require().source(), dict(SESSION.pending_files))
+    return {"checkpoint": name, "revision": SESSION.receipt()}
+
+
+@tool("map", "Restore a checkpoint", writes=True, destructive=True, idempotent=True)
+def map_restore(name: str = "checkpoint") -> dict:
+    """Restore geometry and staged companions from map_checkpoint; disk is untouched.
+
+    Save to persist the restored state. Saving clears checkpoints; this undoes staged edits.
+    """
+    if name not in SESSION.checkpoints:
+        raise ToolError(f"no checkpoint {name!r}")
+    source, companions = SESSION.checkpoints[name]
+    SESSION.map = _kernel().Map.parse(source)
+    SESSION.pending_files = dict(companions)
+    return {"checkpoint": name, "revision": SESSION.receipt()}
 
 
 @tool("map", "Query entities")
@@ -526,7 +625,12 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
         ents = m.entities()
         found = rules.evaluate(pid, ents) + rules.unknown_classnames(pid, ents)
         # A profile with a map script also checks the script beside the .map against it.
-        found += mapscript.check(pid, ents, SESSION.path)
+        spec = profiles.load(pid).get("mapscript")
+        text = None
+        if spec and SESSION.path:
+            data = SESSION.read_file(mapscript.script_path(spec, SESSION.path))
+            text = data.decode("utf-8", errors="replace") if data is not None else ""
+        found += mapscript.check(pid, ents, SESSION.path, text=text)
     except profiles.ProfileError as e:
         raise ToolError(_profile_error_text(e)) from e
     found += _missing_textures(m, pid)
@@ -607,7 +711,8 @@ def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
     found = mapscript.check(pid, ents, SESSION.path, text=text)
     return {
         "path": str(path),
-        "exists": path.is_file(),
+        "exists": SESSION.read_file(path) is not None,
+        "staged": path.resolve() in SESSION.pending_files,
         "blocks": [
             {
                 "block": b.name,
@@ -630,9 +735,7 @@ def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
 
 
 def _write_script(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
-    tmp.replace(path)
+    SESSION.stage_file(path, text.encode("utf-8"))
 
 
 @tool("map", "Show the map script")
@@ -644,7 +747,7 @@ def script_show() -> dict:
     ones `validate_profile` reports for the script.
     """
     pid, spec, path = _script_spec()
-    text = path.read_text(errors="replace") if path.is_file() else ""
+    text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
     try:
         return _script_report(pid, spec, path, text)
     except mapscript.ScriptSyntaxError as e:
@@ -665,11 +768,11 @@ def script_set_event(
 
     Refused before anything is written: an event or action the profile does not list, and a
     line the engine would misparse. Written, then reported in `findings`: references that
-    resolve to nothing yet, since the entity may be placed next. The script is written
-    immediately; it is a separate file from the `.map`, which still needs `map_save`.
+    resolve to nothing yet, since the entity may be placed next. The script is staged
+    with the geometry; `map_save` saves both and checks for external changes.
     """
     pid, spec, path = _script_spec()
-    text = path.read_text(errors="replace") if path.is_file() else ""
+    text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
     try:
         new, did = mapscript.set_event(text, spec, block, event, list(params or []), actions)
     except mapscript.ScriptEditError as e:
@@ -685,12 +788,12 @@ def script_remove(block: str, event: str | None = None, params: list[str] | None
     """Remove one event from a block of the open map's script, or the whole block.
 
     Without `event`, the whole block goes. Everything else in the file is left as it was. The
-    script is written immediately.
+    script is staged until `map_save`.
     """
     pid, spec, path = _script_spec()
-    if not path.is_file():
+    if SESSION.read_file(path) is None:
         raise ToolError(f"there is no script at {path} to remove anything from")
-    text = path.read_text(errors="replace")
+    text = SESSION.read_file(path).decode("utf-8", errors="replace")
     try:
         new = mapscript.remove(text, spec, block, event, list(params or []))
     except mapscript.ScriptEditError as e:
@@ -747,7 +850,7 @@ def objective_place(
     The links the engine needs are made for you - the trigger targets the objective, the
     objective carries the weapon class that lets dynamite destroy it - and the script gets the
     objective's events, which you can extend with `script_set_event`. Nothing in the map reaches
-    disk until `map_save`; the script is written at once.
+    disk until `map_save`; the script is staged with it.
     """
     m = SESSION.require()
     pid, spec, path = _script_spec()
@@ -784,7 +887,7 @@ def objective_place(
     shapes = {"trigger": _as_ir(trigger, "trigger"), "objective": _as_ir(objective, "objective")}
 
     # The script edit is worked out first, so a refusal there changes nothing in the map.
-    text = path.read_text(errors="replace") if path.is_file() else ""
+    text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
     try:
         for ev in recipe.get("script") or []:
             text, _ = mapscript.set_event(
@@ -799,6 +902,8 @@ def objective_place(
         raise ToolError(f"nothing changed: the script edit was refused ({e})") from e
 
     k = _kernel()
+    # Build on a copy: a later invalid shape must not leave half an objective behind.
+    m = k.Map.parse(m.source())
     made = []
     for ent in recipe["entities"]:
         role = ent["role"]
@@ -824,6 +929,7 @@ def objective_place(
             }
         )
     _write_script(path, text)
+    SESSION.map = m
 
     report = validate_profile()
     return {

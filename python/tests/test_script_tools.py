@@ -46,13 +46,15 @@ def test_script_show_says_which_entities_run_each_block(nrcroom):
     assert r["summary"]["error"] == 0
 
 
-def test_set_event_writes_at_once_and_reports_what_does_not_resolve_yet(nrcroom):
+def test_set_event_stages_until_save_and_reports_what_does_not_resolve_yet(nrcroom):
     before = nrcroom.read_text()
     r = srv.script_set_event(
         "gate", "trigger", ['wm_announce "Gate!"', "alertentity lever"], params=["open"]
     )
     assert r["did"] == "added event"
-    text = nrcroom.read_text()
+    assert nrcroom.read_text() == before
+    assert r["staged"]
+    text = srv.SESSION.read_file(nrcroom).decode()
     assert text.startswith(before[: before.index("gate\n{")]), "everything before is untouched"
     assert "\ttrigger open\n" in text
     codes = {f["code"]: f["severity"] for f in r["findings"]}
@@ -69,7 +71,7 @@ def test_an_unknown_action_is_refused_and_nothing_is_written(nrcroom):
 
 def test_remove_takes_out_an_event_or_a_block(nrcroom):
     srv.script_remove("gate", "death")
-    assert "death" not in nrcroom.read_text()
+    assert "death" not in srv.SESSION.read_file(nrcroom).decode()
     r = srv.script_remove("gate")
     assert [b["block"] for b in r["blocks"]] == ["game_manager"]
     with pytest.raises(ToolError, match="no block named 'gate'"):
@@ -84,6 +86,8 @@ def test_a_map_built_from_nothing_gets_its_script_through_the_tools(tmp_path):
         "game_manager", "spawn", ["wm_axis_respawntime 10", "wm_setwinner 0", "wait 50"]
     )
     assert r["did"] == "created block"
+    assert not (tmp_path / "maps" / "fresh.script").exists()
+    srv.map_save(check_playable_space=False)
     assert (tmp_path / "maps" / "fresh.script").read_text().startswith("game_manager\n{\n\tspawn")
     assert r["summary"] == {"error": 0, "warning": 0, "info": 0}
 
@@ -101,6 +105,20 @@ def test_script_show_quotes_arguments_so_actions_can_be_written_back(nrcroom):
     assert 'setautospawn "Axis Bunker" 0' in spawn
     srv.script_set_event("game_manager", "spawn", spawn)
     assert srv.validate_profile()["summary"]["error"] == 0, "round-trips without breaking names"
+
+
+def test_staged_lifetime_findings_reach_script_and_profile_reports(nrcroom):
+    original = nrcroom.read_text()
+    edited = srv.script_set_event("gate", "death", ["wait 1500", "wm_endround"])
+    assert nrcroom.read_text() == original, "analysis must inspect the staged edit"
+    for report in (edited, srv.script_show(), srv.validate_profile()):
+        (row,) = [f for f in report["findings"] if f["code"] == "MAPSCRIPT_LIFETIME_WAIT"]
+        assert row["severity"] == "warning" and "gate.death" in row["message"]
+    srv.script_set_event("game_manager", "trigger", ["wait 1500", "wm_endround"], params=["finish"])
+    srv.script_set_event("gate", "death", ["trigger game_manager finish"])
+    assert not [
+        f for f in srv.script_show()["findings"] if f["code"].startswith("MAPSCRIPT_LIFETIME")
+    ]
 
 
 def test_objective_place_builds_each_kind_that_validates_clean(nrcroom):
@@ -127,7 +145,7 @@ def test_objective_place_builds_each_kind_that_validates_clean(nrcroom):
         trigger={"min": [256, 16, 0], "max": [384, 208, 128]},
     )
     assert c["summary"]["error"] == 0
-    text = nrcroom.read_text()
+    text = srv.SESSION.read_file(nrcroom).decode()
     assert "built final" in text and "decayed final" in text
 
 

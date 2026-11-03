@@ -22,13 +22,12 @@ pub enum Facing {
 #[derive(Clone, Debug)]
 pub struct PatchSpec {
     pub kind: String,
-    /// Cylinder and bevel: the centre of the circle at the bottom. Arch: the centre of the
-    /// circle at one end of the arch.
+    /// The centre of the circle at the start of the extrusion.
     pub centre: [f64; 3],
     pub radius: f64,
-    /// Cylinder and bevel: the height. Arch: the depth along its axis.
+    /// The depth along the positive extrusion axis.
     pub length: f64,
-    /// Arch: the axis it runs along, "x" or "y". Cylinder and bevel are vertical.
+    /// Cylinder/bevel: x, y or z. Arch: x or y (z retains the historical y default).
     pub axis: char,
     /// Bevel: which quarter, as the angle in degrees its arc starts at (0, 90, 180, 270).
     pub start_deg: f64,
@@ -40,6 +39,9 @@ pub struct PatchSpec {
 pub fn generate(spec: &PatchSpec) -> Result<Vec<Vec<[f64; 5]>>, String> {
     if !(spec.radius > 0.0 && spec.length > 0.0) {
         return Err("radius and length must be greater than zero".into());
+    }
+    if !matches!(spec.axis, 'x' | 'y' | 'z') {
+        return Err("axis must be x, y or z".into());
     }
     let (quarters, start) = match spec.kind.as_str() {
         "cylinder" => (4, 0.0),
@@ -93,6 +95,9 @@ pub fn generate(spec: &PatchSpec) -> Result<Vec<Vec<[f64; 5]>>, String> {
                         // The arch's circle stands in the plane across its axis, bulging up.
                         ("arch", 'x') => [cx + t, cy + a * r, cz + b * r],
                         ("arch", _) => [cx + a * r, cy + t, cz + b * r],
+                        // Cyclic permutations preserve the vertical cylinder's winding.
+                        (_, 'x') => [cx + t, cy + a * r, cz + b * r],
+                        (_, 'y') => [cx + b * r, cy + t, cz + a * r],
                         _ => [cx + a * r, cy + b * r, cz + t],
                     };
                     [p[0], p[1], p[2], u, v]
@@ -123,7 +128,7 @@ mod tests {
             centre: [0.0, 0.0, 0.0],
             radius: 32.0,
             length: 128.0,
-            axis: 'x',
+            axis: if kind == "arch" { 'x' } else { 'z' },
             start_deg: 0.0,
             facing: Facing::Out,
             texture_units: 128.0,
@@ -165,6 +170,55 @@ mod tests {
     }
 
     #[test]
+    fn cylinders_extrude_along_each_axis_with_consistent_outward_winding() {
+        for (axis, min, max) in [
+            ('x', [10.0, -12.0, -2.0], [138.0, 52.0, 62.0]),
+            ('y', [-22.0, 20.0, -2.0], [42.0, 148.0, 62.0]),
+            ('z', [-22.0, -12.0, 30.0], [42.0, 52.0, 158.0]),
+        ] {
+            let centre = [10.0, 20.0, 30.0];
+            let grid = generate(&PatchSpec {
+                axis,
+                centre,
+                ..spec("cylinder")
+            })
+            .unwrap();
+            for d in 0..3 {
+                let values = || grid.iter().flatten().map(|point| point[d]);
+                assert_eq!(values().fold(f64::INFINITY, f64::min), min[d], "{axis}");
+                assert_eq!(values().fold(f64::NEG_INFINITY, f64::max), max[d], "{axis}");
+            }
+            // At the first corner, arc tangent cross extrusion must point away from centre.
+            let p = grid[0][0];
+            let tangent = std::array::from_fn::<_, 3, _>(|d| grid[1][0][d] - p[d]);
+            let along = std::array::from_fn::<_, 3, _>(|d| grid[0][1][d] - p[d]);
+            let normal = [
+                tangent[1] * along[2] - tangent[2] * along[1],
+                tangent[2] * along[0] - tangent[0] * along[2],
+                tangent[0] * along[1] - tangent[1] * along[0],
+            ];
+            let dot: f64 = (0..3).map(|d| normal[d] * (p[d] - centre[d])).sum();
+            assert!(dot > 0.0, "{axis} must preserve outward facing");
+        }
+    }
+
+    #[test]
+    fn bevels_rotate_their_quarter_with_the_extrusion_axis() {
+        for (axis, end) in [
+            ('x', [128.0, 32.0, 32.0]),
+            ('y', [32.0, 128.0, 32.0]),
+            ('z', [32.0, 32.0, 128.0]),
+        ] {
+            let grid = generate(&PatchSpec {
+                axis,
+                ..spec("bevel")
+            })
+            .unwrap();
+            assert_eq!(grid[1][2][..3], end, "{axis}: corner at the far end");
+        }
+    }
+
+    #[test]
     fn facing_in_reverses_the_columns() {
         let out = generate(&spec("arch")).unwrap();
         let mut inward = generate(&PatchSpec {
@@ -190,6 +244,11 @@ mod tests {
         assert!(generate(&PatchSpec {
             start_deg: 45.0,
             ..spec("bevel")
+        })
+        .is_err());
+        assert!(generate(&PatchSpec {
+            axis: 'q',
+            ..spec("cylinder")
         })
         .is_err());
     }

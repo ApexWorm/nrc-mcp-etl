@@ -74,7 +74,13 @@ def parse_map(source: str):
     return kernel().Map.parse(source)
 
 
-def run_mise_task(task: str, args: list[str] | None = None, *, timeout: int = 1800) -> dict:
+def run_mise_task(
+    task: str,
+    args: list[str] | None = None,
+    *,
+    timeout: int = 1800,
+    extra_env: dict[str, str] | None = None,
+) -> dict:
     """Run a mise task.
 
     §1.2's architectural rule: the server never shells out to a raw command, it calls
@@ -92,6 +98,7 @@ def run_mise_task(task: str, args: list[str] | None = None, *, timeout: int = 18
         errors="replace",
         timeout=timeout,
         check=False,
+        env={**os.environ, **(extra_env or {})},
     )
     return {
         "task": task,

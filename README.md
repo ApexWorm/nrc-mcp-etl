@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **54 tools, 6 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **69 tools, 6 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -130,16 +130,17 @@ NRC_Q3MAP2_MODE = "windows"
 `URT_BASEPATH` and `URT_MAPSRC`, the names these had before there was a second profile, are
 still read when the new names are unset.
 
-**What the ET profile checks.** `validate_profile` runs nine rules (spawn markers, active spawns,
-objective triggers, dangling `target` names) and, when `<map>.script` sits beside the `.map`,
+**What the ET profile checks.** `validate_profile` checks spawn markers, active spawns,
+winner cameras, objective triggers and dangling `target` names. When `<map>.script` sits beside the `.map`, it
 checks the script against the map: syntax the engine refuses, unknown events and actions, blocks
 no entity runs, and `trigger` / `alertentity` / `setstate` / `setautospawn` arguments that name
-nothing. `balance_report` and `spawn_safety` group ET spawns by their nearest
+nothing. Lifetime checks warn when a delayed continuation may outlive its entity, including
+long waits in an explosive's death event. Short waits and uncertain control flow produce
+informational risks rather than claimed execution failures. `balance_report` and `spawn_safety` group ET spawns by their nearest
 `team_WOLF_objective`, read objective ownership from spawnflags, and measure to
 `trigger_objective_info` volumes. `ship_check` looks for the script, objdata, command map,
-tracemap and location file. Run over 47 shipped maps, the checks report one load-time error, a
-misnamed `setautospawn` target in a test build, and otherwise only dead references. Not modelled
-yet: prone clearance, spawn spacing, and the `_lms` script variant.
+tracemap and location file. Prone routes use the main body box only; the legs and turning footprint remain unmodelled.
+The `_lms` script variant is not selected automatically.
 
 Check what resolved:
 
@@ -185,6 +186,27 @@ mise run game:smoke -- mymap_autopacked.pk3 --client   # also join as a spectato
 It fails on any line meaning the game stopped (a `G_Error`, a crash), and lists the game's
 non-fatal complaints. Some errors only happen when a player connects - a map with no
 intermission point runs fine until then - so use `--client` before shipping.
+
+For gameplay checks, call `engine_playtest` through MCP. Read `nrc://playtest/etl` for the
+supported actions, conditions and a bridge-building example. A minimal scenario is:
+
+```python
+engine_playtest(
+    pk3="/path/to/mymap_autopacked.pk3", profile_id="etl",
+    scenario={"steps": [
+        {"action": "join", "team": "blue", "role": "engineer", "timeout": 40},
+        {"action": "screenshot", "name": "alive_spawn"},
+    ]},
+)
+```
+
+Joins wait for a living player. `hold`, `wait` and `assert` can use fresh player, entity and
+game-state predicates, so a construction test waits for `built=true` and then intermission
+instead of guessing a frame count. Held controls are released on failure. Each run retains
+its isolated game home, command/state trace, screenshots and result under `out/playtests/`;
+the MCP response includes the receipt and up to three screenshot images. Position/aim setup
+is explicitly recorded. This uses a single local client with POSIX console input and Lua
+telemetry; it does not measure multiplayer balance.
 
 ## Connect an MCP client
 
@@ -314,7 +336,9 @@ see — the compiler discards caulk faces, so a caulked hidden face costs nothin
 
 `solid_help` is the full operator reference. `solid_list` and `solid_edit_param` then let you change a
 committed shape by one field: `solid_edit_param("north_room", "solid.max[1]", 640)` makes the room
-deeper and rebuilds it. It previews by default — pass `preview_only=false` to apply.
+deeper and replaces its tracked brushes. Use `solid_param_preview` first; `map_save` persists
+the geometry and sidecar together. Manually changed generated brushes are preserved by refusing
+a stale replacement.
 
 **6 — Compile.** Start with `draft`; it is the fastest thing that still tells you the truth about
 whether the map seals.
@@ -357,14 +381,38 @@ The `etl-build-from-nothing` tape is this list run end to end, and `--compile` l
 the engine with a client joined. `validate_profile` only calls something an error when ET: Legacy
 stops on it; each such rule names the engine source line and was checked by loading a map.
 
+### ET balance and revision-safe editing
+
+`balance_report` now measures the current unsaved map. For the `etl` profile it adds
+`reinforcement_balance`: active spawn groups, overlapping spawn boxes, capacity against a
+requested team size, route travel estimates, and arrival ranges including reinforcement waits.
+Team IDs are `red` (Axis) and `blue` (Allies).
+
+```json
+{"tool": "balance_report", "cell": 16, "team_sizes": {"red": 12, "blue": 12}}
+{"tool": "navgrid_stats", "cell": 16, "stance": "crouch"}
+{"tool": "balance_report", "stance": "prone", "run_speed": 60}
+```
+
+The last call supplies a hypothetical effective speed, not a verified prone speed. Standing uses
+verified default run speed; script-dependent or conflicting wave assignments are marked unknown.
+Override effective server settings with `run_speed` and `respawn_seconds`. Optional `stages` select
+explicit `spawn_entities` and `objective_entities`, with a unique `name` and optional wave overrides.
+These selections do not change collision or simulate objective progression.
+
+Use `map_checkpoint` before editing and `map_restore` to undo staged geometry, script and solid
+sidecar changes together. `map_save` saves them with conflict checks and rollback on a failed write;
+saving clears checkpoints. `compile_map` uses a retained session snapshot and returns a revision
+receipt. Gameplay reports use the same in-memory revision even before saving.
+
 ## Tool reference
 
-67 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+69 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
 Read and write are always separate tools. `solid_param_preview` reports what a parameter change
-would do and `solid_edit_param` records it; `model_place_plan` builds the entity and
+would do and `solid_edit_param` replaces its tracked geometry; `model_place_plan` builds the entity and
 `model_place` adds it; `upstream_diff` reads the local baseline and `upstream_fetch` goes to the
 network. A tool that is safe or unsafe depending on one of its arguments cannot be annotated
 honestly, and a client deciding whether to ask permission reads that annotation.
@@ -408,7 +456,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `patch_commit` | Curved surfaces as patches: a column, an arch, a quarter-round bevel. |
 | `solid_inspect` · `solid_list` | Structure of a recorded shape; everything recorded. |
 | `solid_param_preview` | Show what changing one parameter would produce. |
-| `solid_edit_param` | Change one parameter and record the edited tree. |
+| `solid_edit_param` | Replace unchanged generated brushes and stage the edited tree. |
 
 **Meshes** — the Blender handoff
 
@@ -426,6 +474,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | Tool | Does |
 | --- | --- |
 | `compile_map` | Run q3map2 with a named preset. |
+| `engine_playtest` | Run bounded gameplay actions with state assertions; retain logs and return screenshots. |
 | `bsp_report` · `bsp_entity_diff` | Read a compiled BSP; compare its entities to the source. |
 | `structural_audit` | Brushes marked structural that need not be. |
 | `hint_suggest` | Hint brush planes, proposed from a portal file. |
@@ -439,12 +488,22 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | Tool | Does |
 | --- | --- |
 | `navgrid_stats` | Build the walkable grid; report size and coverage. |
+| `route_report` · `route_render` | Find and draw routes between positions or spawn/objective entities, including stance changes and the exact path used for cost. |
 | `balance_report` | Per-team distance from each spawn group to each objective. |
 | `sightline_report` | Sightline length distribution and power positions. |
 | `movement_check` | Clearances against verified movement constants. |
 | `spawn_safety` | Exits per spawn, and distance to the nearest enemy spawn. |
 | `lighting_report` | Lights, ambient and minimum light as q3map2 reads them; warns on a map that would compile black, notes walkable areas far from any light. |
 | `playable_space_diff` | What an edit did to the space a player can stand in. |
+
+`route_report` and `route_render` accept either coordinates (`start`, `end`) or entity
+indices (`start_entity`, `end_entity`). Mixed routes start/end standing by default and
+change stance only where both body boxes fit. Their default cost is weighted distance:
+stand 1, crouch 1.5, prone 2, plus 32 per change. These are planning preferences, not speeds
+or travel times; override `stance_costs` and `transition_cost` explicitly. The report records
+snapped endpoints, source revision, path legs, transitions and limitations. Search-budget
+exhaustion returns `reachable=null`, distinct from a proven lack of route in the grid.
+The overlay uses the same map snapshot and marks stand/crouch/prone, endpoints and changes.
 
 **Shipping**
 
@@ -472,6 +531,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | --- | --- |
 | `nrc://tasks` | The live mise task list — capability discovery, always current. |
 | `nrc://profile/{id}` | A game profile as YAML. `nrc://profile/urt43` and `nrc://profile/etl` ship. |
+| `nrc://playtest/{id}` | Supported gameplay actions, state fields, limits and an example scenario. |
 | `nrc://conventions` | Representation tiers, caulk, grid discipline, authoring order. |
 | `nrc://corrections` | Claims from the design document that did not survive verification. |
 | `nrc://solid-ir` | The Solid IR operator reference, without spending a tool call. |
@@ -492,7 +552,7 @@ than assuming it", "read the profile before sizing anything" are all learned.
 
 ## Narrowing the surface
 
-54 tools is about 25,000 characters of description in every session. Most sessions need a
+The full tool inventory adds substantial description text to every session. Most sessions need a
 fraction of it, so the server can be told which groups to expose:
 
 ```bash
@@ -666,22 +726,26 @@ explains why the integer route came first.
 **No bot navigation.** Omni-bot waypoints are not generated or checked, so a map built here has no
 bots until someone waypoints it in game.
 
+For playable examples built through real MCP calls, see [the dogfood scenarios](bench/dogfood/README.md).
+They retain source maps, packages, tool receipts and engine gameplay evidence under `out/dogfood/`.
+
 **Decompiled or editor-asset-dependent sources are partial.** Splash Damage's released ET sources
 round-trip and compile, but reference editor-only models that the game does not ship: the packer
 reports them as missing, and battery leaks without them.
 
 **Limited patch authoring.** `patch_commit` makes cylinders, arches and quarter-round bevels as
-`patchDef2`; free-form curves and terrain are still editor work. A patch is a surface, not a solid,
-so it needs a clip brush behind it to stop players.
+`patchDef2`; free-form curves and terrain are still editor work. Patches do not seal the map.
+Their shader contents determine player collision; solid patches collide in game but are omitted
+from the analysis grid. Clip brushes can provide simpler collision.
 
 **No measured reference dimensions.** There is no corpus of width/height/length distributions per
 space category, so sizing comes from the profile's verified constants. Related: no cover density or
 peek-angle analysis.
 
-**No traversal time.** No player movement speed is verified, so every distance is reported in world
-units and never in seconds. Inventing a speed is exactly the failure this project is built to avoid —
-the design document assumed a 56-unit standing height, and the shipped gamepack says 69.375. A
-corridor sized from the wrong number passes every geometric check and still traps the player.
+**Estimated traversal time.** ET balance reports use the profile run speed, staged script
+reinforcement intervals and optional explicit overrides. These are planning estimates, not engine
+measurements. Combat, sprint stamina, acceleration, moving obstacles and prone legs/turning are not
+simulated. Stage selections share one collision snapshot; they do not execute scripts.
 
 **No live editor state.** `contrib/mcpbridge` is a complete JSON-RPC plugin for NetRadiant-custom,
 and **it has never been compiled** — there is no Qt5 environment here and the host compiler cannot
