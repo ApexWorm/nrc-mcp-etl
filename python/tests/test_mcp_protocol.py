@@ -16,6 +16,7 @@ is a "run `mise run kernel:build`" problem, not a protocol regression.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -113,6 +114,19 @@ def test_the_profile_resource_is_a_template(listing):
     """`nrc://profile/{profile_id}` is parameterised, so it lists as a template."""
     patterns = {t.uri_template for t in listing["templates"]}
     assert any("nrc://profile/" in p for p in patterns), f"got templates {sorted(patterns)}"
+    assert "nrc://playtest/{profile_id}" in patterns
+
+
+def test_playtest_schema_is_discoverable_without_launching_an_engine():
+    async def read(session):
+        return await session.read_resource("nrc://playtest/etl")
+
+    result = _connect(read)
+    contract = json.loads("".join(getattr(c, "text", "") for c in result.contents))
+    assert {"join", "hold", "wait", "assert", "screenshot"} <= set(contract["actions"])
+    assert "attack" in contract["controls"]
+    assert contract["conditions"]["fields"]["player"]
+    assert contract["limits"]["total_timeout_seconds"] == 600
 
 
 def test_reading_a_resource_returns_content():
@@ -134,15 +148,21 @@ def test_reading_a_resource_returns_content():
 
 #: Tools that change something. Everything else must arrive as read-only.
 WRITERS = {
+    "map_checkpoint",
+    "map_restore",
     "map_new",
     "map_save",
     "entity_place",
+    "entities_place",
+    "spawn_cluster",
     "entity_set_keys",
     "entity_remove_keys",
     "script_set_event",
     "script_remove",
     "objective_place",
+    "path_place",
     "solid_commit",
+    "solids_commit",
     "brush_set_detail",
     "patch_commit",
     "solid_edit_param",
@@ -153,6 +173,7 @@ WRITERS = {
     "commandmap_make",
     "levelshot_make",
     "compile_map",
+    "engine_playtest",
     "compile_ab",
     "task_run",
     "bench_run",
@@ -162,6 +183,9 @@ WRITERS = {
 
 #: Tools that can lose something that was already there.
 DESTRUCTIVE = {
+    "map_checkpoint",
+    "map_restore",
+    "solid_edit_param",
     "map_save",
     "entity_set_keys",
     "entity_remove_keys",
@@ -256,7 +280,8 @@ def test_the_server_sends_its_conventions_at_initialize():
     result = anyio.run(main)
     text = result.instructions or ""
     assert "One open map" in text
-    assert "Nothing writes without being asked" in text
+    assert "Stage edits before saving" in text
+    assert "map_checkpoint" in text
     assert "Confidence is enforced" in text
 
 
@@ -291,7 +316,8 @@ def test_a_prompt_renders_with_its_argument():
     text = "".join(getattr(m.content, "text", "") for m in result.messages if hasattr(m, "content"))
     assert "a rooftop water tank" in text
     assert "asset_plan" in text, "the prompt must name the decision step"
-    assert "Patches cannot be authored" in text, "it must still disclose the limit"
+    assert "patch_commit" in text, "supported patch authoring must be discoverable"
+    assert "Other patch shapes still require the editor" in text
 
 
 def test_the_solid_ir_reference_is_a_resource(listing):

@@ -165,6 +165,7 @@ def smoke(
                 "level": "server",
                 "binary": str(server),
                 "exit": code,
+                "exit_ok": code in (None, 0),
                 **read_log(log.read_text(errors="replace") if log.is_file() else "", eng, mapname),
             }
         )
@@ -188,15 +189,27 @@ def smoke(
             runs.append(
                 {
                     "level": "client",
+                    "connected": bool(
+                        eng.get("client_connected")
+                        and log.is_file()
+                        and eng["client_connected"] in log.read_text(errors="replace")
+                    ),
                     "binary": str(binary),
                     "exit": code,
+                    "exit_ok": code in (None, 0),
                     **read_log(
                         log.read_text(errors="replace") if log.is_file() else "", eng, mapname
                     ),
                 }
             )
 
-        ok = all(r["loaded"] and not r["fatal"] for r in runs)
+        ok = all(
+            r["loaded"]
+            and not r["fatal"]
+            and r["exit_ok"]
+            and (r["level"] != "client" or r["connected"])
+            for r in runs
+        )
         return {
             "ok": ok,
             "map": mapname,
@@ -208,7 +221,7 @@ def smoke(
                 "the server only proves the map loads and its script starts; pass client=True "
                 "to also join as a spectator, which some errors need"
                 if not client
-                else "server and client both ran the map"
+                else "client connection and process exits are checked; this does not test objective completion"
             ),
         }
     finally:

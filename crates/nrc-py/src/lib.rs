@@ -26,6 +26,14 @@ fn err(msg: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(msg.to_string())
 }
 
+fn primitive_source(primitive: &Primitive) -> String {
+    let mut map = Map::default();
+    let mut entity = Entity::default();
+    entity.prims.push(primitive.clone());
+    map.entities.push(entity);
+    write_map(&map)
+}
+
 fn parse_overlay(name: &str) -> PyResult<nrc_render::Overlay> {
     use nrc_render::Overlay;
     Ok(match name {
@@ -88,17 +96,118 @@ impl PyMap {
         write_map(&self.inner)
     }
 
+    /// A working copy that preserves the original round-trip baseline and disk path.
+    fn copy(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            original: self.original.clone(),
+            path: self.path.clone(),
+        }
+    }
+
+    /// Canonical source for each brush, including texture mapping, flags and comments.
+    fn brush_sources(&self) -> Vec<(usize, usize, String)> {
+        self.inner
+            .entities
+            .iter()
+            .enumerate()
+            .flat_map(|(ei, e)| {
+                e.prims
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| matches!(p, Primitive::Brush(_)))
+                    .map(move |(pi, p)| (ei, pi, primitive_source(p)))
+            })
+            .collect()
+    }
+
+    /// Replace an exact set of unchanged brushes in one entity, preserving all neighbours.
+    /// The replacement is a one-entity map containing only the new brushes.
+    fn replace_brushes(
+        &mut self,
+        entity: usize,
+        mut expected: Vec<(usize, String)>,
+        replacement: &str,
+    ) -> PyResult<usize> {
+        if expected.is_empty() {
+            return Err(err("no generated brushes were identified"));
+        }
+        let mut parsed = parse_map(replacement).map_err(err)?;
+        if parsed.entities.len() != 1
+            || parsed.entities[0].prims.is_empty()
+            || parsed.entities[0]
+                .prims
+                .iter()
+                .any(|p| !matches!(p, Primitive::Brush(_)))
+        {
+            return Err(err("replacement must contain one entity of brushes"));
+        }
+        let target = self
+            .inner
+            .entities
+            .get_mut(entity)
+            .ok_or_else(|| err(format!("no entity {entity}")))?;
+        expected.sort_by_key(|(index, _)| *index);
+        if expected.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Err(err("duplicate brush indices"));
+        }
+        for (index, source) in &expected {
+            match target.prims.get(*index) {
+                Some(p @ Primitive::Brush(_)) if primitive_source(p) == *source => {}
+                _ => return Err(err(format!("generated brush {entity}:{index} changed"))),
+            }
+        }
+        let first = expected[0].0;
+        for (index, _) in expected.iter().rev() {
+            target.prims.remove(*index);
+        }
+        let new_prims = std::mem::take(&mut parsed.entities[0].prims);
+        let count = new_prims.len();
+        target.prims.splice(first..first, new_prims);
+        Ok(count)
+    }
+
     /// Write to disk. Defaults to the path this map was loaded from.
     ///
-    /// Writes the whole file in one call, so a failure part-way cannot leave a truncated
-    /// `.map` where somebody's level used to be.
+    /// Writes to an exclusively created sibling and renames only after the write succeeds.
     #[pyo3(signature = (path=None))]
     fn save(&self, path: Option<PathBuf>) -> PyResult<String> {
         let target = path
             .or_else(|| self.path.clone())
             .ok_or_else(|| err("no path given and this map was parsed from a string"))?;
-        std::fs::write(&target, self.source())
-            .map_err(|e| err(format!("{}: {e}", target.display())))?;
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_SAVE: AtomicU64 = AtomicU64::new(0);
+        let parent = target.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let (temporary, mut file) = loop {
+            let temporary = parent.join(format!(
+                ".nrc-save-{}-{}.tmp",
+                std::process::id(),
+                NEXT_SAVE.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => break (temporary, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(err(format!("{}: {e}", target.display()))),
+            }
+        };
+        let result = (|| -> std::io::Result<()> {
+            if let Ok(metadata) = std::fs::metadata(&target) {
+                file.set_permissions(metadata.permissions())?;
+            }
+            file.write_all(self.source().as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary, &target)
+        })();
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(err(format!("{}: {e}", target.display())));
+        }
         Ok(target.display().to_string())
     }
 
@@ -491,6 +600,68 @@ impl PyMap {
         Ok(out)
     }
 
+    /// Every patch's collision surface, as the engine builds it at map load.
+    ///
+    /// One dict per patch: `entity`, `primitive`, `classname`, `shader`, and either `facets`
+    /// (each `(normal, dist, points)`: a planar triangle or quad that blocks from the side
+    /// `normal` faces) with the subdivided `grid` size, or `error` naming why the engine would
+    /// refuse the patch. See `nrc_solid::patch::collision` for the port and its sources.
+    fn patch_collision<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let out = PyList::empty(py);
+        for (ei, e) in self.inner.entities.iter().enumerate() {
+            for (pi, prim) in e.prims.iter().enumerate() {
+                let Primitive::Patch(p) = prim else { continue };
+                let d = PyDict::new(py);
+                d.set_item("entity", ei)?;
+                d.set_item("primitive", pi)?;
+                d.set_item("classname", e.classname())?;
+                d.set_item("shader", &p.shader)?;
+                let rows: Option<Vec<Vec<[f64; 3]>>> = p
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        r.iter()
+                            .map(|c| {
+                                (c.len() >= 3).then(|| [c[0].value(), c[1].value(), c[2].value()])
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let result = match rows {
+                    None => Err("a control point has fewer than three coordinates".to_string()),
+                    Some(_) if !p.dimensions_consistent() => {
+                        Err("declared dimensions do not match the control points".to_string())
+                    }
+                    Some(rows) => nrc_solid::patch::collision(&rows),
+                };
+                match result {
+                    Ok(c) => {
+                        let facets = PyList::empty(py);
+                        for f in &c.facets {
+                            let points: Vec<(f64, f64, f64)> =
+                                f.points.iter().map(|q| (q[0], q[1], q[2])).collect();
+                            facets.append((
+                                (f.normal[0], f.normal[1], f.normal[2]),
+                                f.dist,
+                                points,
+                            ))?;
+                        }
+                        d.set_item("facets", facets)?;
+                        d.set_item("grid", c.grid)?;
+                        d.set_item("error", py.None())?;
+                    }
+                    Err(e) => {
+                        d.set_item("facets", PyList::empty(py))?;
+                        d.set_item("grid", py.None())?;
+                        d.set_item("error", e)?;
+                    }
+                }
+                out.append(d)?;
+            }
+        }
+        Ok(out)
+    }
+
     /// Axis-aligned bounds as `(min, max)`, or `None` for an empty map.
     fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
         let b = self.inner.bounds();
@@ -609,6 +780,8 @@ impl PyMap {
         padding = 26.0,
         tga = false,
         cut_above = None,
+        route_segments = None,
+        route_transitions = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn render<'py>(
@@ -632,11 +805,17 @@ impl PyMap {
         padding: f64,
         tga: bool,
         cut_above: Option<f64>,
+        route_segments: Option<&Bound<'_, PyList>>,
+        route_transitions: Option<&Bound<'_, PyList>>,
     ) -> PyResult<(Bound<'py, pyo3::types::PyBytes>, Bound<'py, PyDict>)> {
         use nrc_render::camera::OrthoAxis;
         use nrc_render::{RenderOptions, SceneOptions, View};
 
         let overlay = parse_overlay(overlay)?;
+        let route = route_overlay_from(route_segments, route_transitions)?;
+        if route.is_some() && view != "top" {
+            return Err(err("route overlays require view='top'"));
+        }
         let scene = SceneOptions {
             grid,
             ..Default::default()
@@ -719,6 +898,7 @@ impl PyMap {
                     padding,
                     tga,
                     cut_above,
+                    route,
                 },
             )
         }
@@ -885,6 +1065,53 @@ fn axis_from(d: &Bound<'_, PyDict>, key: &str, default: &str) -> PyResult<SolidA
 fn get<'py>(d: &Bound<'py, PyDict>, key: &str, op: &str) -> PyResult<Bound<'py, PyAny>> {
     d.get_item(key)?
         .ok_or_else(|| err(format!("a {op:?} node needs a {key:?} field")))
+}
+
+fn route_overlay_from(
+    segments: Option<&Bound<'_, PyList>>,
+    transitions: Option<&Bound<'_, PyList>>,
+) -> PyResult<Option<nrc_render::route::RouteOverlay>> {
+    use nrc_render::route::{RouteOverlay, Segment, Stance, Transition};
+    if segments.is_none() && transitions.is_none() {
+        return Ok(None);
+    }
+    let stance = |dict: &Bound<'_, PyDict>, key: &str| -> PyResult<Stance> {
+        let value: String = get(dict, key, "route")?.extract()?;
+        match value.as_str() {
+            "stand" => Ok(Stance::Stand),
+            "crouch" => Ok(Stance::Crouch),
+            "prone" => Ok(Stance::Prone),
+            _ => Err(err(format!("{key} must be stand, crouch or prone"))),
+        }
+    };
+    let point = |p: [f64; 3]| nrc_core::math::vec3(p[0], p[1], p[2]);
+    let mut out = RouteOverlay::default();
+    if let Some(segments) = segments {
+        for item in segments {
+            let d = item
+                .cast::<PyDict>()
+                .map_err(|_| err("each route segment must be a dict"))?;
+            let points: Vec<[f64; 3]> = get(d, "points", "route segment")?.extract()?;
+            out.segments.push(Segment {
+                stance: stance(d, "stance")?,
+                points: points.into_iter().map(point).collect(),
+            });
+        }
+    }
+    if let Some(transitions) = transitions {
+        for item in transitions {
+            let d = item
+                .cast::<PyDict>()
+                .map_err(|_| err("each route transition must be a dict"))?;
+            out.transitions.push(Transition {
+                position: point(get(d, "position", "route transition")?.extract()?),
+                from_stance: stance(d, "from_stance")?,
+                to_stance: stance(d, "to_stance")?,
+            });
+        }
+    }
+    out.validate().map_err(err)?;
+    Ok(Some(out))
 }
 
 fn i64_from(d: &Bound<'_, PyDict>, key: &str, op: &str) -> PyResult<i64> {
@@ -1244,6 +1471,12 @@ fn patch_commit<'py>(
         Some(v) => v.extract()?,
         None => "z".into(),
     };
+    let axis = match axis.as_str() {
+        "x" => 'x',
+        "y" => 'y',
+        "z" => 'z',
+        _ => return Err(err("axis must be x, y or z")),
+    };
     let facing = match get("facing")? {
         Some(v) => match v.extract::<String>()?.as_str() {
             "out" => Facing::Out,
@@ -1266,7 +1499,7 @@ fn patch_commit<'py>(
         centre,
         radius,
         length,
-        axis: axis.chars().next().unwrap_or('z'),
+        axis,
         start_deg,
         facing,
         texture_units,
@@ -1410,6 +1643,7 @@ fn solid_commit<'py>(
     d.set_item("warnings", warnings)?;
     d.set_item("dry_run", dry_run)?;
     let undo_group = label
+        .clone()
         .map(|l| format!("solid_commit:{l}"))
         .unwrap_or_else(|| format!("solid_commit:{}", node.kind()));
     d.set_item("undo_group", undo_group)?;
@@ -1427,6 +1661,16 @@ fn solid_commit<'py>(
         .into_iter()
         .map(nrc_core::model::Primitive::Brush)
         .collect();
+    if let Some(label) = &label {
+        if label.contains(['\n', '\r']) {
+            return Err(err("solid label must fit on one line"));
+        }
+        for primitive in &mut prims {
+            if let Primitive::Brush(b) = primitive {
+                b.leading.push(format!("// nrc-mcp solid:{label}"));
+            }
+        }
+    }
     if let Some(nrc_core::model::Primitive::Brush(b)) = prims.first_mut() {
         b.leading
             .push(format!("// nrc-mcp {} ({count} brushes)", node.kind()));

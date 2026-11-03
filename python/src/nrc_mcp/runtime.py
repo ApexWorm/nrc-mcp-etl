@@ -7,6 +7,8 @@ this is what the surface binds to.
 
 from __future__ import annotations
 
+import inspect
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,9 +16,10 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer as _Server
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from . import profiles
+from .project_state import digest, read_optional
 
 INSTRUCTIONS = """\
 Authoring, analysing and shipping levels for a Quake-3-engine game.
@@ -24,22 +27,79 @@ Authoring, analysing and shipping levels for a Quake-3-engine game.
 **One open map.** Almost everything here operates on a session map opened with `map_open`,
 rather than taking a path each time. Open a map first; tools that need one say so.
 
-**Nothing writes without being asked.** `map_save` is the only tool that touches a `.map`,
-and it refuses if the kernel could not reproduce the file it loaded, or if the write would
-destroy playable space. Tools annotated read-only change nothing at all.
+**Stage edits before saving.** `map_new` creates a file; map/script/solid edits are then
+staged until `map_save`. Save checks round-trip fidelity, playable space and external edits.
+`map_checkpoint` / `map_restore` undo staged work together; saves clear checkpoints.
 
 **Confidence is enforced, not advertised.** Findings carry a `confidence`, and a rule the
 profile marks unverified is downgraded so it can never fail a build. Three of the four
 spawn rules the design document called verified turned out to be wrong, and one would have
 failed correct maps — read `nrc://corrections` before trusting a rule.
 
-**Ask for what is not built and you get a refusal, not a guess.** Patches are read and
-rendered but never authored; there is no measured dimension corpus; cover analysis and
-traversal times do not exist. `nrc://conventions` lists the rest.
+**Use the supported representations.** `patch_commit` authors cylinders, arches and bevels;
+patches do not seal a map. Shader contents determine their player collision, which the analysis
+grid omits; clip brushes can simplify collision. There is no measured dimension
+corpus. Travel estimates state their speed and reinforcement assumptions; they are not
+engine measurements. `nrc://conventions` lists the rest.
 """
 
 
-mcp = _Server("nrc-mcp", instructions=INSTRUCTIONS)
+def compact_json(text: str) -> str:
+    """JSON text re-serialized without indentation; anything that is not JSON, unchanged.
+
+    The SDK renders a returned dict with `indent=2`, and on the gameplay reports that
+    whitespace was ~30% of every response. A model reads compact JSON exactly as well, so
+    the indentation is pure cost. Re-serializing a parsed document is lossless: same keys,
+    same order, same numbers.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith(("{", "[")):
+        return text
+    try:
+        return json.dumps(json.loads(text), ensure_ascii=False, separators=(",", ":"))
+    except ValueError:
+        return text
+
+
+def schema_without_titles(schema: Any) -> Any:
+    """A JSON schema minus pydantic's generated `title`s, which only restate the names.
+
+    Every parameter got `"title": "Profile Id"` for `profile_id`, and every tool
+    `"title": "<name>Arguments"`: about a quarter of the listed input schema, and not one
+    of them says anything the property name does not. Keys *inside* `properties` are
+    parameter names, so a parameter that is itself called `title` survives.
+    """
+    if isinstance(schema, list):
+        return [schema_without_titles(v) for v in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {}
+    for k, v in schema.items():
+        if k == "title" and isinstance(v, str):
+            continue
+        if k in ("properties", "$defs", "definitions") and isinstance(v, dict):
+            out[k] = {name: schema_without_titles(sub) for name, sub in v.items()}
+        else:
+            out[k] = schema_without_titles(v)
+    return out
+
+
+class _CompactServer(_Server):
+    """The SDK server, sending tool results as compact JSON. See `compact_json`."""
+
+    async def call_tool(self, name, arguments, context=None):
+        result = await super().call_tool(name, arguments, context)
+        if isinstance(result, CallToolResult):
+            result.content = [
+                TextContent(type="text", text=compact_json(c.text), annotations=c.annotations)
+                if isinstance(c, TextContent)
+                else c
+                for c in result.content
+            ]
+        return result
+
+
+mcp = _CompactServer("nrc-mcp", instructions=INSTRUCTIONS)
 
 
 def tool(
@@ -75,14 +135,29 @@ def tool(
             often than not; pass it explicitly where that is wrong.
         open_world: the tool reaches outside this machine.
     """
+    # No `title` here: the tool's own `title` carries it, and clients read that first.
     annotations = ToolAnnotations(
-        title=title,
         readOnlyHint=not writes,
         destructiveHint=destructive,
         idempotentHint=(not writes) if idempotent is None else idempotent,
         openWorldHint=open_world,
     )
-    return mcp.tool(title=title, annotations=annotations, meta={"group": group})
+
+    def register(fn):
+        # The docstring is the agent-facing description. Python keeps its source
+        # indentation, which every client would otherwise receive and pay for on every
+        # line; `cleandoc` removes exactly that and nothing else.
+        mcp.tool(
+            title=title,
+            description=inspect.cleandoc(fn.__doc__ or ""),
+            annotations=annotations,
+            meta={"group": group},
+        )(fn)
+        registered = mcp._tool_manager.get_tool(fn.__name__)
+        registered.parameters = schema_without_titles(registered.parameters)
+        return fn
+
+    return register
 
 
 @dataclass
@@ -103,6 +178,36 @@ class Session:
     #: Fingerprints of the brushes the map had at `map_open`. Grid findings on those are the
     #: map's history, not this session's work, and `validate` reports them as warnings.
     opened_brushes: frozenset[int] | None = None
+    baseline_files: dict[Path, bytes | None] = field(default_factory=dict)
+    pending_files: dict[Path, bytes] = field(default_factory=dict)
+    checkpoints: dict[str, tuple[str, dict[Path, bytes]]] = field(default_factory=dict)
+    grids: dict[tuple, Any] = field(default_factory=dict)
+    last_compile: dict | None = None
+
+    def read_file(self, path: Path) -> bytes | None:
+        path = path.resolve()
+        if path not in self.baseline_files:
+            self.baseline_files[path] = read_optional(path)
+        return self.pending_files.get(path, self.baseline_files[path])
+
+    def stage_file(self, path: Path, data: bytes) -> None:
+        path = path.resolve()
+        self.read_file(path)
+        self.pending_files[path] = data
+
+    def receipt(self) -> dict:
+        source = self.require().source().encode("utf-8")
+        return {
+            "path": str(self.path),
+            "sha256": digest(source),
+            "dirty": source != self.baseline_files.get(self.path.resolve()) if self.path else True,
+            "companions": {
+                str(p): digest(data)
+                for p, data in sorted({**self.baseline_files, **self.pending_files}.items())
+                if data is not None and p != self.path
+            },
+            "staged_files": [str(p) for p in sorted(self.pending_files)],
+        }
 
     def require(self):
         if self.map is None:

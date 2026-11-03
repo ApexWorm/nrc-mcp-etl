@@ -7,17 +7,20 @@ annotations. See `nrc_mcp.server` for how the surface is assembled and scoped.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis as anamod
-from .. import mapscript, profiles, rules
+from .. import mapscript, profiles, rules, soundscript
 from .. import playspace as playspacemod
-from ..kernel import load_map, repo_root
+from ..kernel import parse_map, repo_root
+from ..project_state import write_batch
 from ..runtime import (
     SESSION,
     _add_entity,
@@ -43,12 +46,24 @@ def map_open(path: str, grid: int = 8) -> dict:
     p = Path(path)
     if not p.is_absolute():
         p = repo_root() / p
-    m = load_map(p)
+    p = p.resolve()
+    loaded = p.read_bytes()
+    m = parse_map(loaded.decode("utf-8"))
 
     SESSION.map = m
     SESSION.path = p
     SESSION.grid = grid
     SESSION.warnings = []
+    SESSION.baseline_files = {p: loaded}
+    SESSION.pending_files = {}
+    SESSION.checkpoints = {}
+    SESSION.grids = {}
+    SESSION.last_compile = None
+    SESSION.read_file(p.with_suffix(".solids.json"))
+    pid = active_profile()
+    spec = profiles.load(pid).get("mapscript") if pid else None
+    if spec:
+        SESSION.read_file(mapscript.script_path(spec, p))
 
     rt = m.round_trip()
     SESSION.opened_round_trip = rt
@@ -61,6 +76,7 @@ def map_open(path: str, grid: int = 8) -> dict:
     stats = m.stats(grid=grid)
     return {
         "path": str(p),
+        "revision": SESSION.receipt(),
         "round_trip": rt,
         "entities": stats["entities"],
         "brushes": stats["brushes"],
@@ -130,7 +146,7 @@ def map_save(
 ) -> dict:
     """Write the open map back to disk, if it is safe to.
 
-    Two gates, guarding two different things.
+    Staged script and generated-solid sidecars are saved with the map. Three gates apply.
 
     **The file.** If the kernel could not reproduce the bytes it *loaded*, it misunderstands
     something in this file and writing would silently discard it. That check is taken at
@@ -143,12 +159,18 @@ def map_save(
     compiles, still seals, still validates, and is unplayable. See `playable_space_diff` for
     the same report on its own.
 
+    **Other edits.** Refuse if a destination changed on disk since this session read it.
+    All writes are prepared before replacing files; a write failure rolls replacements back.
+    A successful save clears checkpoints. Individual replacements are atomic, but this is
+    not a filesystem-wide transaction across multiple files.
+
     The comparison costs a second or two on a city-sized map. If it cannot be made at all —
     a map too large to voxelize, or one with no evaluable brush — the write proceeds and
     says so, because a check that cannot run has not found anything.
 
     Args:
-        path: destination. Defaults to the file the map was opened from.
+        path: destination. Defaults to the open map. Save As requires a new destination,
+            copies known companions and makes the new path current.
         allow_non_identical: write even though the map did not round-trip when it was opened.
         check_playable_space: run the before/after comparison. Off skips it entirely.
         acknowledge_regression: write anyway despite a playable-space error. Use it when you
@@ -157,7 +179,7 @@ def map_save(
     m = SESSION.require()
     opened = SESSION.opened_round_trip or m.round_trip()
     current = m.round_trip()
-    edited = not current["identical"] and bool(opened["identical"])
+    edited = SESSION.receipt()["dirty"]
 
     if not opened["identical"] and not allow_non_identical:
         # A refused write is an anticipated failure, so it is an error rather than a
@@ -198,18 +220,97 @@ def map_save(
             "wrote a map with a playable-space regression, acknowledged by the caller"
         )
 
-    written = m.save(path)
+    target = Path(path) if path else SESSION.path
+    if target is None:
+        raise ToolError("no destination for the open map")
+    if not target.is_absolute():
+        target = repo_root() / target
+    target = target.resolve()
+    source_path = SESSION.path.resolve()
+    changes = {target: m.source().encode("utf-8")}
+    expected = {target: SESSION.baseline_files.get(source_path)}
+    if target != source_path:
+        if target.exists():
+            raise ToolError(f"save-copy destination already exists: {target}")
+        expected[target] = None
+    companions = dict(SESSION.pending_files)
+    if target != source_path:
+        companions = {
+            p: data
+            for p, data in {**SESSION.baseline_files, **companions}.items()
+            if p != source_path and data is not None
+        }
+    for companion, data in companions.items():
+        dest = companion
+        if target != source_path:
+            # Companions beside the source follow Save As, including compound suffixes.
+            if companion.parent != source_path.parent or not companion.name.startswith(
+                source_path.stem + "."
+            ):
+                raise ToolError(
+                    f"cannot relocate staged companion {companion}; save to the original path"
+                )
+            dest = target.with_name(target.stem + companion.name[len(source_path.stem) :])
+            if dest.exists():
+                raise ToolError(f"save-copy companion already exists: {dest}")
+        changes[dest] = data
+        expected[dest] = SESSION.baseline_files.get(companion) if dest == companion else None
+    try:
+        write_batch(changes, expected)
+    except OSError as e:
+        raise ToolError(f"save failed; staged changes remain available: {e}") from e
+    SESSION.path = target
+    if target != source_path:
+        relocated = {}
+        for companion, data in SESSION.baseline_files.items():
+            if companion.parent == source_path.parent and companion.name.startswith(
+                source_path.stem + "."
+            ):
+                dest = target.with_name(target.stem + companion.name[len(source_path.stem) :])
+                relocated[dest] = data
+        SESSION.baseline_files = {**relocated, **changes}
+    else:
+        SESSION.baseline_files.update(changes)
+    SESSION.pending_files.clear()
+    SESSION.checkpoints.clear()
+    written = str(target)
     out: dict[str, Any] = {
         "written": True,
         "path": written,
         "round_trip": current,
         "modified_since_open": edited,
+        "files_written": [str(p) for p in changes],
+        "revision": SESSION.receipt(),
     }
     if playspace_report is not None:
         out["playable_space"] = playspacemod.brief(playspace_report)
     if playspace_note:
         out["playable_space_note"] = playspace_note
     return out
+
+
+@tool("map", "Checkpoint staged map and companions", writes=True, destructive=True, idempotent=True)
+def map_checkpoint(name: str = "checkpoint") -> dict:
+    """Remember the current geometry and staged companions under a name, without saving.
+
+    Use map_restore to undo back to it. Checkpoints last until a save or another map is opened.
+    """
+    SESSION.checkpoints[name] = (SESSION.require().source(), dict(SESSION.pending_files))
+    return {"checkpoint": name, "revision": SESSION.receipt()}
+
+
+@tool("map", "Restore a checkpoint", writes=True, destructive=True, idempotent=True)
+def map_restore(name: str = "checkpoint") -> dict:
+    """Restore geometry and staged companions from map_checkpoint; disk is untouched.
+
+    Save to persist the restored state. Saving clears checkpoints; this undoes staged edits.
+    """
+    if name not in SESSION.checkpoints:
+        raise ToolError(f"no checkpoint {name!r}")
+    source, companions = SESSION.checkpoints[name]
+    SESSION.map = _kernel().Map.parse(source)
+    SESSION.pending_files = dict(companions)
+    return {"checkpoint": name, "revision": SESSION.receipt()}
 
 
 @tool("map", "Query entities")
@@ -245,8 +346,107 @@ def entity_place(
 
     A classname the profile declares as a brush entity — a door, a trigger — is refused: build
     its brushes with `solid_commit` and `target_classname`, then give it keys with
-    `entity_set_keys`. Nothing reaches disk until `map_save`.
+    `entity_set_keys`. Nothing reaches disk until `map_save`. To add several entities, use
+    `entities_place`: one call, all or none.
     """
+    pairs = _point_pairs(classname, origin, keys)
+    index = _add_entity(pairs)
+    return {
+        "entity": index,
+        "keys": pairs,
+        "notes": _placement_notes(classname, pairs, origin, grid),
+        "entities_now": SESSION.map.entity_count,
+        "next": "call map_save to write it, and validate_profile to check spawns and counts",
+    }
+
+
+@tool("map", "Place several point entities", writes=True)
+def entities_place(entities: list[dict[str, Any]], grid: int | None = None) -> dict:
+    """Add many point entities in one call, all or none: lights, spawns, markers.
+
+    Each item is `{"classname": ..., "origin": [x, y, z], "keys": {...}}`, checked exactly as
+    `entity_place` checks one. Every item is checked before any is added, so a refusal names
+    the item (`entities[3]: ...`) and changes nothing.
+
+    The reply is compact: the new indices, in the order given, and each distinct note once
+    with the items it applies to. Ten lights with the same key produce one note, not ten.
+    Read the notes: a key the profile does not declare is written anyway and does nothing
+    in game if it is misspelt. For team spawns with their region marker, `spawn_cluster`
+    also finds the standing positions. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    if not entities:
+        raise ToolError("no entities given; pass a list of {classname, origin, keys}")
+    prepared = []
+    for i, item in enumerate(entities):
+        where = f"entities[{i}]"
+        if not isinstance(item, dict):
+            raise ToolError(f"{where}: each item is an object {{classname, origin, keys}}")
+        extra = sorted(set(item) - {"classname", "origin", "keys"})
+        if extra:
+            raise ToolError(
+                f"{where}: unknown field(s) {extra}; an item has classname, origin, keys"
+            )
+        classname, origin, keys = item.get("classname"), item.get("origin"), item.get("keys")
+        if not isinstance(classname, str) or not classname:
+            raise ToolError(f"{where}: classname must be a non-empty string")
+        if not isinstance(origin, list) or not all(
+            isinstance(c, (int, float)) and not isinstance(c, bool) for c in origin
+        ):
+            raise ToolError(f"{where}: origin must be a list of three numbers")
+        if keys is not None and not isinstance(keys, dict):
+            raise ToolError(f"{where}: keys must be a mapping of key to value")
+        try:
+            pairs = _point_pairs(classname, origin, keys)
+        except ToolError as e:
+            raise ToolError(f"{where}: {e}") from e
+        prepared.append((classname, origin, pairs))
+
+    # Built on a copy, so an entity the kernel refuses part-way leaves nothing behind.
+    candidate = m.copy()
+    indices = []
+    for i, (_classname, _origin, pairs) in enumerate(prepared):
+        try:
+            indices.append(candidate.add_entity(pairs))
+        except ValueError as e:
+            raise ToolError(f"entities[{i}]: {e}; nothing was added") from e
+    SESSION.map = candidate
+
+    g = grid if grid is not None else SESSION.grid
+    grouped: dict[str, list[int]] = {}
+    off_grid: list[int] = []
+    for i, (classname, origin, pairs) in enumerate(prepared):
+        for note in _profile_notes(classname, pairs):
+            grouped.setdefault(note, []).append(i)
+        if g > 0 and any(float(c) % g for c in origin):
+            off_grid.append(i)
+    if off_grid:
+        note = f"origin off the {g}-unit grid; written as given, not snapped"
+        grouped[note] = off_grid
+    counts: dict[str, int] = {}
+    for classname, _, _ in prepared:
+        counts[classname] = counts.get(classname, 0) + 1
+    return {
+        "placed": len(indices),
+        "entities": _index_span(indices),
+        "classnames": counts,
+        "notes": [{"note": note, "items": _index_span(items)} for note, items in grouped.items()],
+        "entities_now": candidate.entity_count,
+        "next": "call map_save to write them, and validate_profile to check spawns and counts",
+    }
+
+
+def _index_span(indices: list[int]) -> list[int] | dict[str, int]:
+    """Consecutive indices as `{"first", "last"}`, anything else as the list itself."""
+    if len(indices) > 2 and indices == list(range(indices[0], indices[0] + len(indices))):
+        return {"first": indices[0], "last": indices[-1]}
+    return indices
+
+
+def _point_pairs(
+    classname: str, origin: list[float], keys: dict[str, Any] | None
+) -> list[tuple[str, str]]:
+    """The key/value pairs for a point entity, or a refusal. Changes nothing."""
     if "classname" in (keys or {}) or "origin" in (keys or {}):
         raise ToolError("pass classname and origin as their own arguments, not inside keys")
     if len(origin) != 3:
@@ -263,23 +463,19 @@ def entity_place(
             "keys with entity_set_keys."
         )
     pairs = [("classname", classname), ("origin", _value_text("origin", origin))]
-    pairs += [(k, _value_text(k, v)) for k, v in (keys or {}).items()]
+    return pairs + [(k, _value_text(k, v)) for k, v in (keys or {}).items()]
 
-    index = _add_entity(pairs)
 
+def _placement_notes(
+    classname: str, pairs: list[tuple[str, str]], origin: list[float], grid: int | None
+) -> list[str]:
     g = grid if grid is not None else SESSION.grid
     notes = _profile_notes(classname, pairs)
     if g > 0 and any(float(c) % g for c in origin):
         notes.append(
             f"origin {pairs[1][1]} is off the {g}-unit grid; it was written as given, not snapped"
         )
-    return {
-        "entity": index,
-        "keys": pairs,
-        "notes": notes,
-        "entities_now": SESSION.map.entity_count,
-        "next": "call map_save to write it, and validate_profile to check spawns and counts",
-    }
+    return notes
 
 
 @tool("map", "Set entity keys", writes=True, destructive=True, idempotent=True)
@@ -508,12 +704,15 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
 
     Complements `validate`, which covers game-agnostic geometry. This checks the game's own
     rules: spawn arrangement, objective counts, gametype keys — and, for a game whose maps
-    carry a script, that script against the map's entities.
+    carry a script, that script against the map's entities. For a game with speaker and sound
+    scripts (the profile's `sound:` section), their syntax, the sound files they name, and
+    whether the sound scripts and speakers the map and its script name exist. Files are looked
+    for beside the map (under the folder holding `maps/`) and, with the game path set, in the
+    base game.
 
     Every rule is data in the profile, and every finding carries a `confidence`. **An
-    unverified rule can never produce an error** — it is downgraded to `info` — because three
-    of the four spawn rules the design document called verified were wrong, and one would have
-    failed correct maps. `nrc://corrections` has the details.
+    unverified rule can never produce an error** — it is downgraded to `info`;
+    `nrc://corrections` says why.
     """
     m = SESSION.require()
     pid = profile_id or active_profile()
@@ -526,7 +725,15 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
         ents = m.entities()
         found = rules.evaluate(pid, ents) + rules.unknown_classnames(pid, ents)
         # A profile with a map script also checks the script beside the .map against it.
-        found += mapscript.check(pid, ents, SESSION.path)
+        spec = profiles.load(pid).get("mapscript")
+        text = None
+        if spec and SESSION.path:
+            data = SESSION.read_file(mapscript.script_path(spec, SESSION.path))
+            text = data.decode("utf-8", errors="replace") if data is not None else ""
+        found += mapscript.check(pid, ents, SESSION.path, text=text)
+        # And its speaker and sound scripts, and the names that point into them.
+        found += soundscript.check(pid, ents, SESSION.path, script_text=text)
+
     except profiles.ProfileError as e:
         raise ToolError(_profile_error_text(e)) from e
     found += _missing_textures(m, pid)
@@ -607,7 +814,8 @@ def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
     found = mapscript.check(pid, ents, SESSION.path, text=text)
     return {
         "path": str(path),
-        "exists": path.is_file(),
+        "exists": SESSION.read_file(path) is not None,
+        "staged": path.resolve() in SESSION.pending_files,
         "blocks": [
             {
                 "block": b.name,
@@ -630,9 +838,7 @@ def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
 
 
 def _write_script(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8", newline="\n")
-    tmp.replace(path)
+    SESSION.stage_file(path, text.encode("utf-8"))
 
 
 @tool("map", "Show the map script")
@@ -644,7 +850,7 @@ def script_show() -> dict:
     ones `validate_profile` reports for the script.
     """
     pid, spec, path = _script_spec()
-    text = path.read_text(errors="replace") if path.is_file() else ""
+    text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
     try:
         return _script_report(pid, spec, path, text)
     except mapscript.ScriptSyntaxError as e:
@@ -665,11 +871,11 @@ def script_set_event(
 
     Refused before anything is written: an event or action the profile does not list, and a
     line the engine would misparse. Written, then reported in `findings`: references that
-    resolve to nothing yet, since the entity may be placed next. The script is written
-    immediately; it is a separate file from the `.map`, which still needs `map_save`.
+    resolve to nothing yet, since the entity may be placed next. The script is staged
+    with the geometry; `map_save` saves both and checks for external changes.
     """
     pid, spec, path = _script_spec()
-    text = path.read_text(errors="replace") if path.is_file() else ""
+    text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
     try:
         new, did = mapscript.set_event(text, spec, block, event, list(params or []), actions)
     except mapscript.ScriptEditError as e:
@@ -685,12 +891,12 @@ def script_remove(block: str, event: str | None = None, params: list[str] | None
     """Remove one event from a block of the open map's script, or the whole block.
 
     Without `event`, the whole block goes. Everything else in the file is left as it was. The
-    script is written immediately.
+    script is staged until `map_save`.
     """
     pid, spec, path = _script_spec()
-    if not path.is_file():
+    if SESSION.read_file(path) is None:
         raise ToolError(f"there is no script at {path} to remove anything from")
-    text = path.read_text(errors="replace")
+    text = SESSION.read_file(path).decode("utf-8", errors="replace")
     try:
         new = mapscript.remove(text, spec, block, event, list(params or []))
     except mapscript.ScriptEditError as e:
@@ -704,13 +910,30 @@ def script_remove(block: str, event: str | None = None, params: list[str] | None
     }
 
 
-def _fill(value: Any, subs: dict[str, str]) -> Any:
+def _fill(value: Any, subs: dict[str, str], seqs: dict[str, list[dict]] | None = None) -> Any:
+    """A recipe with `{placeholders}` filled in.
+
+    A list item `{"each": <sequence>, "do": [...]}` stands for the `do` items once per row of
+    that sequence (an escort's path segments), each row adding its own placeholders.
+    """
     if isinstance(value, str):
         return value.format(**subs)
     if isinstance(value, list):
-        return [_fill(v, subs) for v in value]
+        out: list = []
+        for v in value:
+            if isinstance(v, dict) and "each" in v:
+                rows = (seqs or {}).get(str(v["each"]))
+                if rows is None:
+                    raise ToolError(
+                        f"the recipe repeats over {v['each']!r}, which it does not have"
+                    )
+                for row in rows:
+                    out.extend(_fill(list(v.get("do") or []), {**subs, **row}, seqs))
+            else:
+                out.append(_fill(v, subs, seqs))
+        return out
     if isinstance(value, dict):
-        return {k: _fill(v, subs) for k, v in value.items()}
+        return {k: _fill(v, subs, seqs) for k, v in value.items()}
     return value
 
 
@@ -725,68 +948,437 @@ def _as_ir(shape: dict, what: str) -> dict:
     raise ToolError(f"{what} must be a box {{min, max}} or a Solid IR tree")
 
 
+def _xyz(value: Any) -> list[float] | None:
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 3
+        and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in value)
+    ):
+        return [float(c) for c in value]
+    return None
+
+
+def _as_points(value: Any, role: str) -> list[tuple[list[float], Any]]:
+    """A role's positions: [x, y, z], {"origin": [x, y, z], "angle": yaw}, or a list of those."""
+    shape = f"points.{role}: a point is [x, y, z] or {{origin, angle}}"
+    one = _xyz(value)
+    if one is not None:
+        return [(one, None)]
+    if isinstance(value, dict):
+        origin = _xyz(value.get("origin"))
+        angle = value.get("angle")
+        if origin is None or set(value) - {"origin", "angle"}:
+            raise ToolError(shape)
+        if angle is not None and (isinstance(angle, bool) or not isinstance(angle, (int, float))):
+            raise ToolError(f"points.{role}: angle is a yaw in degrees")
+        return [(origin, angle)]
+    if isinstance(value, list) and value and all(isinstance(v, (list, dict)) for v in value):
+        return [p for v in value for p in _as_points(v, role)]
+    raise ToolError(shape + ", or a list of them")
+
+
+def _for_team(part: dict, team: str) -> bool:
+    """A recipe part that names `teams` is built only for those teams."""
+    only = part.get("teams")
+    return not only or team in [str(t) for t in only]
+
+
+def _point(value: Any, what: str) -> list[float]:
+    if (
+        not isinstance(value, (list, tuple))
+        or len(value) != 3
+        or not all(
+            isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c)
+            for c in value
+        )
+    ):
+        raise ToolError(f"{what} must be three finite numbers, got {value!r}")
+    return [float(c) for c in value]
+
+
+def _as_shape(shape: Any, what: str) -> dict:
+    """`{"point": [x, y, z]}` for `{"origin": [x, y, z]}`, else `{"ir": <Solid IR>}`."""
+    if isinstance(shape, dict) and set(shape) == {"origin"}:
+        return {"point": _point(shape["origin"], f"{what} origin")}
+    return {"ir": _as_ir(shape, what)}
+
+
+def _centre(k: Any, shape: dict) -> list[float]:
+    """Where a point entity goes for a shape: the point itself, or the middle of its bounds."""
+    if "point" in shape:
+        return shape["point"]
+    b = k.solid_compile(shape["ir"], None, 1)["bounds"]
+    if not b:
+        raise ToolError("the shape is empty, so nothing can be placed inside it")
+    return [(lo + hi) / 2 for lo, hi in zip(b["min"], b["max"], strict=True)]
+
+
+def _paths_spec(pid: str) -> dict:
+    spec = profiles.load(pid).get("paths")
+    if not isinstance(spec, dict) or not spec.get("point_class"):
+        raise ToolError(f"profile {pid} describes no paths for movers to follow")
+    return spec
+
+
+def _path_chain(m: Any, spec: dict, start: str) -> list[tuple[str, list[float]]]:
+    """The points of the path that starts at `start`, in order, by following each point's
+    next key as the engine links them."""
+    fold = spec.get("case_sensitive") is False
+    norm = (lambda s: s.lower()) if fold else (lambda s: s)
+    points: dict[str, tuple[str, list[float] | None, dict]] = {}
+    for e in m.entities(classname=str(spec["point_class"])):
+        # A later duplicate key is the one the engine reads.
+        keys = {str(a).lower(): str(b) for a, b in e["keys"]}
+        nm = keys.get(str(spec["name_key"]).lower(), "").strip()
+        if nm:
+            points.setdefault(norm(nm), (nm, e["origin"], keys))
+    here = points.get(norm(start))
+    if here is None:
+        raise ToolError(
+            f"no {spec['point_class']} is named {start!r}; lay the path with path_place and pass "
+            "the `start` it returns"
+        )
+    chain: list[tuple[str, list[float]]] = []
+    seen: set[str] = set()
+    while here is not None:
+        nm, origin, keys = here
+        if norm(nm) in seen:
+            raise ToolError(f"the path from {start!r} loops back to {nm!r}; a path must end")
+        if origin is None:
+            raise ToolError(f"path point {nm!r} has no origin")
+        seen.add(norm(nm))
+        chain.append((nm, [float(c) for c in origin]))
+        nxt = keys.get(str(spec["next_key"]).lower(), "").strip()
+        if not nxt:
+            break
+        here = points.get(norm(nxt))
+        if here is None:
+            raise ToolError(f"path point {nm!r} leads to {nxt!r}, which is not a path point")
+    return chain
+
+
+def _curve_length(pts: list[list[float]], steps: int = 64) -> float:
+    """Length of the Bezier curve through these control points, by de Casteljau."""
+
+    def at(t: float) -> list[float]:
+        ps = [list(p) for p in pts]
+        while len(ps) > 1:
+            ps = [
+                [a + (b - a) * t for a, b in zip(p, q, strict=True)]
+                for p, q in itertools.pairwise(ps)
+            ]
+        return ps[0]
+
+    samples = [at(i / steps) for i in range(steps + 1)]
+    return sum(math.dist(a, b) for a, b in itertools.pairwise(samples))
+
+
+@tool("map", "Lay a path", writes=True)
+def path_place(name: str, points: list, max_segment: float = 0) -> dict:
+    """Lay a path for a mover to follow: a chain of named path points, straight or curved.
+
+    `points` are where the mover's origin travels, in order, at least two: each `[x, y, z]`,
+    or `{"at": [x, y, z], "controls": [[x, y, z], ...]}` to bend the segment that leaves that
+    point into a curve pulled towards its control points (the profile says how many a segment
+    may have; ET: Legacy takes four). The last point has no segment, so no controls.
+
+    The points are named `<name>_0`, `<name>_1`, ... and each names the next, as the engine
+    links them; control points are `<name>_<i>_c<j>`. The first point's name comes back as
+    `start`: pass it to `objective_place(path=...)`. A mover stops only at points, so for a
+    vehicle that should halt soon after its escort leaves, keep segments short:
+    `max_segment` splits every straight segment longer than that into equal ones.
+
+    For an escort vehicle, put the points at the height of the vehicle's middle and the first
+    one inside the vehicle where it starts: the vehicle keeps its offset from the point it
+    travels with, and turns to face along each segment. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    pid = active_profile()
+    if not pid:
+        raise ToolError("no profile selected; set NRC_PROFILE")
+    spec = _paths_spec(pid)
+    try:
+        mapscript._word(name, "path name")
+    except mapscript.ScriptEditError as e:
+        raise ToolError(str(e)) from e
+    if not isinstance(points, list) or len(points) < 2:
+        raise ToolError("a path needs at least two points")
+    if max_segment < 0 or not math.isfinite(max_segment):
+        raise ToolError("max_segment is a length in units, or 0 to keep segments as given")
+    control_keys = [str(c) for c in spec.get("control_keys") or []]
+
+    laid: list[tuple[list[float], list[list[float]]]] = []
+    for i, p in enumerate(points):
+        if isinstance(p, dict):
+            unknown = set(p) - {"at", "controls"}
+            if unknown or "at" not in p:
+                raise ToolError(f"point {i} is [x, y, z] or {{at, controls}}, got keys {sorted(p)}")
+            at = _point(p["at"], f"point {i}")
+            controls = [_point(c, f"point {i} control") for c in p.get("controls") or []]
+        else:
+            at, controls = _point(p, f"point {i}"), []
+        if len(controls) > len(control_keys):
+            raise ToolError(
+                f"point {i} has {len(controls)} controls; a segment takes at most "
+                f"{len(control_keys)}"
+            )
+        if controls and i == len(points) - 1:
+            raise ToolError("the last point has no segment to curve, so it takes no controls")
+        laid.append((at, controls))
+
+    # Split long straight segments into equal ones.
+    route: list[tuple[list[float], list[list[float]]]] = []
+    for (a, ctl), nxt in zip(laid, [*laid[1:], None], strict=True):
+        route.append((a, ctl))
+        if nxt is None or ctl or not max_segment:
+            continue
+        pieces = math.ceil(math.dist(a, nxt[0]) / max_segment)
+        for s in range(1, pieces):
+            t = s / pieces
+            route.append(([u + (v - u) * t for u, v in zip(a, nxt[0], strict=True)], []))
+
+    names = [f"{name}_{i}" for i in range(len(route))]
+    wanted = {n.lower() for n in names}
+    wanted |= {f"{name}_{i}_c{j}".lower() for i, (_, c) in enumerate(route) for j in range(len(c))}
+    name_key = str(spec["name_key"]).lower()
+    clash = [
+        (e["index"], v)
+        for e in m.entities()
+        for k, v in e["keys"]
+        if k.lower() == name_key and v.lower() in wanted
+    ]
+    if clash:
+        raise ToolError(f"entity {clash[0][0]} is already named {clash[0][1]!r}; pick another name")
+    existing = len(m.entities(classname=str(spec["point_class"]), with_keys=False))
+    limit = int(spec.get("max_points") or 0)
+    if limit and existing + len(route) > limit:
+        raise ToolError(
+            f"the map would have {existing + len(route)} path points; the game takes {limit}"
+        )
+
+    k = _kernel()
+    m = k.Map.parse(m.source())
+    out_points = []
+    total = 0.0
+    for i, (at, controls) in enumerate(route):
+        pairs = [
+            ("classname", str(spec["point_class"])),
+            ("origin", _value_text("origin", at)),
+            (str(spec["name_key"]), names[i]),
+        ]
+        if i + 1 < len(route):
+            pairs.append((str(spec["next_key"]), names[i + 1]))
+        ctl_names = []
+        for j, c in enumerate(controls):
+            ctl_names.append(f"{name}_{i}_c{j}")
+            pairs.append((control_keys[j], ctl_names[-1]))
+            m.add_entity(
+                [
+                    ("classname", str(spec["control_class"])),
+                    ("origin", _value_text("origin", c)),
+                    (str(spec["name_key"]), ctl_names[-1]),
+                ]
+            )
+        entity = m.add_entity(pairs)
+        length = _curve_length([at, *controls, route[i + 1][0]]) if i + 1 < len(route) else 0.0
+        total += length
+        out_points.append(
+            {"name": names[i], "entity": entity, "origin": at, "controls": ctl_names}
+            | ({"segment_length": round(length, 1)} if i + 1 < len(route) else {})
+        )
+    SESSION.map = m
+    report = validate_profile()
+    notes = []
+    if SESSION.grid > 0 and any(c % SESSION.grid for c in route[0][0]):
+        notes.append(
+            f"the first point is off the {SESSION.grid}-unit grid; a vehicle put on this path "
+            "turns about a brush centred there, which will be off the grid too"
+        )
+    return {
+        "start": names[0],
+        "points": out_points,
+        "segments": len(route) - 1,
+        "length": round(total, 1),
+        "notes": notes,
+        "summary": report["summary"],
+        "findings": report["findings"],
+        "next": "objective_place(kind=..., path=start) to put a vehicle on it; map_save to write it",
+    }
+
+
 @tool("map", "Place an objective", writes=True)
 def objective_place(
     kind: str,
     name: str,
     track: str,
     team: str,
-    objective: dict,
-    trigger: dict,
+    objective: dict | None = None,
+    trigger: dict | None = None,
     texture: str = "",
+    points: dict | None = None,
+    path: str = "",
+    options: dict[str, str | float] | None = None,
 ) -> dict:
-    """Build a whole objective in one call: its trigger, the objective entity, keys and script.
+    """Build a whole objective in one call: its trigger, the objective entities, keys and script.
 
-    The kinds are the profile's (`objectives:` in `nrc://profile/{id}`); for ET: Legacy,
-    `dynamite` (the other team blows it up) and `constructible` (`team`'s engineers build it,
-    the other team can blow it up once built). `objective` and `trigger` are boxes
-    `{"min": [...], "max": [...]}` or Solid IR trees: the objective's own brushes, and the
-    volume players stand in to see "You are near <track>" and to plant or build. Make the
-    trigger enclose the objective with room to stand. `texture` goes on the objective's brushes.
+    The kinds are the profile's (`objectives:` in `nrc://profile/{id}`, which describes each);
+    for ET: Legacy:
 
-    The links the engine needs are made for you - the trigger targets the objective, the
-    objective carries the weapon class that lets dynamite destroy it - and the script gets the
-    objective's events, which you can extend with `script_set_event`. Nothing in the map reaches
-    disk until `map_save`; the script is written at once.
+    - `dynamite`: the other team blows it up. `team` owns and defends it.
+    - `constructible`: `team`'s engineers build it; the other team can blow it up once built.
+    - `command_post`: the stock command post. Built, it shortens its team's charge times and
+      reports landmines to it; destroyed, that stops. `team` is `neutral` (either team builds
+      it, one at a time), `axis` or `allies` (only that team builds it).
+    - `checkpoint`: a forward spawn flag both teams capture. `team` holds it, and its spawns,
+      at the start.
+    - `checkpoint_one_way`: the same, but only the other team can raise its flag. `team` can
+      still knock that flag down, and that hands the spawns back (the engine's rule).
+    - `escort`: a vehicle `team` escorts along `path` (the `start` from `path_place`). It moves
+      while `team` players stand in `trigger`, stops at the next path point a couple of seconds
+      after they leave, and runs `trigger arrived` on `name` at the end. Not damageable.
+    - `steal`: an item the other team steals from `team` and carries into `trigger`, which
+      runs `death` on `<name>_deliver`; `objective` is where it lies.
+
+    `objective` and `trigger` are boxes `{"min": [...], "max": [...]}` or Solid IR trees, for
+    the kinds that have them: the objective's own brushes (a vehicle as it stands at the path's
+    first point), and the volume players stand in - to see "You are near <track>" and plant or
+    build, to escort, or to deliver. Where the objective is a point entity (a stolen item),
+    `objective` may also be `{"origin": [x, y, z]}`. Make the trigger enclose the objective
+    with room to stand. `texture` goes on the objective's brushes.
+
+    `points` places point entities by role, for the kinds that have them:
+    `{"flag": [x, y, z], "spawns": [[x, y, z], {"origin": [x, y, z], "angle": 90}, ...]}`.
+    For a checkpoint, `flag` is the foot of the flagpole, and the spawn region marker named
+    `track` goes there too. Each of `spawns` gets one spawn for each team, linked to the flag:
+    the holder's start active, and a capture hands them to the capturing team. Spawns are
+    optional; place them later with the targetname given under `links`.
+
+    `options` sets a kind's tunables, such as an escort's `speed` or a stolen item's `model`;
+    the profile lists them with their defaults.
+
+    The links the engine needs are made for you - triggers target what they work, a dynamite
+    objective carries its weapon class, a vehicle carries the origin it turns about - and the
+    script gets the objective's events, which you can extend with `script_set_event`. Nothing
+    in the map reaches disk until `map_save`; the script is staged with it.
     """
     m = SESSION.require()
-    pid, spec, path = _script_spec()
+    pid, spec, script_path = _script_spec()
     recipes = profiles.load(pid).get("objectives")
     if not isinstance(recipes, dict) or not recipes.get("kinds"):
         raise ToolError(f"profile {pid} describes no objectives to build")
     kinds = recipes["kinds"]
     if kind not in kinds:
         raise ToolError(f"unknown objective kind {kind!r}; the profile has: {', '.join(kinds)}")
-    teams = [str(t) for t in recipes.get("teams") or []]
+    raw = kinds[kind]
+    teams = [str(t) for t in raw.get("teams") or recipes.get("teams") or []]
     if team not in teams:
-        raise ToolError(f"team must be one of {', '.join(teams)}, got {team!r}")
+        raise ToolError(f"team must be one of {', '.join(teams)} for {kind}, got {team!r}")
     try:
         mapscript._word(name, "objective name")
     except mapscript.ScriptEditError as e:
         raise ToolError(str(e)) from e
     if not track.strip() or '"' in track or "\n" in track:
         raise ToolError("track is the text shown in game: non-empty, one line, no double quotes")
-    taken = [
-        e["index"]
-        for e in m.entities()
-        if any(
-            k.lower() in ("targetname", "scriptname") and v.lower() == name.lower()
-            for k, v in e["keys"]
-        )
-    ]
-    if taken:
-        raise ToolError(f"entity {taken[0]} already uses the name {name!r}; pick another")
 
     subs = {"name": name, "track": track, "team": team}
     for key, by_team in (recipes.get("team_values") or {}).items():
-        subs[key] = str(by_team[team])
-    recipe = _fill(kinds[kind], subs)
-    shapes = {"trigger": _as_ir(trigger, "trigger"), "objective": _as_ir(objective, "objective")}
+        if team in by_team:
+            subs[key] = str(by_team[team])
+    declared = raw.get("options") or {}
+    unknown = sorted(set(options or {}) - set(declared))
+    if unknown:
+        known = ", ".join(declared) or "none"
+        raise ToolError(f"{kind} has no option {unknown[0]!r}; its options: {known}")
+    for opt, about in declared.items():
+        value = _value_text(opt, (options or {}).get(opt, about.get("default", "")))
+        pattern = about.get("pattern")
+        if pattern and not re.fullmatch(str(pattern), value):
+            raise ToolError(f"option {opt} {value!r} is not {about.get('description', pattern)}")
+        subs[opt] = value
+
+    seqs: dict[str, list[dict]] = {}
+    anchors: dict[str, list[float]] = {}
+    if raw.get("path"):
+        if not path:
+            raise ToolError(f"{kind} follows a path: lay one with path_place and pass its start")
+        chain = _path_chain(m, _paths_spec(pid), path)
+        segments = len(chain) - 1
+        cap = int(raw["path"].get("max_segments") or 0) if isinstance(raw["path"], dict) else 0
+        if segments < 1:
+            raise ToolError(f"the path from {path!r} has one point and no segment to follow")
+        if cap and segments > cap:
+            raise ToolError(f"the path has {segments} segments; {kind} takes at most {cap}")
+        seqs["segment"] = [{"i": str(i), "segment": chain[i][0]} for i in range(segments)]
+        subs["segments"] = str(segments)
+        anchors["path_start"] = chain[0][1]
+    elif path:
+        raise ToolError(f"{kind} does not follow a path; leave path out")
+
+    # Only the parts that are filled in: a kind's option patterns are regexes, not templates.
+    try:
+        parts = [ent for ent in _fill(raw["entities"], subs, seqs) if _for_team(ent, team)]
+        events = [ev for ev in _fill(raw.get("script") or [], subs, seqs) if _for_team(ev, team)]
+        links = _fill(raw.get("links"), subs, seqs) if raw.get("links") else None
+    except KeyError as e:
+        raise ToolError(f"profile {pid}: {kind} needs a team value {e} for {team}") from e
+
+    # Every name the recipe hands out must be free, or two objectives would answer to it.
+    name_keys = ("targetname", "scriptname")
+    ours = (
+        {name.lower()}
+        | {
+            str(v).lower()
+            for ent in parts
+            for k, v in (ent.get("keys") or {}).items()
+            if k.lower() in name_keys
+        }
+        | {str(ev["block"]).lower() for ev in events}
+    )
+    for e in m.entities():
+        clash = [v for k, v in e["keys"] if k.lower() in name_keys and v.lower() in ours]
+        if clash:
+            raise ToolError(f"entity {e['index']} already uses the name {clash[0]!r}; pick another")
+
+    # Where each part goes: a point role at the positions given in `points`, or at the centre
+    # of the shape it names (`at`, else its own role); a brush part on its shape's brushes.
+    given = dict(points or {})
+    supplied = {"trigger": trigger, "objective": objective}
+    point_roles = {str(ent["role"]) for ent in parts if ent.get("point")}
+    if set(given) - point_roles:
+        raise ToolError(
+            f"{kind} places no {', '.join(sorted(set(given) - point_roles))}; its points are: "
+            f"{', '.join(sorted(point_roles)) or 'none'}"
+        )
+    shapes: dict[str, dict] = {}
+    places: dict[str, list] = {}
+
+    def shape_for(role: str) -> dict:
+        if role not in shapes:
+            if supplied.get(role) is None:
+                raise ToolError(f"{kind} needs `{role}`: a box {{min, max}} or a Solid IR tree")
+            shapes[role] = _as_shape(supplied[role], role)
+        return shapes[role]
+
+    for ent in parts:
+        role = str(ent["role"])
+        where = str(ent.get("at", role))
+        if ent.get("point"):
+            if role in given:
+                places[role] = _as_points(given[role], role)
+            elif "at" in ent or supplied.get(where) is not None:
+                shape_for(where)
+            elif not ent.get("optional"):
+                raise ToolError(f"{kind} needs points.{role}")
+        else:
+            shape_for(where)
+    extra = [r for r, v in supplied.items() if v is not None and r not in shapes]
+    if extra:
+        raise ToolError(f"{kind} has no `{'`, `'.join(extra)}` brushes; leave it out")
 
     # The script edit is worked out first, so a refusal there changes nothing in the map.
-    text = path.read_text(errors="replace") if path.is_file() else ""
+    text = (SESSION.read_file(script_path) or b"").decode("utf-8", errors="replace")
     try:
-        for ev in recipe.get("script") or []:
+        for ev in events:
             text, _ = mapscript.set_event(
                 text,
                 spec,
@@ -799,13 +1391,37 @@ def objective_place(
         raise ToolError(f"nothing changed: the script edit was refused ({e})") from e
 
     k = _kernel()
+    # Build on a copy: a later invalid shape must not leave half an objective behind.
+    m = k.Map.parse(m.source())
     made = []
-    for ent in recipe["entities"]:
-        role = ent["role"]
+    origin_brush = recipes.get("origin_brush") or {}
+    for ent in parts:
+        role = str(ent["role"])
+        where = str(ent.get("at", role))
+        keys = [(str(a), str(b)) for a, b in (ent.get("keys") or {}).items()]
+        if ent.get("point"):
+            if role in places:
+                spots = places[role]
+            elif where in shapes:
+                spots = [(_centre(k, shapes[where]), None)]
+            else:
+                spots = []  # optional, and not given
+            for origin, angle in spots:
+                pairs = [("classname", ent["classname"]), ("origin", _value_text("origin", origin))]
+                if angle is not None:
+                    pairs.append(("angle", _value_text("angle", angle)))
+                index = m.add_entity(pairs + keys)
+                made.append(
+                    {"role": role, "classname": ent["classname"], "entity": index, "origin": origin}
+                )
+            continue
+        shape = shapes[where]
+        if "ir" not in shape:
+            raise ToolError(f"{role} is a brush entity here: give a box or a Solid IR tree")
         tex = ent.get("texture") or texture or "common/caulk"
         r = k.solid_commit(
             m,
-            shapes[role],
+            shape["ir"],
             {"default": tex},
             SESSION.grid,
             ent["classname"],
@@ -814,7 +1430,21 @@ def objective_place(
             True,
             None,
         )
-        m.set_keys(r["entity"], [(str(a), str(b)) for a, b in ent.get("keys", {}).items()])
+        if ent.get("origin_at"):
+            # The brushes turn and travel about this point (an origin brush).
+            at, h = anchors[ent["origin_at"]], float(origin_brush.get("half_size", 8))
+            k.solid_commit(
+                m,
+                {"op": "box", "min": [c - h for c in at], "max": [c + h for c in at]},
+                {"default": str(origin_brush["texture"])},
+                1,
+                ent["classname"],
+                False,
+                f"{name}_{role}_origin",
+                False,
+                r["entity"],
+            )
+        m.set_keys(r["entity"], keys)
         made.append(
             {
                 "role": role,
@@ -823,18 +1453,22 @@ def objective_place(
                 "brushes": r["brushes_created"],
             }
         )
-    _write_script(path, text)
+    _write_script(script_path, text)
+    SESSION.map = m
 
     report = validate_profile()
-    return {
+    out = {
         "kind": kind,
         "name": name,
         "entities": made,
-        "script": str(path),
+        "script": str(script_path),
         "summary": report["summary"],
         "findings": report["findings"],
         "next": "map_save to write the map; script_set_event to add to the objective's events",
     }
+    if links:
+        out["links"] = links
+    return out
 
 
 @tool("map", "Game profile summary")

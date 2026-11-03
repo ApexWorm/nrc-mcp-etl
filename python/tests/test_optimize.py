@@ -515,6 +515,83 @@ def test_leak_trace_does_not_claim_a_distant_entity(tmp_path, kernel_available):
     assert out["findings"][0]["code"] == "LEAK_ENTITY_UNRESOLVED"
 
 
+_SEALING = {
+    "sealing": {
+        "confidence": "verified",
+        "source": "q3map2_source",
+        "translucent_surfaceparms": ["alphashadow", "trans"],
+        "model_entities": ["a_model"],
+        "model_key": "model",
+    }
+}
+
+
+def _leak_through_a_grate(tmp_path) -> tuple[Path, Path]:
+    """battery's leak in miniature: a floor slab with one see-through face, a room above it,
+    and nothing below. The slab is not marked detail, so it looks like it closes the room."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "mine.shader").write_text(
+        "textures/mine/grate\n{\n\tsurfaceparm alphashadow\n\t{\n\t\tmap textures/mine/grate.tga\n"
+        "\t\talphaFunc GE128\n\t}\n}\n"
+    )
+    slab = box((0, 0, 0), (64, 64, 4)).replace(
+        "( 0 0 4 ) ( 0 1 4 ) ( 1 0 4 ) common/caulk", "( 0 0 4 ) ( 0 1 4 ) ( 1 0 4 ) mine/grate"
+    )
+    assert "mine/grate" in slab
+    entities = (
+        '{\n"classname" "light"\n"origin" "32 32 64"\n}\n'
+        '{\n"classname" "a_model"\n"model" "models/gone.md3"\n"origin" "32 32 70"\n}\n'
+    )
+    map_path = write_map(
+        tmp_path / "grate.map",
+        [slab, box((100, 0, 40), (164, 64, 48), contents=optimize.BRUSH_DETAIL_MASK)],
+        extra_entities=entities,
+    )
+    lin = tmp_path / "grate.lin"
+    lin.write_text("32.000000 32.000000 -512.000000\n32.000000 32.000000 2.000000\n32 32 64\n")
+    return map_path, lin
+
+
+def test_leak_trace_names_a_solid_looking_brush_with_a_translucent_side(
+    tmp_path, kernel_available, monkeypatch
+):
+    map_path, lin = _leak_through_a_grate(tmp_path)
+    real = profiles.load
+    monkeypatch.setattr(profiles, "load", lambda pid: _SEALING if pid == "t" else real(pid))
+    out = optimize.leak_trace(lin, map_path, profile_id="t")
+    by = {f["code"]: f for f in out["findings"]}
+    grate = by["LEAK_NONSEALING_BRUSH"]
+    assert grate["severity"] == "warning"
+    assert "mine/grate: alphashadow" in grate["message"]
+    (b,) = grate["detail"]["brushes"]
+    assert b["brush"] == 0 and b["marked_detail"] is False
+    model = by["LEAK_MODEL_NEAR_PATH"]
+    assert model["detail"]["models"][0]["model"] == "models/gone.md3"
+    assert "never seals" in model["message"]
+    # The detail brush is off the path.
+    assert "LEAK_DETAIL_ON_PATH" not in by
+
+
+def test_leak_trace_names_no_cause_without_a_profile_that_says_what_seals(
+    tmp_path, kernel_available
+):
+    map_path, lin = _leak_through_a_grate(tmp_path)
+    out = optimize.leak_trace(lin, map_path)
+    assert [f["code"] for f in out["findings"]] == ["LEAK_TRACED"]
+
+
+def test_the_etl_profile_says_alphashadow_does_not_seal():
+    """battery's leak: metals_sd/grate_b is `surfaceparm alphashadow`, which the et game table
+    makes C_TRANSLUCENT (games.cpp:150), so its brushes stopped sealing."""
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    seal = profiles.load("etl")["sealing"]
+    assert {"alphashadow", "trans", "playerclip", "clipmissile"} <= set(
+        seal["translucent_surfaceparms"]
+    )
+    assert "nonsolid" not in seal["translucent_surfaceparms"], "nonsolid is not translucent"
+
+
 # ---------------------------------------------------------------------------
 # Shader parsing
 # ---------------------------------------------------------------------------

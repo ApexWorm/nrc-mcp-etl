@@ -460,3 +460,135 @@ def test_grid_findings_are_errors_for_new_work_and_one_warning_for_inherited(k, 
         srv.SESSION.map = None
         srv.SESSION.path = None
         srv.SESSION.opened_brushes = None
+
+
+@pytest.fixture
+def solid_session(k, tmp_path):
+    from nrc_mcp import server as srv
+
+    srv.map_new(str(tmp_path / "parametric.map"))
+    yield srv
+    srv.SESSION.map = None
+    srv.SESSION.path = None
+    srv.SESSION.pending_files.clear()
+    srv.SESSION.baseline_files.clear()
+    srv.SESSION.checkpoints.clear()
+
+
+def test_parameter_edit_replaces_geometry_preserving_materials_and_neighbours(solid_session):
+    srv = solid_session
+    path = srv.SESSION.path
+    textures = {"default": "textures/wall", "top": "textures/top", "detail": True}
+    box = {"op": "box", "min": [0, 0, 0], "max": [64, 64, 64]}
+    srv.solid_commit(box, "editable", textures=textures, grid=16)
+    srv.solid_commit({**box, "min": [128, 0, 0], "max": [192, 64, 64]}, "neighbour")
+    neighbour = srv.SESSION.map.brush_sources()[1][2]
+    assert not solids.sidecar_path(path).exists(), "sidecar must wait for map_save"
+    before = srv.SESSION.map.source()
+    preview = srv.solid_param_preview("editable", "max[0]", 96)
+    assert preview["after"]["bounds"]["size"][0] == 96
+    assert srv.SESSION.map.source() == before, "preview must not change geometry"
+    assert not preview["recorded"]
+    srv.SESSION.grid = 8
+    result = srv.solid_edit_param("editable", "max[0]", 96)
+    assert result["brushes_replaced"] == 1
+    assert srv.map_stats()["brushes"] == 2, "replacement must not accumulate old brushes"
+    lo, hi = srv.brush_geometry(0, 0)["bounds"]
+    assert hi[0] - lo[0] == 96
+    assert srv.brush_geometry(0, 0)["detail"] is True
+    assert srv.SESSION.map.brush_sources()[1][2] == neighbour
+    source = srv.SESSION.map.source()
+    assert "textures/top" in source and "textures/wall" in source
+    srv.map_save(check_playable_space=False)
+    entry = solids.get(path, "editable")
+    assert entry["grid"] == 16 and entry["textures"] == textures
+    srv.map_open(str(path))
+    srv.solid_edit_param("editable", "max[0]", 128)
+    assert srv.map_stats()["brushes"] == 2, "provenance survives save and reopen"
+
+
+def test_parameter_edit_refuses_manual_changes_without_touching_map_or_sidecar(solid_session):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    srv = solid_session
+    srv.solid_commit(ROOM, "room")
+    srv.brush_set_detail([[0, 0]])
+    source = srv.SESSION.map.source()
+    staged = dict(srv.SESSION.pending_files)
+    with pytest.raises(ToolError, match="changed or are missing"):
+        srv.solid_edit_param("room", "thickness", 32)
+    assert srv.SESSION.map.source() == source
+    assert srv.SESSION.pending_files == staged
+
+
+def test_parameter_edit_preserves_owner_keys_and_does_not_create_another_entity(solid_session):
+    srv = solid_session
+    srv.solid_commit(ROOM, "door", target_classname="func_door", new_entity=True)
+    srv.entity_set_keys(1, {"targetname": "door_a", "speed": "200"})
+    before_keys = srv.query_entities()["entities"][1]["keys"]
+    srv.solid_edit_param("door", "thickness", 32)
+    entities = srv.query_entities()["entities"]
+    assert len(entities) == 2 and entities[1]["brushes"] == 6
+    assert entities[1]["keys"] == before_keys
+
+
+def test_parameter_edit_checkpoint_restores_geometry_and_provenance(solid_session):
+    srv = solid_session
+    srv.solid_commit(ROOM, "room")
+    before = srv.SESSION.map.source()
+    pending = dict(srv.SESSION.pending_files)
+    srv.map_checkpoint("before_width")
+    srv.solid_edit_param("room", "solid.max[0]", 576)
+    assert srv.SESSION.map.source() != before
+    srv.map_restore("before_width")
+    assert srv.SESSION.map.source() == before
+    assert srv.SESSION.pending_files == pending
+    srv.solid_edit_param("room", "solid.max[0]", 640)
+    assert srv.solid_inspect("room")["ir"]["solid"]["max"][0] == 640
+
+
+def test_duplicate_solid_label_is_refused_before_adding_brushes(solid_session):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    srv = solid_session
+    srv.solid_commit(ROOM, "room")
+    before = srv.SESSION.map.source()
+    with pytest.raises(ToolError, match="already exists"):
+        srv.solid_commit(ROOM, "room")
+    assert srv.SESSION.map.source() == before
+
+
+def test_native_brush_replacement_validates_every_brush_before_mutating(k):
+    m = k.Map.parse('{\n"classname" "worldspawn"\n}\n')
+    k.solid_commit(m, ROOM, None, 8, "worldspawn", False, "room")
+    source = m.source()
+    expected = [(pi, src) for _, pi, src in m.brush_sources()]
+    expected[-1] = (expected[-1][0], "changed")
+    with pytest.raises(ValueError, match="changed"):
+        m.replace_brushes(0, expected, source)
+    assert m.source() == source
+
+
+def test_native_copy_preserves_original_round_trip_and_independent_geometry(k):
+    m = k.Map.parse('{\n"classname" "worldspawn"\n}\n')
+    clone = m.copy()
+    k.solid_commit(clone, ROOM, None, 8, "worldspawn", False, "room")
+    assert m.round_trip()["identical"]
+    assert not clone.round_trip()["identical"]
+    assert m.stats()["brushes"] == 0 and clone.stats()["brushes"] == 6
+
+
+def test_native_save_is_atomic_and_cleans_up_after_rename_failure(k, tmp_path):
+    m = k.Map.parse('{\n"classname" "worldspawn"\n}\n')
+    target = tmp_path / "map.map"
+    target.write_text("previous version")
+    target.chmod(0o640)
+    m.save(str(target))
+    assert target.read_text() == m.source()
+    assert target.stat().st_mode & 0o777 == 0o640
+    directory = tmp_path / "not_a_file.map"
+    directory.mkdir()
+    with pytest.raises(ValueError):
+        m.save(str(directory))
+    assert directory.is_dir()
+    assert not list(tmp_path.glob(".nrc-save-*.tmp"))

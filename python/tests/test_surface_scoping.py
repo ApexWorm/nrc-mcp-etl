@@ -141,3 +141,59 @@ def test_scoping_actually_saves_context(server):
     assert narrowed < full * 0.7, (
         f"a design-only surface still costs {narrowed} of {full} description characters"
     )
+
+
+def test_every_preset_names_only_registered_tools(server):
+    """A preset naming a tool that was renamed or removed would quietly shrink that session."""
+    registered = _names(server)
+    for preset, names in server.all_presets().items():
+        missing = sorted(set(names) - registered)
+        assert not missing, f"preset {preset!r} names unregistered tools: {missing}"
+
+
+def test_preset_names_do_not_shadow_groups(server):
+    assert not set(server.all_presets()) & set(server.all_groups())
+
+
+def test_a_preset_selects_its_tools_across_groups(server):
+    result = server.select_surface("ship", read_only=False)
+    kept = _names(server)
+    assert kept == set(server.all_presets()["ship"])
+    assert {"compile_map", "pack_pk3", "engine_playtest", "map_save"} <= kept
+    assert "compile_ab" not in kept, "same group as compile_map, but not a shipping tool"
+    assert set(result["kept"]) == kept
+
+
+def test_presets_and_groups_combine_as_a_union(server):
+    server.select_surface("analyse,assets", read_only=False)
+    kept = _names(server)
+    assert {"balance_report", "route_report", "model_place"} <= kept
+    assert "solid_commit" not in kept
+
+
+def test_a_preset_respects_read_only(server):
+    server.select_surface("build", read_only=True)
+    kept = _names(server)
+    assert "solid_commit" not in kept and "map_save" not in kept
+    assert {"solid_compile", "texture_search", "validate"} <= kept
+
+
+def test_level_is_build_analyse_and_ship(server):
+    p = server.all_presets()
+    assert set(p["level"]) == set(p["build"]) | set(p["analyse"]) | set(p["ship"])
+
+
+def test_presets_are_much_smaller_than_the_whole_surface(server):
+    tools = server.mcp._tool_manager.list_tools()
+    full = sum(len(t.description or "") for t in tools)
+    for preset in ("build", "analyse", "ship"):
+        names = set(server.all_presets()[preset])
+        chars = sum(len(t.description or "") for t in tools if t.name in names)
+        # About half: `build` grew past 0.5 when the batch placement tools joined it, and a
+        # preset is chosen by what a session calls, not to meet this bound exactly.
+        assert chars < full * 0.55, f"{preset} still costs {chars} of {full} description characters"
+
+
+def test_an_unknown_name_lists_presets_too(server):
+    with pytest.raises(server.SurfaceError, match="presets: build"):
+        server.select_surface("buidl", read_only=False)

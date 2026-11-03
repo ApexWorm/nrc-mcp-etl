@@ -169,8 +169,7 @@ def render_player_eye(
         position: floor point to stand on, `[x, y, z]`.
         yaw_deg: facing, degrees counter-clockwise from +X.
         eye_height: height above `position`. Omit to read the verified standing height from
-            the active game profile, which is where it belongs — the design document's assumed
-            figure was wrong for this game by 13 units.
+            the active game profile.
 
     Position `z` should be the floor, not the eye. If the result looks empty, the point is
     probably inside solid geometry or outside the map.

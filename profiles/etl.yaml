@@ -67,6 +67,9 @@ profile:
       path: "etmain/pak0.pk3:scripts/common.shader"
       bytes: 14977
       note: "the base game's common shaders, from an installed ET: Legacy; source for clip shader names"
+    - id: q3map2_source
+      path: "vendor/netradiant-custom tools/quake3/q3map2/"
+      note: "the compiler this project drives; cited as file:line for what it does with a brush"
 
 # Editor/engine facts from games/et.game (verbatim attribute values).
 editor:
@@ -148,7 +151,8 @@ movement:
   source: etlegacy_source
   note: >-
     Literal constants from the movement code. ET has no ledge grab or wall jump, so those
-    entries are absent rather than zero. It does have prone, which no tool checks yet.
+    entries are absent rather than zero. Stance analysis checks the main prone body box;
+    separate leg collision and turning clearance are not modelled.
   step_height:
     value: 18
     description: "Max height a player can walk up without needing to jump."
@@ -173,6 +177,14 @@ movement:
     confidence: verified
     source: etlegacy_source
     locus: "game/bg_pmove.c:1098, game/bg_public.h:89"
+  floor_separation:
+    value: 0.125
+    description: >-
+      Collision traces stop this far before entering a brush. On a flat floor the main body
+      rests this far above the floor, so overhead clearance must include this separation.
+    confidence: verified
+    source: etlegacy_source
+    locus: "qcommon/cm_local.h:184 SURFACE_CLIP_EPSILON; qcommon/cm_trace.c:685,751 (entering fraction backoff)"
   eye_height:
     value: 64
     description: "Standing eye height above the floor."
@@ -225,10 +237,41 @@ movement:
     locus: "game/bg_public.h:55 DEFAULT_GRAVITY; g_gravity default at game/g_cvars.c:434"
   run_speed:
     value: 320
-    description: "Default g_speed, in units per second. Not read by any tool yet."
+    description: "Default g_speed, in units per second; an input to idealized route-time estimates."
     confidence: verified
     source: etlegacy_source
     locus: "game/g_cvars.c:433"
+
+# Which shader contents stop a player, for patch collision in the movement analysis. The
+# compiler's default table (shared by every game, and kept in code) already clears solid for
+# nonsolid, water, trigger, playerclip and the rest; these are the Wolfenstein table's
+# additions that ET inherits. `playerclip` stops players despite clearing solid.
+collision:
+  confidence: verified
+  source: q3map2_source
+  locus: "q3map2 games.cpp:361-387 (game_wolf surfaceParms, inherited by game_wolfet at games.cpp:400)"
+  rule_source: "etlegacy game/bg_public.h:2056 MASK_PLAYERSOLID = SOLID | PLAYERCLIP | BODY; qcommon/cm_trace.c:876 skips a patch whose contents miss the mask"
+  solid_clearing_surfaceparms: [slag, clipmissile, clipshot, donotenterlarge, ai_nosight, ai_nopass, ai_nopasslarge]
+
+# Reinforcement analysis describes assumptions, not a replay of script execution. Server
+# g_userAxisRespawnTime/g_userAlliedRespawnTime can override these script assignments.
+balance:
+  model: reinforcement_objectives
+  confidence: verified
+  source: etlegacy_source
+  initial_spawn_flag: 2
+  initial_spawn_locus: "game/g_team.c:496; entstate is checked at :502 too"
+  startup_event: spawn
+  respawn_actions:
+    red: wm_axis_respawntime
+    blue: wm_allied_respawntime
+  respawn_action_locus: "game/g_script_actions.c:3260-3311; arguments in seconds"
+  default_respawn_seconds: {red: 30, blue: 30}
+  default_respawn_locus: "game/g_cvars.c:379-380; g_redlimbotime/g_bluelimbotime default 30000 ms"
+  note: >-
+    STARTACTIVE is a static initial-state hint. Scripts, checkpoints, entity states and server
+    overrides can change available spawns and wave times. Explicit stage inputs describe those
+    states; this analysis does not execute scripts or infer a whole mission's progression.
 
 # ---------------------------------------------------------------------------
 # gametypes
@@ -303,6 +346,29 @@ objectives:
         game/g_trigger.c:1612-1678 (trigger links to its target), game/g_weapon.c:1980-2020
         (dynamite must sit in an enemy objective trigger), game/g_missile.c:395-447 (blows it up
         when its weapon class is at least 1; constructible_class 3 gives 2, g_mover.c:4672-4689)
+      # The test objective_playtests generates: the other team's engineer stands in the trigger,
+      # plants dynamite, arms it with pliers (aimed at the charge where it landed) and sees the
+      # explosive freed. Pliers reach 64 units (CH_BREAKABLE_DIST, bg_public.h:3160) along the
+      # view (g_weapon.c:2430-2545), so the charge is thrown steeply down to land within reach.
+      playtest:
+        find:
+          anchor: {classname: func_explosive, name_key: targetname}
+          parts:
+            trigger: {classname: trigger_objective_info, key: target, value: "{name}"}
+          team: {part: trigger, key: spawnflags, value: owner_flag}
+        actor: {team: "{other}", role: engineer}
+        watch: ["{name}"]
+        proves: the other team's dynamite, armed in the trigger, destroys it
+        steps:
+          - {macro: stand, in: trigger, clear_of: anchor, face: anchor, pitch: 65, label: "stand in the objective trigger, facing it"}
+          - {action: weapon, name: dynamite}
+          - {action: hold, controls: [attack], seconds: 0.25, timeout: 5, label: "plant the dynamite"}
+          - {action: wait, timeout: 5, label: "a charge lies in the world", until: [{scope: game, field: charge_count, op: gte, value: 1}]}
+          - {action: aim, at: {scope: game, field: charge_position, offset: [0, 0, 4]}, label: "look at the charge"}
+          - {action: weapon, name: pliers}
+          - {action: hold, controls: [attack], timeout: 15, label: "arm it", until: [{scope: game, field: armed_charges, op: gte, value: 1}]}
+          - {action: wait, timeout: 45, label: "the charge destroys the objective", until: [{scope: entity, name: "{name}", field: present, value: false}]}
+          - {macro: round_end, events: [{block: "{anchor.scriptname}", event: death}]}
     constructible:
       description: >-
         Something {team}'s engineers build, and the other team can destroy with dynamite once
@@ -324,16 +390,529 @@ objectives:
         game/g_mover.c:5614-5653 (team flag and constructible_class), game/g_trigger.c:1698-1706
         (trigger links to it), game/g_weapon.c:1068-1247 (buildstart/built events name a
         stage, here final), game/g_mover.c:5272-5313 (decayed)
+      # The builder team's engineer stands in the trigger, clear of the brushes it builds (a
+      # player inside them blocks construction), and holds pliers until it is built. Pliers
+      # build the trigger the player touches whatever they aim at, g_weapon.c:2455-2542.
+      playtest:
+        find:
+          anchor: {classname: func_constructible, name_key: targetname}
+          parts:
+            trigger: {classname: trigger_objective_info, key: target, value: "{name}"}
+          team: {part: anchor, key: spawnflags, value: builder_flag}
+        actor: {team: "{team}", role: engineer}
+        watch: ["{name}"]
+        proves: the builder team's engineer builds it with pliers
+        steps:
+          - {macro: stand, in: trigger, clear_of: anchor, face: anchor, pitch: 30, label: "stand in the objective trigger, clear of what it builds"}
+          - {action: weapon, name: pliers}
+          - {action: hold, controls: [attack], timeout: 60, label: "build it", until: [{scope: entity, name: "{name}", field: built, value: true}]}
+          - {macro: round_end, events: [{block: "{anchor.scriptname}", event: built, params: [final]}]}
+    # The stock command post (battery, goldrush, railgun: neutral; fueldump, oasis: one
+    # team's). One objective trigger with the command-post icon targets one func_constructible
+    # per team that may build it, under one targetname; the engine lets only one stand at a
+    # time. Built, the scripts cut the team's charge times to 0.75 and turn on the HQ status
+    # that reports enemy landmines; destroyed, they undo both. Destroyed by satchel or
+    # dynamite: constructible_class 2, as the stock scripts set it.
+    command_post:
+      teams: [neutral, axis, allies]
+      description: >-
+        A command post: built, it shortens its team's charge times and reports nearby enemy
+        landmines to it; destroyed, that stops. Neutral: either team builds it, one at a time.
+      entities:
+        - role: trigger
+          classname: trigger_objective_info
+          texture: common/trigger
+          keys: {track: "{track}", shortname: "{track}", target: "{name}", spawnflags: "{command_post_flags}"}
+        - role: objective
+          teams: [neutral, axis]
+          classname: func_constructible
+          keys: {targetname: "{name}", scriptname: "{name}_axis", constructible_class: "2", spawnflags: "4"}
+        - role: objective
+          teams: [neutral, allies]
+          classname: func_constructible
+          keys: {targetname: "{name}", scriptname: "{name}_allies", constructible_class: "2", spawnflags: "8"}
+      script:
+        - {teams: [neutral, axis], block: "{name}_axis", event: buildstart, params: [final], actions: []}
+        - teams: [neutral, axis]
+          block: "{name}_axis"
+          event: built
+          params: [final]
+          actions:
+            - setchargetimefactor 0 soldier 0.75
+            - setchargetimefactor 0 fieldops 0.75
+            - setchargetimefactor 0 medic 0.75
+            - setchargetimefactor 0 engineer 0.75
+            - setchargetimefactor 0 covertops 0.75
+            - sethqstatus 0 1
+            - 'wm_announce "Axis Command Post constructed. Charge speed increased!"'
+        - {teams: [neutral, axis], block: "{name}_axis", event: decayed, params: [final], actions: []}
+        - teams: [neutral, axis]
+          block: "{name}_axis"
+          event: death
+          actions:
+            - setchargetimefactor 0 soldier 1
+            - setchargetimefactor 0 fieldops 1
+            - setchargetimefactor 0 medic 1
+            - setchargetimefactor 0 engineer 1
+            - setchargetimefactor 0 covertops 1
+            - sethqstatus 0 0
+            - 'wm_announce "Allied team has destroyed the Axis Command Post!"'
+        - {teams: [neutral, allies], block: "{name}_allies", event: buildstart, params: [final], actions: []}
+        - teams: [neutral, allies]
+          block: "{name}_allies"
+          event: built
+          params: [final]
+          actions:
+            - setchargetimefactor 1 soldier 0.75
+            - setchargetimefactor 1 fieldops 0.75
+            - setchargetimefactor 1 medic 0.75
+            - setchargetimefactor 1 engineer 0.75
+            - setchargetimefactor 1 covertops 0.75
+            - sethqstatus 1 1
+            - 'wm_announce "Allied Command Post constructed. Charge speed increased!"'
+        - {teams: [neutral, allies], block: "{name}_allies", event: decayed, params: [final], actions: []}
+        - teams: [neutral, allies]
+          block: "{name}_allies"
+          event: death
+          actions:
+            - setchargetimefactor 1 soldier 1
+            - setchargetimefactor 1 fieldops 1
+            - setchargetimefactor 1 medic 1
+            - setchargetimefactor 1 engineer 1
+            - setchargetimefactor 1 covertops 1
+            - sethqstatus 1 0
+            - 'wm_announce "Axis team has destroyed the Allied Command Post!"'
+      locus: >-
+        game/g_trigger.c:1680-1719 (one trigger, a second func_constructible under the same
+        targetname, never of the same team), game/g_weapon.c:1000-1018 (only one of the pair
+        may be built or building), game/g_script_actions.c:992-1070 (setchargetimefactor:
+        team 0/1, factor 0-1; 'lieutenant' is the deprecated spelling of fieldops),
+        game/g_script_actions.c:4152-4192 and game/g_active.c:1621-1639 (sethqstatus: the team
+        is told of enemy landmines near it), game/g_mover.c:5585-5589 (class 2: weapon class 1,
+        satchel or dynamite); stock railgun_final.script, fueldump_final.script
+      # A team that may build it (Allies for a neutral one) builds its own constructible. The
+      # pair share a targetname, so the test watches the builder's by its scriptname.
+      playtest:
+        find:
+          anchor: {classname: trigger_objective_info, name_key: target}
+          parts:
+            objective: {classname: func_constructible, key: targetname, value: "{name}",
+                        flags: {key: spawnflags, value: builder_bit}}
+          team: {part: anchor, key: spawnflags, value: command_post_flags}
+        actor: {team: "{builder}", role: engineer}
+        watch: ["{objective.scriptname}"]
+        proves: an engineer of a team that may build it builds that team's command post
+        steps:
+          - {macro: stand, in: anchor, clear_of: objective, face: objective, pitch: 30, label: "stand in the command post's trigger"}
+          - {action: weapon, name: pliers}
+          - {action: hold, controls: [attack], timeout: 60, label: "build the command post", until: [{scope: entity, name: "{objective.scriptname}", field: built, value: true}]}
+          - {macro: round_end, events: [{block: "{objective.scriptname}", event: built, params: [final]}]}
+    # The stock forward spawn flag (oasis Old City, radar Forward Bunker). With SPAWNPOINT the
+    # flag itself switches its targeted spawns: the capturing team's on, the other team's
+    # off. The script keeps the spawn region marker's owner in step (alertentity on a
+    # team_WOLF_objective swaps its team) and makes the flag the capturing team's default
+    # spawn. accum 0 holds the owner, so touching your own flag changes nothing.
+    checkpoint:
+      description: >-
+        A forward spawn flag both teams capture. {team} holds it and its spawns at the start;
+        touching it hands the spawns and the spawn region to the toucher's team.
+      entities:
+        - role: flag
+          point: true
+          classname: team_WOLF_checkpoint
+          keys: {targetname: "{name}", scriptname: "{name}", target: "{name}_spawns", spawnflags: "1"}
+        - role: flag
+          point: true
+          classname: team_WOLF_objective
+          keys: {targetname: "{name}_wobj", scriptname: "{name}_wobj", description: "{track}", spawnflags: "{owner_flag}"}
+        - {role: spawns, point: true, optional: true, classname: "{team_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "3"}}
+        - {role: spawns, point: true, optional: true, classname: "{other_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "1"}}
+      script: &checkpoint_script
+        - {block: "{name}", event: spawn, actions: ["accum 0 set {script_team}"]}
+        - block: "{name}"
+          event: trigger
+          params: [axis_capture]
+          actions:
+            - accum 0 abort_if_equal 0
+            - accum 0 set 0
+            - 'wm_announce "Axis capture {track}!"'
+            - alertentity {name}_wobj
+            - 'setautospawn "{track}" 0'
+        - block: "{name}"
+          event: trigger
+          params: [allied_capture]
+          actions:
+            - accum 0 abort_if_equal 1
+            - accum 0 set 1
+            - 'wm_announce "Allies capture {track}!"'
+            - alertentity {name}_wobj
+            - 'setautospawn "{track}" 1'
+      links: &checkpoint_links
+        spawns_targetname: "{name}_spawns"
+        spawn_marker: "{name}_wobj"
+        note: >-
+          Spawns placed later join the flag with targetname {name}_spawns: the holder's with
+          spawnflags 3 (active), the other team's with 1. Keep them nearer this flag than any
+          other spawn region marker.
+      locus: &checkpoint_locus >-
+        game/g_team.c:1216-1398 (checkpoint_spawntouch: axis_capture / allied_capture, then the
+        targeted spawns of the capturing team on and the other team's off), :1413-1420 (the
+        scriptname is required), :888-901 (alertentity on the marker swaps its team),
+        :952-958 (DEFAULT_AXIS / DEFAULT_ALLIES), :455-537 (spawns need STARTACTIVE and go
+        nearest the marker); game/g_script_actions.c:176-217 (setautospawn finds the marker by
+        description); stock oasis_final.script oldcityflag, radar_final.script roadbunker
+      # Nothing on the flag itself is observable, so a capture is proved where it matters: the
+      # attackers, made to respawn by switching team and back, reappear at the flag's spawns;
+      # after the holders touch it again they reappear at their own.
+      playtest:
+        find:
+          anchor: {classname: team_WOLF_checkpoint, name_key: targetname}
+          parts:
+            marker: {classname: team_WOLF_objective, key: targetname, value: "{name}_wobj"}
+            spawns: {classname: ["{team_spawn}", "{other_spawn}"], key: targetname, value: "{name}_spawns",
+                     many: true, optional: true}
+          team: {part: marker, key: spawnflags, value: owner_flag}
+        actor: {team: "{other}", role: engineer}
+        proves: the other team captures it and spawns at its spawns; the holders take it back
+        steps:
+          - {macro: spawned_at, at: base, label: "the attackers start at their own spawns"}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the attackers touch the flag"}
+          - {macro: spawned_at, at: spawns, label: "the capture handed the flag's spawns to the attackers"}
+          - {action: join, team: "{team}", role: engineer}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the holders take the flag back"}
+          - {macro: spawned_at, team: "{other}", at: base, label: "the attackers spawn at their own spawns again"}
+    # SPAWNPOINT plus the AXIS_ONLY / ALLIED_ONLY bit of the team that does not hold it. Only
+    # checkpoint_spawntouch reads those bits: the holder touching the raised flag lowers it
+    # (WCP_ANIM_*_FALLING) rather than raising its own, and still runs its capture event and
+    # switches the spawns back. A permanent capture needs the flag taken away by script.
+    checkpoint_one_way:
+      description: >-
+        A forward spawn flag only the team that does not hold it can raise. {team} holds it and
+        its spawns at the start; {team} touching the raised flag lowers it and takes the spawns
+        back.
+      entities:
+        - role: flag
+          point: true
+          classname: team_WOLF_checkpoint
+          keys: {targetname: "{name}", scriptname: "{name}", target: "{name}_spawns", spawnflags: "{one_way_flag}"}
+        - role: flag
+          point: true
+          classname: team_WOLF_objective
+          keys: {targetname: "{name}_wobj", scriptname: "{name}_wobj", description: "{track}", spawnflags: "{owner_flag}"}
+        - {role: spawns, point: true, optional: true, classname: "{team_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "3"}}
+        - {role: spawns, point: true, optional: true, classname: "{other_spawn}", keys: {targetname: "{name}_spawns", spawnflags: "1"}}
+      script: *checkpoint_script
+      links: *checkpoint_links
+      locus: *checkpoint_locus
+      playtest:
+        find:
+          anchor: {classname: team_WOLF_checkpoint, name_key: targetname}
+          parts:
+            marker: {classname: team_WOLF_objective, key: targetname, value: "{name}_wobj"}
+            spawns: {classname: ["{team_spawn}", "{other_spawn}"], key: targetname, value: "{name}_spawns",
+                     many: true, optional: true}
+          team: {part: anchor, key: spawnflags, value: one_way_flag}
+        actor: {team: "{other}", role: engineer}
+        proves: the holders cannot raise it; the other team captures it; the holders lower it and take the spawns back
+        steps:
+          - {action: join, team: "{team}", role: engineer}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the holders touch the flag they hold"}
+          - {macro: spawned_at, team: "{other}", at: base, label: "it did not change hands: the attackers still spawn at their own spawns"}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the attackers raise the flag"}
+          - {macro: spawned_at, at: spawns, label: "the capture handed the flag's spawns to the attackers"}
+          - {action: join, team: "{team}", role: engineer}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the holders lower the flag"}
+          - {macro: spawned_at, team: "{other}", at: base, label: "the attackers spawn at their own spawns again"}
+    # A vehicle {team} escorts along a path made with path_place. Modelled on the goldrush and
+    # fueldump tanks, minus their damage/repair: it moves while {team} players stand in the
+    # escort volume and stops, at the next path point, a couple of seconds after they leave.
+    escort:
+      description: >-
+        A vehicle {team} escorts along a path: a solid script_mover that follows the path
+        (path_place) segment by segment while {team} players are in the escort volume around
+        it, and stops at the next path point when they leave. `objective` is the vehicle as it
+        stands at the path's first point, `trigger` the escort volume around it. Both turn to
+        face along each segment. Not damageable. Ends with `trigger arrived` on {name}, which
+        is the place for the win (script_set_event).
+      # The path is a chain of path points; each segment is named by the point it leaves.
+      path:
+        # 196 events per block and actions per event (G_MAX_SCRIPT_STACK_ITEMS,
+        # game/g_local.h:147; G_Error at game/g_script.c:440-443 and :583-586); the vehicle
+        # block holds one event per segment plus ten.
+        max_segments: 186
+      options:
+        speed:
+          default: "64"
+          pattern: "[1-9][0-9]*(\\.[0-9]+)?"   # 0 would divide by zero, g_script_actions.c:923
+          description: "units per second along the path (followspline scales it by g_moverScale)"
+        stop_after:
+          default: "2"
+          pattern: "[1-9][0-9]?"
+          description: "seconds without an escort before the vehicle stops at its next path point"
+      entities:
+        - role: objective
+          classname: script_mover
+          # SOLID (2): players collide with it, and one it is pushed into is crushed
+          # (script_mover_blocked, game/g_script.c:1082-1104).
+          keys: {targetname: "{name}", scriptname: "{name}", spawnflags: "2"}
+          origin_at: path_start
+        - role: trigger
+          classname: trigger_multiple
+          texture: common/trigger
+          keys: {scriptname: "{name}_escort", target: "{name}_enabler", spawnflags: "{escort_flag}", wait: "0.5"}
+          origin_at: path_start
+        - {role: enabler, point: true, at: trigger, classname: target_script_trigger,
+           keys: {targetname: "{name}_enabler", scriptname: "{name}_enabler", target: run}}
+        - {role: ticker, point: true, at: trigger, classname: func_timer,
+           keys: {spawnflags: "1", wait: "1", target: "{name}_disabler"}}
+        - {role: disabler, point: true, at: trigger, classname: target_script_trigger,
+           keys: {targetname: "{name}_disabler", scriptname: "{name}_disabler", target: run}}
+      # accum 0: next segment; 1: moving; 2: seconds since the last escort touch; 3: arrived.
+      script:
+        - {block: "{name}", event: spawn, actions: [accum 0 set 0, accum 1 set 0, accum 2 set 0, accum 3 set 0]}
+        - {block: "{name}", event: trigger, params: [escort],
+           actions: [accum 2 set 0, accum 1 abort_if_equal 1, accum 1 set 1, trigger self started, trigger self move]}
+        - {block: "{name}", event: trigger, params: [tick], actions: [accum 2 inc 1]}
+        - {block: "{name}", event: trigger, params: [move],
+           actions: [trigger self stopcheck, accum 1 abort_if_equal 0, trigger self dispatch]}
+        - {block: "{name}", event: trigger, params: [stopcheck],
+           actions: ["accum 2 abort_if_less_than {stop_after}", accum 1 set 0, trigger self stopped]}
+        - block: "{name}"
+          event: trigger
+          params: [dispatch]
+          actions:
+            - {each: segment, do: ["accum 0 trigger_if_equal {i} {name} run_{i}"]}
+            - "accum 0 trigger_if_equal {segments} {name} arrive"
+        - each: segment
+          do:
+            - {block: "{name}", event: trigger, params: ["run_{i}"],
+               actions: ["trigger {name}_escort run_{i}", "followspline 0 {segment} {speed} wait", accum 0 inc 1, trigger self move]}
+            - {block: "{name}_escort", event: trigger, params: ["run_{i}"], actions: ["followspline 0 {segment} {speed} wait"]}
+        - {block: "{name}", event: trigger, params: [arrive], actions: [accum 3 abort_if_equal 1, accum 3 set 1, trigger self arrived]}
+        - {block: "{name}", event: trigger, params: [started], actions: []}
+        - {block: "{name}", event: trigger, params: [stopped], actions: []}
+        - {block: "{name}", event: trigger, params: [arrived], actions: ['wm_announce "{track} has reached its destination!"']}
+        - {block: "{name}_enabler", event: trigger, params: [run], actions: ["trigger {name} escort"]}
+        - {block: "{name}_disabler", event: trigger, params: [run], actions: ["trigger {name} tick"]}
+      locus: >-
+        game/g_script_actions.c:722-913 (followspline moves along one spline segment, from the
+        named point to its target; with wait the event resumes when it ends), game/bg_misc.c:3140-3215
+        (the mover's origin follows the curve and its angles face along it), game/g_script.c:632-654
+        (an event that finishes at once hands control back, so escort/tick never interrupt a
+        move), game/g_trigger.c:80-125,155-200 (trigger_multiple team flags, wait),
+        game/g_trigger.c:1180-1201 (func_timer START_ON), game/g_target.c:1276-1303
+        (target_script_trigger runs trigger <target> in its block), q3map2 map.cpp:1640-1644 (the
+        origin brush makes the brushes relative to the entity origin, which the spline moves)
+      # The escort stands beside the vehicle, inside its escort volume, at one path point after
+      # another, and waits for it to pass the next; once it stands back and checks that the
+      # vehicle stops. The path, speed and stop delay are read from the vehicle's script.
+      playtest:
+        find:
+          anchor: {classname: script_mover, name_key: targetname}
+          parts:
+            trigger: {classname: trigger_multiple, key: scriptname, value: "{name}_escort"}
+          team: {part: trigger, key: spawnflags, value: escort_flag}
+        actor: {team: "{team}", role: soldier}
+        watch: ["{name}"]
+        proves: the vehicle moves while escorted, stops without its escort, and reaches the end of its path
+        steps:
+          - macro: follow_path
+            vehicle: anchor
+            volume: trigger
+            path: {block: "{anchor.scriptname}", event: trigger, params: [run_0], action: followspline, arg: 1}
+            speed: {block: "{anchor.scriptname}", event: trigger, params: [run_0], action: followspline, arg: 2}
+            stop_after: {block: "{anchor.scriptname}", event: trigger, params: [stopcheck], action: accum,
+                         args_equal: {1: abort_if_less_than}, arg: 2}
+            # Escort touches count every 0.5 s (wait) and the idle count rises once a second.
+            stop_slack: 2
+          - {macro: round_end, events: [{block: "{anchor.scriptname}", event: trigger, params: [arrived]}]}
+    # Carriable documents and the place they are delivered: the radar parts, goldrush gold.
+    steal:
+      description: >-
+        Something the other team steals from {team} and delivers: a carriable objective item
+        ({carry_class}) and a delivery volume (trigger_flagonly_multiple) that takes it from the
+        carrier and runs `death` on {name}_deliver. `objective` is where the item lies, as a
+        point {"origin": [x, y, z]} or a box (its centre); the item falls to the floor below.
+        `trigger` is the delivery volume. Events: stolen, dropped, returned, captured on {name}.
+      options:
+        model:
+          default: models/multiplayer/secretdocs/secretdocs.md3
+          pattern: "[A-Za-z0-9_/.-]+"
+          description: "the model drawn where the item lies; the item itself has none"
+      entities:
+        - role: objective
+          point: true
+          classname: "{carry_class}"
+          # No targetname: a targeted item spawns hidden and untouchable (g_items.c:1040-1047).
+          keys: {scriptname: "{name}", message: "{track}", model: "{model}"}
+        - role: trigger
+          classname: trigger_flagonly_multiple
+          texture: common/trigger
+          keys: {scriptname: "{name}_deliver", spawnflags: "{carry_flag}"}
+      script:
+        - {block: "{name}", event: trigger, params: [stolen], actions: ['wm_announce "{track} has been stolen!"']}
+        - {block: "{name}", event: trigger, params: [dropped], actions: ['wm_announce "{track} has been dropped!"']}
+        - {block: "{name}", event: trigger, params: [returned], actions: ['wm_announce "{track} has been returned!"']}
+        - {block: "{name}", event: trigger, params: [captured], actions: []}
+        - {block: "{name}_deliver", event: death, actions: ['wm_announce "{track} has been delivered!"']}
+      locus: >-
+        game/g_team.c:375-406 (team_CTF_redflag belongs to Axis, blueflag to Allies; the other
+        team picks it up, only while the game is playing), game/g_team.c:281-308 (trigger stolen),
+        game/g_items.c:884-898 (trigger dropped), game/g_team.c:171-241 (trigger returned),
+        game/g_trigger.c:1335-1395 (trigger_flagonly_multiple: RED_FLAG 1 / BLUE_FLAG 2 take it
+        from the carrier, run death on the trigger and trigger captured on the item),
+        game/g_items.c:991-994,1091-1094 (model is what is drawn; the item has no world model,
+        game/bg_misc.c:2362-2410)
+      # The thief walks onto the item, which only the other team can pick up while the game is
+      # playing (g_team.c:375-406), and carries it into the delivery volume, which takes it from
+      # the carrier (g_trigger.c:1335-1395).
+      playtest:
+        find:
+          anchor: {classname: "{carry_class}", name_key: scriptname}
+          parts:
+            trigger: {classname: trigger_flagonly_multiple, key: scriptname, value: "{name}_deliver"}
+        actor: {team: "{other}", role: covertops}
+        proves: the other team picks it up and delivers it
+        steps:
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], timeout: 6, label: "walk onto the item", until: [{scope: player, field: carrying, value: true}]}
+          - {macro: walk_to, target: trigger, distance: 80, controls: [forward], timeout: 8, label: "carry it into the delivery volume", until: [{scope: player, field: carrying, value: false}, {scope: player, field: alive, value: true}]}
+          - {macro: round_end, events: [{block: "{trigger.scriptname}", event: death}]}
   team_values:
     owner_flag: {axis: "1", allies: "2"}      # AXIS_OBJECTIVE / ALLIED_OBJECTIVE, g_local.h:2631-2632
     builder_flag: {axis: "4", allies: "8"}    # AXIS/ALLIED_CONSTRUCTIBLE, g_local.h:2637-2638
     script_team: {axis: "0", allies: "1"}     # the team number scripts use, g_script_actions.c:3560
+    # IS_COMMANDPOST (64, gamepack; g_trigger.c:1802) plus the owner bit, g_local.h:2631-2632
+    command_post_flags: {neutral: "64", axis: "65", allies: "66"}
+    # The team's spawn class and the other team's, g_team.c:469-473
+    team_spawn: {axis: team_CTF_redspawn, allies: team_CTF_bluespawn}
+    other_spawn: {axis: team_CTF_bluespawn, allies: team_CTF_redspawn}
+    # SPAWNPOINT (1) plus ALLIED_ONLY (8) when Axis hold it, AXIS_ONLY (4) when Allies do, g_team.c:963-966
+    one_way_flag: {axis: "9", allies: "5"}
+    escort_flag: {axis: "1", allies: "2"}     # trigger_multiple AXIS_ONLY / ALLIED_ONLY, g_trigger.c:165-180
+    carry_class: {axis: team_CTF_redflag, allies: team_CTF_blueflag}   # g_team.c:385-392
+    carry_flag: {axis: "1", allies: "2"}      # RED_FLAG / BLUE_FLAG on the delivery trigger, g_trigger.c:1234-1235
+    # Who plays each objective's test (objectives.playtest): the other team, and who builds a
+    # command post (Allies for a neutral one) with that team's constructible flag.
+    other: {axis: allies, allies: axis}
+    builder: {neutral: allies, axis: axis, allies: allies}
+    builder_bit: {neutral: "8", axis: "4", allies: "8"}
+  # Point a brush entity's brushes are relative to. The spline moves this point, so a mover
+  # without one is carried off by its own world position (q3map2 map.cpp:1640-1644 adjusts
+  # brushes only for an origin brush).
+  origin_brush: {texture: common/origin, half_size: 8}
+  # How objective_playtests turns each kind's `playtest:` template into engine_playtest steps.
+  # A kind is recognised in any map by `find`: an `anchor` entity whose `name_key` names the
+  # objective, `parts` linked to it by a key holding a value made from {name}, and `team`, the
+  # team_values entry whose bits its spawnflags carry. An entity one kind claims is not offered
+  # to the kinds after it in `order`.
+  playtest:
+    order: [command_post, checkpoint_one_way, checkpoint, constructible, dynamite, escort, steal]
+    # A standing player's origin above the floor: playerMins z is -24, g_client.c:53-54.
+    stand_height: 24
+    spawns:
+      classname: {red: team_CTF_redspawn, blue: team_CTF_bluespawn}   # g_team.c:469-473
+      active: {key: spawnflags, bit: 2}                                # STARTACTIVE, g_team.c:496
+    script:
+      # Followed from an objective's events to see whether it ends the round, and for whom.
+      call: {action: trigger, block_arg: 0, label_arg: 1, event: trigger, self_names: [self]}
+      winner: {action: wm_setwinner, arg: 0, teams: {"0": red, "1": blue}}   # g_script_actions.c:3577-3600
+      end_round: {action: wm_endround}                                       # g_script_actions.c:3487-3510
+    # Classes that make up objectives: one that no kind recognises is reported as untested.
+    classnames: [trigger_objective_info, func_explosive, func_constructible, team_WOLF_checkpoint,
+                 team_CTF_redflag, team_CTF_blueflag, trigger_flagonly_multiple]
+
+# ---------------------------------------------------------------------------
+# spawn_cluster - what spawn_cluster writes for a group of team spawns and its region marker
+# ---------------------------------------------------------------------------
+# Teams are named by the labels in `teams.sides` (red/blue), or their names (Axis/Allies).
+# Positions are found by the tool from the movement constants (player width, standing
+# height, step) and the map's own collision brushes; nothing here is a position.
+spawn_cluster:
+  confidence: verified
+  source: etlegacy_source
+  spawn:
+    classname: {red: team_CTF_redspawn, blue: team_CTF_bluespawn}
+    classname_locus: "game/g_team.c:469 (TEAM_AXIS), :473 (TEAM_ALLIES)"
+    # INVULNERABLE|STARTACTIVE. Selection skips a spawn without STARTACTIVE (2); the six
+    # shipped maps set INVULNERABLE (1) on their team spawns too (corpus/real, e.g.
+    # oasis_final.map "oldcityspawns"), so an inactive spawn keeps 1.
+    spawnflags: {active: 3, inactive: 1}
+    spawnflags_locus: "game/g_team.c:496 (skips spawns without flag 2); gamepack et_entities.ent INVULNERABLE/STARTACTIVE"
+    # F_ANGLEHACK: a yaw in degrees.
+    facing_key: angle
+    facing_locus: "game/g_spawn.c:179"
+    # The player box spans -24..48 about its origin, so an origin standing on a floor is 24
+    # above it. The spawn drops to the floor itself (DropToFloor), but only from a start
+    # outside solid (g_props.c:63-74), so the origin is written at standing height.
+    origin_height: 24
+    origin_height_locus: "game/g_client.c:53-54 playerMins z -24; game/g_team.c:824, :864 DropToFloor (g_props.c:63-85)"
+    # A player standing on one spawn makes a neighbour within the player box "occupied":
+    # SpotWouldTelefrag tests playerMins..playerMaxs about the spot. Spacing must exceed the
+    # player width (units.player.bounding_box) so every spawn in a cluster stays usable.
+    occupancy_locus: "game/g_client.c:230-251 SpotWouldTelefrag; game/g_team.c:508-516"
+    # Script use toggles STARTACTIVE on every entity with this targetname: alertentity uses
+    # each match (g_script_actions.c:2242-2290), Use_Team_Spawnpoint flips flag 2
+    # (g_team.c:770-784, assigned at :819 and :859).
+    group_keys: {targetname: "{group}"}
+  marker:
+    classname: team_WOLF_objective
+    # DEFAULT_AXIS / DEFAULT_ALLIES: who owns the spawn region at the start.
+    spawnflags: {red: 1, blue: 2}
+    spawnflags_locus: "game/g_team.c:952-958"
+    label_key: description
+    label_locus: "game/g_team.c:942 (shown in the limbo spawn list)"
+    # alertentity on the marker swaps its owner (team_wolf_objective_use, g_team.c:888-901,
+    # assigned at :920). oasis_final.map's forward marker carries the same name as targetname
+    # and scriptname ("old_city_wobj").
+    group_keys: {targetname: "{group}_wobj", scriptname: "{group}_wobj"}
+  # How a script toggles a group, for the caller to put in its own events. alertentity stops
+  # the game when no entity has the name (g_script_actions.c:2262).
+  toggle_action: "alertentity {name}"
+  toggle_key: targetname   # G_FindByTargetnameFast, g_script_actions.c:2257
+  toggle_locus: "game/g_script_actions.c:2242-2290"
+  # A convention, not an engine rule: oasis_final.map's forward spawns sit 60-64 units apart.
+  default_spacing: 64
+  default_spacing_source: "corpus/real oasis_final.map entities 283-290"
+
+# Paths movers follow, as path_place writes them: a chain of points, each naming the next, and
+# optional control points that bend the segment leaving a point into a curve. Read by
+# path_place and by objective_place for kinds that take a path.
+paths:
+  confidence: verified
+  source: etlegacy_source
+  point_class: info_train_spline_main
+  control_class: info_train_spline_control
+  name_key: targetname
+  next_key: target
+  # control, control2, control3, control4: read in that order until one is missing; a fifth
+  # stops the map loading (MAX_SPLINE_CONTROLS, bg_public.h:2723; bg_misc.c:3961-3966).
+  control_keys: [control, control2, control3, control4]
+  case_sensitive: false     # BG_Find_Spline / BG_Find_PathCorner use Q_stricmp, bg_misc.c:3871-3922
+  max_points: 512           # MAX_SPLINE_PATHS, bg_public.h:2722; Com_Error at bg_misc.c:3934-3937
+  max_controls: 512         # MAX_PATH_CORNERS, bg_public.h:2673; shared with path_corner_2
+  locus: >-
+    game/g_mover.c:3128-3175 (info_train_spline_main: targetname, target, control keys; freed
+    without a targetname), game/g_mover.c:3099-3126 (info_train_spline_control is spawned as
+    path_corner_2 and needs a targetname), game/bg_misc.c:4016-4069 (points are linked by target
+    after spawning; a missing target or control is only a console warning)
 
 # What a category cannot say. Read by analysis.roles.
 roles:
   # An objective volume. Categorized `trigger` so its brushes are not collision, but it is
   # where the fighting is, so balance_report measures to it (from its brushes' centre).
   objectives_also: [trigger_objective_info]
+  # The trigger is the accessible interaction area and carries objective ownership. Its
+  # uniquely linked constructible is the same objective, not a second neutral destination.
+  # Keep shared/multiple targets separate until their staged/team-specific states are modelled.
+  objective_links:
+    - classname: trigger_objective_info
+      target_key: target
+      target_name_key: targetname
+      target_classnames: [func_constructible]
+      case_sensitive: false
+      confidence: verified
+      source: etlegacy_source
+      locus: "game/g_trigger.c:1680-1719 (constructible parent and optional second target); game/g_utils.c:475-509 (case-insensitive target lookup)"
   # No group key: a team spawns at its active spawns nearest the selected marker
   # (game/g_team.c:455 onward), so spawns are grouped by their nearest marker.
   spawn_groups:
@@ -428,6 +1007,23 @@ key_blocks:
       - {name: baseAngle, type: angles3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:236"}
       - {name: baseOrigin, type: vec3, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:237"}
       - {name: id, type: integer, confidence: verified, source: etlegacy_source, locus: "game/g_spawn.c:240"}
+  # Keys G_SpawnGEntityFromSpawnVars reads itself for every entity, outside fields[].
+  spawn_vars:
+    applies_to_all: true
+    confidence: verified
+    source: etlegacy_source
+    note: "game/g_spawn.c G_SpawnGEntityFromSpawnVars (ET: Legacy v2.86.2)"
+    keys:
+      - name: allowteams
+        type: string
+        confidence: verified
+        source: etlegacy_source
+        locus: "game/g_spawn.c:814-831; checked at game/g_mover.c:2337 (G_TryDoor) and game/g_utils.c:649 (G_UseEntity)"
+        description: >-
+          The teams that may open a door or use the entity: any of axis, allies and cvops
+          (a disguised covert op of the other team), as in "axis,cvops". Unset, everyone may.
+          Only doors opened with the use key and entities used by a player honour it: a
+          func_door with TOUCH opens for anyone (game/g_mover.c:2110-2125).
 
 enums:
   leakType:
@@ -2473,7 +3069,13 @@ focus:
     present: true
     confidence: verified
     source: gamepack_entities
-    finding: "Capturable flag. With SPAWNPOINT (1) it switches its targeted spawns to the capturing team. Calls allied_capture / axis_capture in the map script."
+    finding: "Capturable flag. With SPAWNPOINT (1) it switches its targeted spawns to the capturing team (that team's on, the other's off) and runs trigger allied_capture / axis_capture in its script block (g_team.c:1216-1398). AXIS_ONLY (4) / ALLIED_ONLY (8) work only with SPAWNPOINT: the other team then lowers the flag instead of raising its own, and still runs its capture event and takes the spawns. Without SPAWNPOINT those bits are ignored, and CP_HOLD (2) leaves the flag untouchable (g_team.c:1463-1476). objective_place builds the stock pattern as checkpoint / checkpoint_one_way."
+  - topic: "team-only doors"
+    classname: "func_door_rotating"
+    present: true
+    confidence: verified
+    source: etlegacy_source
+    finding: "A door only some teams open is an ordinary door with the allowteams key (any entity accepts it, g_spawn.c:814-831): the stock maps use func_door_rotating with allowteams \"axis,cvops\" and type 5. Players open doors with the use key, which checks allowteams (G_TryDoor, g_mover.c:2337); others see the locked hint (g_main.c:886-907). A func_door with TOUCH (8) and no targetname opens for whoever walks into it, allowteams or not (g_mover.c:2110-2125, 2242-2250). A door some other entity targets is locked until that entity fires (key -1, g_mover.c:2224-2229)."
   - topic: "objectives"
     classname: "team_CTF_redflag"
     present: true
@@ -2748,11 +3350,46 @@ rules:
     message: >-
       the map has no intermission or deathmatch point ({expected}); every client joins as a
       spectator, and the first one to connect stops the server with "Couldn't find a spawn point"
-    fix_hint: "add an info_player_intermission with no spawnflags, looking over the map"
+    fix_hint: "add an info_player_intermission looking over the map with spawnflags 3, covering both winning teams as well as spectators; a neutral camera alone cannot cover round end"
     # Team spawns do not count: a spectator never uses them. info_player_start spawns as
     # info_player_deathmatch (g_client.c:203-207).
     params:
       classnames: [info_player_intermission, info_player_deathmatch, info_player_start]
+
+  # Neutral cameras are searched only before intermissiontime is set. Round end needs a
+  # winner-matching bit, even when a neutral camera let spectators join successfully. Either
+  # fallback class avoids the fatal SelectSpawnPoint path (start is renamed at spawn).
+  - id: ETL_INTERMISSION_AXIS_POINT_REQUIRED
+    check: flag_count_min
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_main.c:2414-2468 FindIntermissionPoint (neutral cameras only before intermission, winner flag 1); game/g_client.c:203-207 (start becomes deathmatch), :317-340 (fatal without fallback)"
+    message: >-
+      no info_player_intermission has the Axis winner flag ({flag}) and no deathmatch/start
+      fallback exists; if Axis wins, round end stops the server with "Couldn't find a spawn point"
+    fix_hint: "add an Axis camera with spawnflags 1, or use spawnflags 3 on a shared winner camera"
+    applies_when:
+      classname_absent: [info_player_deathmatch, info_player_start]
+    params:
+      classname: info_player_intermission
+      flag: 1
+      count: 1
+
+  - id: ETL_INTERMISSION_ALLIES_POINT_REQUIRED
+    check: flag_count_min
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_main.c:2414-2468 FindIntermissionPoint (neutral cameras only before intermission, winner flag 2); game/g_client.c:203-207 (start becomes deathmatch), :317-340 (fatal without fallback)"
+    message: >-
+      no info_player_intermission has the Allies winner flag ({flag}) and no deathmatch/start
+      fallback exists; if Allies wins, round end stops the server with "Couldn't find a spawn point"
+    fix_hint: "add an Allied camera with spawnflags 2, or use spawnflags 3 on a shared winner camera"
+    applies_when:
+      classname_absent: [info_player_deathmatch, info_player_start]
+    params:
+      classname: info_player_intermission
+      flag: 2
+      count: 1
 
   - id: ETL_OBJECTIVE_INFO_TRACK_REQUIRED
     check: key_required
@@ -2846,7 +3483,8 @@ rules:
       separator: ";"
       # Its target is a script event label, checked by mapscript.entity_events instead.
       # An objective trigger's missing target stops the game: ETL_OBJECTIVE_INFO_TARGET.
-      exclude_classnames: [target_script_trigger, trigger_objective_info]
+      # A path point's target is looked up among path points: ETL_SPLINE_TARGET_CLASS.
+      exclude_classnames: [target_script_trigger, trigger_objective_info, info_train_spline_main]
 
   # --- objectives: each error below stops the game at load (G_Error), checked in etlded ---
 
@@ -2958,6 +3596,183 @@ rules:
       key: desstages
       pattern: "(?:[^;]+;)*"
 
+  # --- escort vehicles: script movers and the spline paths they follow ---
+
+  - id: ETL_SCRIPT_MOVER_SCRIPTNAME
+    check: key_required
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_script.c:1132-1135 (G_Error \"must have a scriptname\")"
+    message: "{found} script_mover(s) have no scriptname; the game stops at load"
+    fix_hint: "give the script_mover a scriptname and a block for it in the map script"
+    params:
+      classname: script_mover
+      key: scriptname
+
+  - id: ETL_SPLINE_POINT_TARGETNAME
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:3141-3146 (freed with only a console message)"
+    message: >-
+      {found} {classname}(s) have no targetname; the game drops them, so nothing can follow
+      or reach them
+    fix_hint: "name every path point; path_place does"
+    params:
+      classname: info_train_spline_main
+      key: targetname
+
+  - id: ETL_SPLINE_CONTROL_TARGETNAME
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_spawn.c:528 and game/g_mover.c:3108-3113 (spawned as path_corner_2, freed without a targetname)"
+    message: "{found} {classname}(s) have no targetname; the game drops them and no curve uses them"
+    fix_hint: "name the control point and list that name in a path point's control key"
+    params:
+      classname: info_train_spline_control
+      key: targetname
+
+  - id: ETL_SPLINE_TARGET_CLASS
+    check: targets_resolve
+    severity: warning
+    confidence: verified
+    rule_source: >-
+      etlegacy game/bg_misc.c:4044-4050 (a spline's target is looked up among spline points only;
+      a miss prints "Cant find target point" and leaves the segment without a length or an end)
+    message: >-
+      {found} path point target(s) name no info_train_spline_main ({detail}); a mover sent
+      along that segment does not travel it
+    fix_hint: "target the next info_train_spline_main, or leave the last point without a target"
+    params:
+      classname: info_train_spline_main
+      keys: [target]
+      target_classes: [info_train_spline_main]
+      case_sensitive: false
+
+  - id: ETL_SPLINE_CONTROL_CLASS
+    check: targets_resolve
+    severity: warning
+    confidence: verified
+    rule_source: >-
+      etlegacy game/bg_misc.c:4026-4041 (controls are looked up among path corners, which
+      info_train_spline_control and path_corner_2 make; a miss prints "Cant find control point"
+      and the curve ignores it)
+    message: "{found} spline control(s) name no control point ({detail}); the segment is not curved by them"
+    fix_hint: "name an info_train_spline_control (path_place makes them from `controls`)"
+    params:
+      classname: info_train_spline_main
+      keys: [control, control2, control3, control4]
+      target_classes: [info_train_spline_control, path_corner_2]
+      case_sensitive: false
+
+  - id: ETL_SPLINE_CONTROL_LIMIT
+    check: key_forbidden
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:3160-3170 and game/bg_misc.c:3961-3966 (MAX_SPLINE_CONTROLS 4, bg_public.h:2723; Com_Error)"
+    message: >-
+      {found} path point(s) set control through control4 and also {key} ({detail}); the game
+      stops at load with "MAX SPLINE CONTROLS (4) hit"
+    fix_hint: "use at most four control points per segment, or add a path point"
+    params:
+      classname: info_train_spline_main
+      key: control5
+      when_keys: [control, control2, control3, control4]
+
+  - id: ETL_SPLINE_POINT_LIMIT
+    check: count_max
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/bg_misc.c:3934-3937 (Com_Error \"MAX SPLINES (512) hit\"; MAX_SPLINE_PATHS bg_public.h:2722)"
+    message: "found {found} info_train_spline_main entities; the game stops at load above {expected}"
+    fix_hint: "use fewer, longer path segments (control points curve them)"
+    params:
+      classname: info_train_spline_main
+      count: 512
+
+  # --- carried objectives: team_CTF_redflag / blueflag and their delivery triggers ---
+
+  - id: ETL_CARRY_TARGETNAME
+    check: key_forbidden
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_items.c:1040-1047 (an item with a targetname spawns hidden and untouchable)"
+    message: >-
+      {found} carried objective(s) have a {key} ({detail}); the item is never shown and cannot
+      be picked up
+    fix_hint: "remove the targetname; scripts reach the item by its scriptname"
+    params:
+      classnames: [team_CTF_redflag, team_CTF_blueflag]
+      key: targetname
+
+  - id: ETL_CARRY_MODEL
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/bg_misc.c:2362-2410 (these items have no world model), game/g_items.c:991-994,1091-1094 (model is drawn)"
+    message: "{found} carried objective(s) have no model; the item lies there invisible"
+    fix_hint: "set model, e.g. models/multiplayer/secretdocs/secretdocs.md3"
+    params:
+      classnames: [team_CTF_redflag, team_CTF_blueflag]
+      key: model
+
+  - id: ETL_FLAGONLY_TEAM
+    check: flags_any
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1256,1291,1343,1373 (fires only for RED_FLAG 1 / BLUE_FLAG 2 carriers)"
+    message: >-
+      {found} delivery trigger(s) set neither RED_FLAG (1) nor BLUE_FLAG (2); nothing is ever
+      delivered there
+    fix_hint: "set spawnflag 1 for a team_CTF_redflag item, 2 for a team_CTF_blueflag item"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      flags: [1, 2]
+
+  - id: ETL_FLAGONLY_SCRIPTNAME
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1268-1272,1352-1356 (delivery runs death in the trigger's own script block, then the item's trigger captured)"
+    message: >-
+      {found} delivery trigger(s) have no scriptname; a delivery runs no death event, so no
+      objective completes
+    fix_hint: "give the trigger a scriptname and a death event (objective_place steal does both)"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      key: scriptname
+
+  - id: ETL_CARRY_DELIVERY_RED
+    check: flag_count_min
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1256,1343 (only a RED_FLAG trigger takes a team_CTF_redflag from its carrier)"
+    applies_when: {classname_present: team_CTF_redflag}
+    message: >-
+      a team_CTF_redflag can be stolen but no delivery trigger has RED_FLAG (1) set, so it can
+      never be delivered
+    fix_hint: "add a trigger_flagonly_multiple with spawnflags 1 where it is to be delivered"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      flag: 1
+      count: 1
+
+  - id: ETL_CARRY_DELIVERY_BLUE
+    check: flag_count_min
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1291,1373 (only a BLUE_FLAG trigger takes a team_CTF_blueflag from its carrier)"
+    applies_when: {classname_present: team_CTF_blueflag}
+    message: >-
+      a team_CTF_blueflag can be stolen but no delivery trigger has BLUE_FLAG (2) set, so it
+      can never be delivered
+    fix_hint: "add a trigger_flagonly_multiple with spawnflags 2 where it is to be delivered"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      flag: 2
+      count: 1
+
   - id: ETL_CHECKPOINT_SCRIPTNAME
     check: key_required
     severity: error
@@ -2969,6 +3784,126 @@ rules:
     params:
       classname: team_WOLF_checkpoint
       key: scriptname
+
+  # --- command posts: one trigger, one func_constructible per team under one targetname ---
+
+  - id: ETL_OBJECTIVE_INFO_SECOND_TARGET_CLASS
+    check: second_target
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1680-1698 (G_Error \"targets multiple entities ... the second one isn't a 'func_constructible'\")"
+    message: >-
+      a trigger_objective_info targets a func_constructible, and its target names something
+      else too ({detail}); the game stops a few frames after load
+    fix_hint: "give the other entity its own targetname; only a second func_constructible may share it"
+    params:
+      classname: trigger_objective_info
+      key: target
+      first_classes: [func_constructible]
+      second_classes: [func_constructible]
+
+  - id: ETL_OBJECTIVE_INFO_CONSTRUCTIBLE_PAIR_TEAMS
+    check: second_target
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1689-1703 (a constructible's team is AXIS_CONSTRUCTIBLE, else Allies; G_Error \"constructible by the same team\")"
+    message: >-
+      a trigger_objective_info targets two func_constructibles that the same team builds
+      ({detail}); the game stops a few frames after load
+    fix_hint: "set AXIS_CONSTRUCTIBLE (4) on one and ALLIED_CONSTRUCTIBLE (8), without 4, on the other"
+    params:
+      classname: trigger_objective_info
+      key: target
+      first_classes: [func_constructible]
+      second_classes: [func_constructible]
+      distinct_flags: [4, 8]
+
+  # --- checkpoints (spawn flags) and the spawn regions they hand over ---
+
+  - id: ETL_CHECKPOINT_TEAM_ONLY_IGNORED
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:1463-1476 (without SPAWNPOINT the flag uses checkpoint_touch, :1135-1210, which never reads AXIS_ONLY / ALLIED_ONLY; only checkpoint_spawntouch does, :1247-1300)"
+    message: >-
+      {found} team_WOLF_checkpoint(s) set AXIS_ONLY (4) or ALLIED_ONLY (8) without SPAWNPOINT
+      (1); the bit is ignored and either team can raise the flag
+    fix_hint: "add SPAWNPOINT (1), or clear the team bit"
+    params:
+      classname: team_WOLF_checkpoint
+      when_flags_any: [4, 8]
+      when_flags_none: [1]
+
+  - id: ETL_CHECKPOINT_HOLD_NOT_TOUCHED
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:1463-1476 (CP_HOLD without SPAWNPOINT gives the flag a use function and no touch), :1118-1125 (nor after a capture)"
+    message: >-
+      {found} team_WOLF_checkpoint(s) set CP_HOLD (2) without SPAWNPOINT (1); touching the
+      flag does nothing, and it changes hands only when another entity uses it
+    fix_hint: "clear CP_HOLD (2); the gamepack calls it unused"
+    params:
+      classname: team_WOLF_checkpoint
+      when_flags_all: [2]
+      when_flags_none: [1]
+
+  - id: ETL_CHECKPOINT_NO_TEAM_RAISES
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:1243-1300 (each team's raise is skipped when the other team's ONLY bit is set)"
+    message: >-
+      {found} team_WOLF_checkpoint(s) set SPAWNPOINT with both AXIS_ONLY (4) and ALLIED_ONLY
+      (8); no flag is ever raised, though captures still fire and switch the spawns
+    fix_hint: "keep only the bit of the team that may raise the flag"
+    params:
+      classname: team_WOLF_checkpoint
+      when_flags_all: [1, 4, 8]
+
+  - id: ETL_SPAWN_REGION_OWNER
+    check: flags_any
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_team.c:952-958 (owner from DEFAULT_AXIS / DEFAULT_ALLIES), :2466 (the region's team), :888-901 (alertentity swaps only an Axis or Allied owner)"
+    message: >-
+      {found} team_WOLF_objective spawn marker(s) set neither DEFAULT_AXIS (1) nor
+      DEFAULT_ALLIES (2); no team can pick them in the limbo spawn list, and alertentity never
+      hands them over
+    fix_hint: "set spawnflags 1 for an Axis region or 2 for an Allied one"
+    params:
+      classname: team_WOLF_objective
+      flags: [1, 2]
+
+  # --- team-only doors: allowteams on a door (or anything a player uses) ---
+
+  - id: ETL_ALLOWTEAMS_NAMES_A_TEAM
+    check: key_pattern
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_spawn.c:814-831 (allowteams is lowercased and searched for 'axis', 'allies', 'cvops'; other words are ignored), game/g_utils.c:607-635 (no team bit lets everyone through; 'cvops' alone lets no team through)"
+    message: >-
+      allowteams names neither axis nor allies ({detail}); with no team in it the door opens
+      for everyone, or with only cvops for no one
+    fix_hint: "write the teams that may open it, as in \"axis\" or \"allies,cvops\" (not \"allied\")"
+    params:
+      key: allowteams
+      pattern: "(?is).*(axis|allies).*"
+
+  - id: ETL_TEAM_DOOR_OPENS_ON_TOUCH
+    check: forbid
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:2242-2250 (a func_door with TOUCH and no targetname or health gets a touch trigger), :2110-2125 (which opens it through Use_BinaryMover; allowteams is checked only by G_TryDoor, :2337, and G_UseEntity, game/g_utils.c:649)"
+    message: >-
+      {found} func_door(s) with allowteams also set TOUCH (8); walking into one opens it for
+      every team
+    fix_hint: "clear TOUCH (8): players of the allowed teams open it with the use key"
+    params:
+      classname: func_door
+      when_flags_all: [8]
+      when_keys: [allowteams]
+      when_keys_absent: [targetname, health]
 
 # ---------------------------------------------------------------------------
 # mapscript — maps/<map>.script, checked against the map by nrc_mcp.mapscript
@@ -3029,6 +3964,39 @@ mapscript:
       also_targets: targetname
       severity: warning
       locus: "game/g_target.c:1276-1303 (ainame's block first, then its own scriptname's)"
+  # Delayed actions belong to the entity running the event. Destruction can remove that
+  # owner before a wait resumes; hand delayed work to a persistent manager instead.
+  # FRAMETIME is 100ms, not the server's current frame duration. G_RunThink runs scripts
+  # before think/removal, so short waits are timing-dependent and are only informational.
+  lifetime:
+    wait_locus: "game/g_script_actions.c:1651-1720 (wait, sv_fps quantization, sudden-death bypass); game/g_main.c:3908-3941 (scripts before think); game/g_script.c:632-654,840-855 (yielded self-trigger replaces caller)"
+    fix_hint: "trigger a persistent game_manager event immediately, and put the wait and delayed actions in that event; triggering self keeps the same expiring owner"
+    event_lifetimes:
+      - classname: func_explosive
+        events: [death, exploded]
+        remove_after_ms: 100
+        confidence: verified
+        locus: "game/g_combat.c:2019 (death event); game/g_mover.c:4279-4305,4358 (BecomeExplosion/free and exploded event); qcommon/q_math.h:123 (FRAMETIME=100)"
+    removal_actions:
+      - action: remove
+        remove_after_ms: 100
+        confidence: verified
+        locus: "game/g_script_actions.c:3952-3957 (remove schedules G_FreeEntity); qcommon/q_math.h:123 (FRAMETIME=100)"
+    wait_actions:
+      - {action: wait, duration_arg: 0, range_keyword: random, minimum_arg: 1, maximum_arg: 2}
+    conditional_wait_actions:
+      - {action: accum, args_equal: {1: wait_while_equal}}
+      - {action: globalaccum, args_equal: {1: wait_while_equal}}
+      - {action: cvar, args_equal: {1: wait_while_equal}}
+      - {action: gotomarker}
+      - {action: followspline}
+      - {action: followpath}
+      - {action: faceangles}
+      - {action: playanim}
+      - {action: halt}
+    call_actions:
+      - {action: trigger, target_arg: 0, label_arg: 1, event: trigger, self_names: [self]}
+    uncertain_actions: [accum, globalaccum, cvar, abortifwarmup, abortifnotsingleplayer, resetscript, kill, delete, set, setstate, entityscriptname, gotomarker, followspline, followpath, faceangles, playanim, halt]
   # Action arguments that name something in the map.
   references:
     - action: trigger
@@ -3086,6 +4054,17 @@ mapscript:
       # Every stock map passes an objective number here, the old syntax, which the engine
       # ignores on purpose "for old map scripts compatibility" (g_script_actions.c:3372-3386).
       skip_numeric: true
+    - action: followspline
+      arg: 1
+      resolves:
+        - {key: targetname, classname: info_train_spline_main}
+      severity: error
+      case_insensitive: true   # BG_Find_Spline compares with Q_stricmp, game/bg_misc.c:3905-3919
+      describe: "an info_train_spline_main's targetname"
+      consequence: "the game stops with 'followspline: can't find spline' when it runs"
+      locus: "game/g_script_actions.c:826-836"
+      # `followspline accum <n> <name>` puts a buffer number here; that form is not checked.
+      skip_numeric: true
   # Numeric arguments the engine refuses, with a G_Error, when the action runs.
   arg_ranges:
     - action: constructible_class
@@ -3140,6 +4119,13 @@ mapscript:
       severity: error
       consequence: "the game stops with 'Invalid team number' when it runs"
       locus: "game/g_script_actions.c:3529-3533"
+    - action: sethqstatus
+      arg: 0
+      min: 0
+      max: 1
+      severity: error
+      consequence: "the game stops with 'sethqstatus with bad team set' when it runs (with a script_multiplayer)"
+      locus: "game/g_script_actions.c:4180-4191"
   # Calls a running block should make. Not enforced by the engine, so never an error.
   required_actions:
     - block: game_manager
@@ -3164,6 +4150,93 @@ mapscript:
         is a dynamite objective, but its weapon class stays below 1: dynamite can be planted and
         counts down, and the objective survives (game/g_missile.c:428, game/g_weapon.c:2072)
       fix_hint: "set constructible_class 3 on it, or call constructible_class 3 in its spawn event"
+
+
+# ---------------------------------------------------------------------------
+# sound - speaker scripts, sound scripts, and what in a map names them (nrc_mcp.soundscript)
+# ---------------------------------------------------------------------------
+# Two files, read by different parsers. Checked by validate_profile; packed by pack_pk3.
+sound:
+  confidence: verified
+  source: etlegacy_source
+  # A name ending in one of these is a sound file; any other name is a sound script's name
+  # (cgame/cg_event.c:1983, cgame/cg_main.c:830). Files are loaded by exact name: the codec
+  # adds no other extension (client/snd_codec.c:148-164).
+  file_extensions: [wav, ogg]
+  # A name starting with this is a per-player custom sound, not a file (cgame/cg_main.c:826).
+  custom_prefix: "*"
+  # The speaker script: the map's ambient speakers, placed with the in-game speaker editor.
+  # Loaded by the server and the client alike (game/g_main.c:1854, cgame/cg_main.c:754) through
+  # the bot-library tokenizer. A mistake prints an error and stops loading the file; the
+  # speakers read before it stay. Nothing stops the game.
+  speaker_script:
+    path: "sound/maps/{map}.sps"
+    root: speakerScript            # game/bg_sscript.c:333
+    entry: speakerDef              # game/bg_sscript.c:353
+    max_entries: 256               # MAX_SCRIPTSPEAKERS, game/bg_sscript.c:38
+    sound_key: noise               # registered as a file (cgame/cg_main.c:759)
+    name_key: targetname
+    # Each key and the value the engine parses (game/bg_sscript.c:157-298).
+    keys:
+      noise: {type: string}
+      origin: {type: vec3}
+      targetname: {type: string, max_length: 31}   # char targetname[32], game/bg_public.h:2987
+      looped: {type: enum, values: ["no", "on", "off"]}
+      broadcast: {type: enum, values: ["no", global, nopvs]}
+      wait: {type: int, min: 0}
+      random: {type: int, min: 0}
+      volume: {type: int, min: 0, max: 65535}
+      range: {type: int, min: 0}
+    locus: "game/bg_sscript.c:136-371"
+  # Sound scripts: named groups of sound files. The client loads every file filelist.txt names
+  # plus the map's own, and nothing else (cgame/cg_sound.c:396-468), so a name defined only in
+  # another map's file does not resolve. A mistake here is CG_Error: the client stops.
+  sound_scripts:
+    directory: sound/scripts
+    file_list: sound/scripts/filelist.txt
+    map_file: "sound/scripts/{map}.sounds"
+    sound_directive: sound         # cgame/cg_sound.c:404-424
+    max_sounds_per_block: 16       # MAX_SOUNDSCRIPT_SOUNDS, cgame/cg_local.h:1044
+    locus: "cgame/cg_sound.c:278-427"
+  # Where a map names a sound file or a sound script.
+  references:
+    entity_keys:
+      - {classname: target_speaker, key: noise, locus: "game/g_target.c:306-322"}
+    # playsound: g_script_actions.c:1859-1909; the voice announcements: :3644-3784
+    script_actions:
+      - {action: playsound, arg: 0}
+      - {action: wm_teamvoiceannounce, arg: 1}
+      - {action: wm_addteamvoiceannounce, arg: 1}
+      - {action: wm_removeteamvoiceannounce, arg: 1}
+    # Script actions that name a speaker of the speaker script by its targetname. The engine
+    # compares with Q_stricmp, and a name that matches nothing does nothing, silently
+    # (game/g_script_actions.c:2301-2410).
+    speaker_locus: "game/g_script_actions.c:2301-2410"
+    speaker_actions:
+      - {action: togglespeaker, arg: 0}
+      - {action: disablespeaker, arg: 0}
+      - {action: enablespeaker, arg: 0}
+
+
+# ---------------------------------------------------------------------------
+# sealing - what the compiler (q3map2 -game et) lets close the hull, for leak_trace
+# ---------------------------------------------------------------------------
+sealing:
+  confidence: verified
+  source: q3map2_source
+  # A brush with any side whose shader carries one of these surfaceparms is translucent to the
+  # compiler. The flags of all sides are OR-ed, so one such side makes the whole brush detail
+  # and non-opaque (map.cpp:517-537), and a non-opaque brush never stops the outside flood.
+  # The list is every C_TRANSLUCENT surfaceparm of the base game table (games.cpp:142-171) and
+  # of the Wolfenstein table that et extends (games.cpp:361-387, :401).
+  translucent_surfaceparms: [origin, areaportal, trans, alphashadow, lightfilter, trigger,
+                             water, slime, lava, playerclip, monsterclip, nodrop,
+                             clusterportal, donotenter, botclip, slag, clipmissile, clipshot,
+                             donotenterlarge, ai_nosight, ai_nopass, ai_nopasslarge]
+  # Model entities whose geometry the compiler bakes in: the clip brushes it builds from a
+  # model are always detail (model.cpp:445, :489), so a model never seals, present or missing.
+  model_entities: [misc_model]
+  model_key: model
 
 
 # ---------------------------------------------------------------------------
@@ -3196,12 +4269,75 @@ engine:
   log: "legacy/etconsole.log"
   # Proof the map loaded.
   loaded: "Loaded entities from maps/{map}.bsp"
+  client_connected: "Going from CS_PRIMED to CS_ACTIVE"
   # The game stopped: G_Error prints "ERROR: <message>" at the start of a line, then the server
   # shuts down "Server crashed". Harmless complaints ("^1ERROR: Can't find hunkusage.dat") carry
   # a timestamp and a colour code, so they never match.
   fatal: ["^ERROR: ", "Server crashed", "Received signal (4|6|8|11)\\b"]
   # Worth reading, never failing: the game's own non-fatal complaints about the map.
   noted: ["\\^1ERROR No ", "G_Script.*warning"]
+  playtest:
+    observer: etl-playtest.lua
+    observer_target: legacy/nrc_playtest.lua
+    screenshot_path: legacy/screenshots/{name}.jpg
+    # Read-only game-side telemetry; client stdin carries normal controls.
+    args: ["+set", "lua_modules", "nrc_playtest.lua", "+set", "g_doWarmup", "0",
+           "+set", "g_warmup", "0", "+set", "g_teamForceBalance", "0",
+           "+set", "g_inactivity", "0", "+set", "g_spectatorInactivity", "0",
+           "+set", "net_ip", "127.0.0.1", "+set", "net_enabled", "1", "+set", "net_port", "0",
+           "+set", "sv_maxclients", "1", "+set", "g_gametype", "2"]
+    bootstrap: ["map_restart 0"]
+    commands:
+      join: "team {team} {role}"
+      position: "setviewpos {x} {y} {z} {pitch} {yaw} {roll} 0"
+      screenshot: "screenshotJPEG {name}"
+      sync: "nrc_playtest_sync {sequence}"
+      quit: quit
+    # `aim` with `at` looks from the eye: the player's position raised by this player field
+    # (ps.viewheight; the pliers trace starts there, g_weapon.c:2432-2434).
+    eye_height: view_height
+    teams: {red: axis, blue: allies}
+    roles: {soldier: 0, medic: 1, engineer: 2, fieldops: 3, covertops: 4}
+    weapons:
+      pliers: {command: "weaponbank 5"}
+      dynamite: {command: "weaponbank 6"}
+      knife: {command: "weaponbank 1"}
+    controls:
+      attack: {press: "+attack", release: "-attack"}
+      forward: {press: "+forward", release: "-forward"}
+      back: {press: "+back", release: "-back"}
+      left: {press: "+moveleft", release: "-moveleft"}
+      right: {press: "+moveright", release: "-moveright"}
+      crouch: {press: "+movedown", release: "-movedown"}
+      prone: {press: "+prone", release: "-prone", mode: toggle,
+              note: "Press toggles prone; releasing stops the button but does not stand up. Press again to leave prone where clearance permits."}
+      jump: {press: "+moveup", release: "-moveup"}
+      sprint: {press: "+sprint", release: "-sprint"}
+      # The use key: doors (G_TryDoor checks allowteams), buttons, MG42s; client/cl_input.c:1497
+      activate: {press: "+activate", release: "-activate"}
+    fields:
+      player: [connected, team, role, alive, health, stance, weapon, weapon_id, speed,
+               position.0, position.1, position.2, angles.0, angles.1, angles.2,
+               view_height, carrying]
+      # charge_position: where a dynamite charge lies (the first one found).
+      game: [phase, winner, charge_count, armed_charges,
+             charge_position.0, charge_position.1, charge_position.2]
+      entity: [present, seen, count, health, state, classname, progress, built,
+               position.0, position.1, position.2]
+    example:
+      watch: [workshop_bridge]
+      steps:
+        - {action: join, team: blue, role: engineer, timeout: 40}
+        - {action: position, origin: [928, 512, 24], angles: [55, 180, 0]}
+        - {action: weapon, name: pliers}
+        - action: hold
+          controls: [attack]
+          timeout: 45
+          until: [{scope: entity, name: workshop_bridge, field: built, value: true}]
+        - action: wait
+          timeout: 10
+          until: [{scope: game, field: phase, value: intermission}, {scope: game, field: winner, value: blue}]
+        - {action: screenshot, name: victory}
 
 # ---------------------------------------------------------------------------
 # engine_limits — what decides whether the map LOADS, as opposed to compiles
@@ -3326,6 +4462,38 @@ packaging:
     - {path: "maps/{map}_loc.dat", confidence: verified, role: location names, required: false, locus: "cgame/cg_locations.c:526"}
     - {path: "levelshots/{map}.tga", any_extension: [png, tga, jpg, jpeg], confidence: verified, role: levelshot, required: false, locus: "cgame/cg_loadpanel.c:449"}
     - {path: "scripts/levelshots_{map}.shader", confidence: verified, role: command map shaders, required: false, locus: "cgame/cg_commandmap.c:1572-1589"}
+    - {path: "sound/maps/{map}.sps", confidence: verified, role: speaker script, required: false, locus: "game/g_main.c:1854, cgame/cg_main.c:754"}
+    - {path: "sound/scripts/{map}.sounds", confidence: verified, role: sound scripts, required: false, locus: "cgame/cg_sound.c:447"}
+  # Resources the stock maps reference that the base game itself never shipped. pack_pk3 lets
+  # each be missing, and says so, rather than failing the pack; anything else missing still
+  # fails it. Each entry names where it is referenced and what the game does without it.
+  allowed_missing:
+    - path: sound/world/brickfall.wav
+      confidence: verified
+      referenced_by: "the shipped maps/oasis.bsp (pak0.pk3): a func_explosive's noise key"
+      reason: >-
+        no archive of the base game ships it; func_explosive registers its noise as the sound it
+        plays on breaking (game/g_mover.c:4747-4758), and a sound that cannot be loaded
+        registers as handle 0 (client/snd_dma.c:470-473), so in the original game too that wall
+        breaks without a sound
+    - path: sound/vo/fueldump/allies/hq_reptank.wav
+      confidence: verified
+      referenced_by: "pak0.pk3 sound/scripts/fueldump.sounds line 127, in a sound script a copy of it carries"
+      reason: >-
+        no archive of the base game ships it; a sound script's file that cannot be loaded
+        registers as handle 0 (client/snd_dma.c:470-473) and plays nothing
+    - path: sound/vo/fueldump/axis/hq_tanktunnel.wav
+      confidence: verified
+      referenced_by: "pak0.pk3 sound/scripts/fueldump.sounds line 235, in a sound script a copy of it carries"
+      reason: >-
+        no archive of the base game ships it (pak0.pk3 has hq_tanktunnels.wav); a sound that
+        cannot be loaded registers as handle 0 (client/snd_dma.c:470-473) and plays nothing
+    - path: sound/world/wolf.wav
+      confidence: verified
+      referenced_by: "pak0.pk3 sound/maps/radar.sps line 2091, in a speaker script a copy of it carries"
+      reason: >-
+        no archive of the base game ships it; the speaker registers it as handle 0
+        (cgame/cg_main.c:759, client/snd_dma.c:470-473) and plays nothing
   reserved_shader_prefixes: [common/, sfx/, gfx/, models/]
   size_budget_bytes: 52428800
   size_budget_confidence: unverified

@@ -11,10 +11,9 @@ number that looks exact invites decisions it cannot support:
   reachabilities between areas; this knows about "empty cell above a solid cell with enough
   room to stand", plus a step and fall limit read from the profile. Where bots matter, compile
   the real thing.
-- The occupancy test is a *point* test at each cell centre against every brush's exact
-  half-spaces, so the player it models is a point, not a 30-unit-wide box. A slot too narrow
-  to walk through can therefore look walkable. `movement_check` measures passage widths
-  exactly, against the profile's verified player width, and is the check to trust for that.
+- Floor occupancy is sampled at cell centres. Routes additionally test a player box of the
+  selected stance against expanded brush half-spaces. This is exact for axis-aligned brushes
+  and conservative at angled brush edges; prone models only the recorded main body box.
 - Cell size quantizes vertically as well: standing headroom is required in whole cells, so at
   `cell=16` the grid demands `ceil(69.375 / 16) * 16 = 80` units of clear space. It errs
   towards refusing to call space walkable, and reports the figure it actually used.
@@ -114,6 +113,58 @@ invisible-surface list: every idTech game built with this compiler shares these.
 dropped only when *every* face matches, so a wall with one trigger-textured face stays solid.
 Clip variants are deliberately absent — they are what stops the player, so they are solid
 here even though they are never drawn.
+"""
+
+SOLID_CLEARING_SURFACEPARMS = (
+    "origin",
+    "areaportal",
+    "nonsolid",
+    "trigger",
+    "water",
+    "slime",
+    "lava",
+    "playerclip",
+    "monsterclip",
+    "nodrop",
+    "clusterportal",
+    "donotenter",
+    "botclip",
+    "fog",
+)
+"""Surfaceparms that take solid contents away from a shader, in the compiler's default table.
+
+q3map2 `games.cpp:142-173` (the `game_default` parms every game inherits): each of these
+clears `CONTENTS_SOLID`. A game's own additions come from the profile's
+`collision.solid_clearing_surfaceparms`. A shader with none of them, or with no script at all,
+keeps the default solid contents (`games.cpp:132`).
+"""
+
+PATCH_SUBDIVIDE_DISTANCE = 16.0
+"""`SUBDIVIDE_DISTANCE` (etlegacy `qcommon/cm_patch.h:129`), restated for reports: the kernel's
+port (`nrc_solid::patch::collision`) is what applies it. A patch collides as chords that stop
+short of its curve by up to this much."""
+
+PLAYER_CLIP_SURFACEPARMS = ("playerclip",)
+"""Surfaceparms that stop players even though they clear solid (`games.cpp:165`)."""
+
+PATCH_THICKNESS = 1.0
+"""How far behind its blocking side a patch facet is treated as solid, in world units.
+
+The engine's facet has no thickness: a trace is stopped by its front plane, or by one of the
+bevels it adds around it (`cm_patch.c:1017`, `1936`). The half-space model needs some volume,
+so each facet is a prism this deep behind its front face, and it blocks from both sides —
+as the engine did with a player box in `bench/dogfood/patches.py` (an inward-facing pipe
+stopped a player outside it). Thin on purpose: a deep prism behind the lower half of
+a small pipe would poke out of its top. The front face, the one players meet, stays exactly
+where the engine puts it. The voxel grid does not sample these slivers at cell centres, which
+would miss them; it marks every cell the facet passes through (`_rasterize_facet`).
+"""
+
+PATCH_RASTER_SHIFT = 0.01
+"""How far behind its front a facet is moved before it is rasterized, in world units.
+
+A facet lying exactly on a cell boundary then lands in the cell behind it, as a brush face on
+that boundary would: a floor at z=0 fills the cell below 0, not the one above.
 """
 
 UNASSIGNED_TEAM = "unassigned"
@@ -228,6 +279,8 @@ class Movement:
     player_width: Constant | None
     eye_height: Constant
     eye_height_is_inferred: bool
+    headroom_prone: Constant | None = None
+    floor_separation: Constant | None = None
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"profile": self.profile}
@@ -235,6 +288,8 @@ class Movement:
             "step_height",
             "headroom_stand",
             "headroom_crouch",
+            "headroom_prone",
+            "floor_separation",
             "jump_up_max",
             "ledge_grab_max",
             "fall_no_damage",
@@ -303,7 +358,7 @@ def movement_constants(profile_id: str) -> Movement:
         if widths:
             width = Constant(
                 key="units.player.bounding_box.width",
-                value=min(widths),
+                value=max(widths),
                 confidence=str(box.get("confidence", "unverified")),
                 source=str(box.get("source", "")),
                 description="Player bounding-box width.",
@@ -336,7 +391,20 @@ def movement_constants(profile_id: str) -> Movement:
         player_width=width,
         eye_height=eye,
         eye_height_is_inferred=inferred,
+        headroom_prone=_constant(section, "headroom_prone"),
+        floor_separation=_constant(section, "floor_separation"),
     )
+
+
+@dataclass(frozen=True)
+class ObjectiveLink:
+    """A profile-declared marker that represents its uniquely named objective target."""
+
+    classname: str
+    target_key: str
+    target_name_key: str
+    target_classnames: frozenset[str]
+    case_sensitive: bool = True
 
 
 @dataclass(frozen=True)
@@ -358,6 +426,7 @@ class Roles:
     # Categories whose brushes change state during a round (blown, built), from
     # `roles.state_changing`. Solid by default; `open_state_changing` treats them as open.
     state_changing: frozenset[str] = frozenset()
+    objective_links: tuple[ObjectiveLink, ...] = ()
 
     def team_of(self, classname: str, keys: dict[str, str]) -> str:
         """The team an entity belongs to.
@@ -522,6 +591,16 @@ def roles(profile_id: str) -> Roles:
         group_nearest=str(grouping.get("nearest") or ""),
         group_label_key=str(grouping.get("label_key") or ""),
         state_changing=frozenset(str(c) for c in extra.get("state_changing") or []),
+        objective_links=tuple(
+            ObjectiveLink(
+                classname=str(link["classname"]),
+                target_key=str(link["target_key"]),
+                target_name_key=str(link["target_name_key"]),
+                target_classnames=frozenset(str(c) for c in link["target_classnames"]),
+                case_sensitive=bool(link.get("case_sensitive", True)),
+            )
+            for link in extra.get("objective_links") or []
+        ),
     )
 
 
@@ -577,6 +656,11 @@ class Solid:
     #: the player. Carried rather than re-read, because the only other way to answer
     #: "is this cell held up by a clip brush" is a second pass over the map.
     shaders: tuple[str, ...] = ()
+    #: True for one collision facet of a patch (see `_facet_solid`), not a brush.
+    patch: bool = False
+    #: A patch facet's front face, its corners in order. The grid rasterizes this surface
+    #: rather than sampling the thin prism at cell centres.
+    facet: tuple[tuple[float, float, float], ...] = ()
 
     def contains(self, x: float, y: float, z: float) -> bool:
         if not (
@@ -621,6 +705,32 @@ def _axis_planes(
         (0.0, 0.0, 1.0, maxs[2]),
         (0.0, 0.0, -1.0, -mins[2]),
     )
+
+
+def _body_obstacles(solids: list[Solid], radius: float, height: float) -> list[Solid]:
+    """Expand obstacles by the reflected player box, with the query point at its feet.
+
+    Face-plane expansion encloses the true Minkowski sum, so missing bevel planes can
+    reject a clear angled corner but cannot make an obstructed box appear clear.
+    """
+    return [
+        Solid(
+            planes=tuple(
+                (a, b, c, d + radius * (abs(a) + abs(b)) + height * max(0.0, -c))
+                for a, b, c, d in solid.planes
+            ),
+            mins=(solid.mins[0] - radius, solid.mins[1] - radius, solid.mins[2] - height),
+            maxs=(solid.maxs[0] + radius, solid.maxs[1] + radius, solid.maxs[2]),
+            entity=solid.entity,
+            primitive=solid.primitive,
+            is_box=solid.is_box,
+            approximated=solid.approximated or not solid.is_box,
+            shaders=solid.shaders,
+            patch=solid.patch,
+            facet=solid.facet,
+        )
+        for solid in solids
+    ]
 
 
 def _hull_planes(
@@ -694,6 +804,328 @@ def _nonsolid_shader(shader: str, fragments: tuple[str, ...]) -> bool:
     return any(f in lowered for f in fragments)
 
 
+# ---------------------------------------------------------------------------
+# Patches — the engine's collision facets, as thin solids
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ShaderContents:
+    """Which shaders stop a player, read from the shader scripts the compiler would see.
+
+    A patch has one shader, and that shader's surfaceparms decide whether the compiled patch
+    collides at all: q3map2 writes the shader's contents into the BSP (`games.cpp:132-173`)
+    and the engine skips a patch whose contents miss the trace's mask (`cm_trace.c:876`).
+    """
+
+    #: Lowercased full shader name (`textures/...`) to its surfaceparms.
+    parms: dict[str, tuple[str, ...]]
+    #: Whether any shader script could be read. Without them a name is all there is to go on.
+    resolved: bool
+    sources: tuple[str, ...]
+    clearing: frozenset[str]
+    player_clip: frozenset[str]
+
+    def blocks_player(self, shader: str) -> bool | None:
+        """True or False when a script defines the shader; None when none does."""
+        from .optimize import SHADER_NAME_PREFIX  # noqa: PLC0415
+
+        parms = self.parms.get((SHADER_NAME_PREFIX + shader).lower())
+        if parms is None:
+            return None
+        if any(p in self.player_clip for p in parms):
+            return True
+        return not any(p in self.clearing for p in parms)
+
+
+_BASEGAME_PARMS: dict[tuple, dict[str, tuple[str, ...]]] = {}
+
+
+def _basegame_parms(directory: Path) -> dict[str, tuple[str, ...]]:
+    """Surfaceparms of every shader the base game's archives define, cached per archive set."""
+    from . import optimize  # noqa: PLC0415
+
+    try:
+        stamp = tuple(
+            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            for p in sorted(directory.iterdir())
+            if p.suffix.lower() == ".pk3"
+        )
+    except OSError:
+        return {}
+    key = (str(directory), stamp)
+    hit = _BASEGAME_PARMS.get(key)
+    if hit is None:
+        index = optimize.basegame_index([directory])
+        hit = {name: tuple(s["surfaceparms"]) for name, s in index["shaders"].items()}
+        _BASEGAME_PARMS.clear()
+        _BASEGAME_PARMS[key] = hit
+    return hit
+
+
+def shader_contents(profile_id: str, map_path: str | Path | None = None) -> ShaderContents:
+    """The shader scripts a compile of `map_path` would read: the project's own, then the game's.
+
+    The project's are the loose `scripts/*.shader` beside its `maps/` folder; the game's are
+    the scripts inside the base game's archives (`NRC_FS_BASEPATH` plus the profile's
+    `packaging.basegame`). Either may be missing; `resolved` says whether any was read.
+    """
+    from . import optimize  # noqa: PLC0415
+
+    data = profiles.load(profile_id)
+    collision = data.get("collision") if isinstance(data.get("collision"), dict) else {}
+    extra = collision.get("solid_clearing_surfaceparms") or []
+    clearing = frozenset([*SOLID_CLEARING_SURFACEPARMS, *(str(p).lower() for p in extra)])
+    parms: dict[str, tuple[str, ...]] = {}
+    sources: list[str] = []
+    if map_path is not None:
+        folder = Path(map_path).resolve().parent
+        root = folder.parent if folder.name.lower() == "maps" else folder
+        scripts = root / "scripts"
+        if scripts.is_dir():
+            for script in sorted(scripts.glob("*.shader")):
+                try:
+                    parsed = optimize.parse_shader_file(script)
+                except (OSError, optimize.OptimizeError):
+                    continue
+                for shader in parsed:
+                    parms.setdefault(shader["name"].lower(), tuple(shader["surfaceparms"]))
+                sources.append(str(script))
+    base = os.environ.get("NRC_FS_BASEPATH")
+    basegame = (data.get("packaging") or {}).get("basegame")
+    if base and basegame and (Path(base) / str(basegame)).is_dir():
+        directory = Path(base) / str(basegame)
+        found = _basegame_parms(directory)
+        if found:
+            for name, value in found.items():
+                parms.setdefault(name, value)
+            sources.append(str(directory))
+    return ShaderContents(
+        parms=parms,
+        resolved=bool(sources),
+        sources=tuple(sources),
+        clearing=clearing,
+        player_clip=frozenset(PLAYER_CLIP_SURFACEPARMS),
+    )
+
+
+def _cross(
+    u: tuple[float, float, float], v: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+
+def _facet_solid(
+    normal: tuple[float, float, float],
+    dist: float,
+    points: list[tuple[float, float, float]],
+    thickness: float,
+    entity: int,
+    primitive: int,
+    shader: str,
+) -> list[Solid]:
+    """A patch facet as a prism: its front face where the engine puts it, `thickness` behind.
+
+    Bounded by the facet plane, the plane `thickness` behind it, one plane through each edge
+    perpendicular to the facet, and the six axial planes of its bounds — the same axial bevels
+    the engine adds to every facet (`cm_patch.c:1017`), which keep a player-box expansion of a
+    sharp triangle corner from reaching further than the corner itself. A quad that is not
+    convex is split into its two triangles.
+    """
+    nx, ny, nz = normal
+    count = len(points)
+    edges: list[tuple[float, float, float, float]] = []
+    for k in range(count):
+        a, b = points[k], points[(k + 1) % count]
+        m = _cross((b[0] - a[0], b[1] - a[1], b[2] - a[2]), normal)
+        length = math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
+        if length < 1e-9:
+            continue  # a degenerate edge bounds nothing
+        m = (m[0] / length, m[1] / length, m[2] / length)
+        d = m[0] * a[0] + m[1] * a[1] + m[2] * a[2]
+        sides = [m[0] * p[0] + m[1] * p[1] + m[2] * p[2] - d for p in points]
+        if max(sides) > 1e-6:
+            m, d = (-m[0], -m[1], -m[2]), -d
+            sides = [-s for s in sides]
+            if max(sides) > 1e-6:
+                if count == 4:
+                    # Not convex: the two triangles, as the engine would split the cell.
+                    first = [points[0], points[1], points[2]]
+                    second = [points[2], points[3], points[0]]
+                    return [
+                        *_facet_solid(normal, dist, first, thickness, entity, primitive, shader),
+                        *_facet_solid(normal, dist, second, thickness, entity, primitive, shader),
+                    ]
+                return []
+        edges.append((m[0], m[1], m[2], d))
+    if len(edges) < 3:
+        return []
+    corners = [
+        *points,
+        *((p[0] - nx * thickness, p[1] - ny * thickness, p[2] - nz * thickness) for p in points),
+    ]
+    mins = (
+        min(p[0] for p in corners),
+        min(p[1] for p in corners),
+        min(p[2] for p in corners),
+    )
+    maxs = (
+        max(p[0] for p in corners),
+        max(p[1] for p in corners),
+        max(p[2] for p in corners),
+    )
+    planes = (
+        (nx, ny, nz, dist),
+        (-nx, -ny, -nz, thickness - dist),
+        *edges,
+        *_axis_planes(mins, maxs),
+    )
+    return [
+        Solid(
+            planes=planes,
+            mins=mins,
+            maxs=maxs,
+            entity=entity,
+            primitive=primitive,
+            is_box=False,
+            approximated=False,
+            shaders=(shader,),
+            patch=True,
+            facet=tuple(points),
+        )
+    ]
+
+
+def _clip_polygon(
+    points: list[tuple[float, float, float]], axis: int, bound: float, keep_below: bool
+) -> list[tuple[float, float, float]]:
+    """Sutherland-Hodgman against one axial plane, keeping `p[axis] <= bound` or `>= bound`."""
+    out: list[tuple[float, float, float]] = []
+    count = len(points)
+    for k in range(count):
+        a, b = points[k], points[(k + 1) % count]
+        da = (a[axis] - bound) if keep_below else (bound - a[axis])
+        db = (b[axis] - bound) if keep_below else (bound - b[axis])
+        if da <= 0:
+            out.append(a)
+        if (da < 0 < db) or (db < 0 < da):
+            t = da / (da - db)
+            out.append(
+                (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
+            )
+    return out
+
+
+def _rasterize_facet(
+    solid: Solid,
+    occupancy: bytearray,
+    origin: tuple[float, float, float],
+    dims: tuple[int, int, int],
+    cell: float,
+) -> None:
+    """Mark every cell a patch facet passes through as solid.
+
+    A brush is sampled at cell centres because it has volume; a facet has none, so centre
+    sampling would let a wall of facets fall between columns. Instead the facet, moved
+    `PATCH_RASTER_SHIFT` behind its front, is clipped to each column it overlaps, and every
+    cell its z-range in that column touches is filled. That reads a patch surface up to one
+    cell nearer the player than a brush face at the same height would read — the
+    conservative side — and the exact checks downstream (body clearance, `movement_check`)
+    measure the real facet, not the cells.
+    """
+    nx, ny, nz = dims
+    ox, oy, oz = origin
+    a, b, c, _ = solid.planes[0]
+    shift = PATCH_RASTER_SHIFT
+    polygon = [(p[0] - a * shift, p[1] - b * shift, p[2] - c * shift) for p in solid.facet]
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    cx0 = max(0, math.floor((min(xs) - ox) / cell))
+    cx1 = min(nx - 1, math.floor((max(xs) - ox) / cell))
+    cy0 = max(0, math.floor((min(ys) - oy) / cell))
+    cy1 = min(ny - 1, math.floor((max(ys) - oy) / cell))
+    for ix in range(cx0, cx1 + 1):
+        x_lo = ox + ix * cell
+        strip = _clip_polygon(polygon, 0, x_lo, keep_below=False)
+        strip = _clip_polygon(strip, 0, x_lo + cell, keep_below=True) if strip else strip
+        if not strip:
+            continue
+        base_x = ix * ny
+        for iy in range(cy0, cy1 + 1):
+            y_lo = oy + iy * cell
+            piece = _clip_polygon(strip, 1, y_lo, keep_below=False)
+            piece = _clip_polygon(piece, 1, y_lo + cell, keep_below=True) if piece else piece
+            if not piece:
+                continue
+            # A facet that only touches the column's edge (a floor ending on a cell boundary)
+            # is not in it: the piece must reach inside the open square.
+            mx = sum(p[0] for p in piece) / len(piece)
+            my = sum(p[1] for p in piece) / len(piece)
+            if not (x_lo < mx < x_lo + cell and y_lo < my < y_lo + cell):
+                continue
+            zs = [p[2] for p in piece]
+            iz0 = max(0, math.floor((min(zs) - oz) / cell))
+            iz1 = min(nz - 1, max(iz0, math.ceil((max(zs) - oz) / cell) - 1))
+            if iz0 > iz1:
+                continue
+            start = (base_x + iy) * nz
+            occupancy[start + iz0 : start + iz1 + 1] = _SOLID * (iz1 - iz0 + 1)
+
+
+def _collect_patches(
+    game_map: Any,
+    solids: list[Solid],
+    provenance: dict[str, Any],
+    skipped_entities: set[int],
+    contents: ShaderContents | None,
+    nonsolid_fragments: tuple[str, ...],
+    thickness: float,
+) -> None:
+    """Add every player-blocking patch's collision facets to `solids`, counting what was not."""
+    if not hasattr(game_map, "patch_collision"):
+        provenance["patches"] = provenance["patches_unmodelled"] = len(game_map.patches())
+        return
+    examples: list[str] = []
+    for patch in game_map.patch_collision():
+        provenance["patches"] += 1
+        entity, primitive = int(patch["entity"]), int(patch["primitive"])
+        shader = str(patch.get("shader") or "")
+        if entity in skipped_entities:
+            provenance["patches_nonsolid_entity"] += 1
+            continue
+        blocks = contents.blocks_player(shader) if contents is not None else None
+        if blocks is None:
+            if contents is None or not contents.resolved:
+                provenance["patches_shader_unresolved"] += 1
+                blocks = not _nonsolid_shader(shader, (*nonsolid_fragments, "nonsolid"))
+            else:
+                blocks = True  # no script: the compiler's default contents are solid
+        if not blocks:
+            provenance["patches_nonsolid_shader"] += 1
+            continue
+        if patch.get("error"):
+            provenance["patches_unmodelled"] += 1
+            if len(examples) < 5:
+                examples.append(f"entity {entity} primitive {primitive}: {patch['error']}")
+            continue
+        made = 0
+        for normal, dist, points in patch["facets"]:
+            for solid in _facet_solid(
+                (float(normal[0]), float(normal[1]), float(normal[2])),
+                float(dist),
+                [(float(p[0]), float(p[1]), float(p[2])) for p in points],
+                thickness,
+                entity,
+                primitive,
+                shader,
+            ):
+                solids.append(solid)
+                made += 1
+        provenance["patch_facets"] += made
+        provenance["patches_used"] += 1 if made else 0
+    provenance["patch_unmodelled_examples"] = examples
+
+
 def collect_solids(
     game_map: Any,
     role_map: Roles | None = None,
@@ -701,12 +1133,20 @@ def collect_solids(
     max_hull_vertices: int = MAX_HULL_VERTICES,
     nonsolid_fragments: tuple[str, ...] = NONSOLID_SHADER_FRAGMENTS,
     open_state_changing: bool = False,
+    patch_thickness: float = PATCH_THICKNESS,
+    contents: ShaderContents | None = None,
 ) -> tuple[list[Solid], dict[str, Any]]:
-    """Every collision brush in the map, as half-space solids, plus what was left out.
+    """Every collision brush and patch facet in the map, as half-space solids, plus what was
+    left out.
 
     The provenance dictionary is not decoration. Brushes the kernel declines to evaluate are
     invisible to everything downstream, and a caller that cannot see how many there were has
     no way to judge an "unreachable" answer.
+
+    Patches enter as the engine's own collision facets (`nrc_solid::patch::collision`), each a
+    prism `patch_thickness` deep behind its blocking face. `contents` says which patch shaders
+    stop a player; without it (or when it read no scripts) a patch is judged by its shader's
+    name, as brushes are, and the count of such patches is reported.
     """
     nonsolid_categories = set(NONSOLID_ROLES)
     if open_state_changing and role_map:
@@ -719,17 +1159,26 @@ def collect_solids(
         "brushes_bounds_approximated": 0,
         "brushes_nonsolid_shader": 0,
         "brushes_nonsolid_entity": 0,
-        "patches_ignored": 0,
+        "patches": 0,
+        "patches_used": 0,
+        "patch_facets": 0,
+        "patches_nonsolid_shader": 0,
+        "patches_nonsolid_entity": 0,
+        "patches_shader_unresolved": 0,
+        "patches_unmodelled": 0,
         "unrecognized_primitives": 0,
         "entities_unknown_to_profile": 0,
     }
     indeterminate_examples: list[str] = []
+    skipped_entities: set[int] = set()
 
     for entity in game_map.entities(with_keys=False):
         index = int(entity["index"])
         classname = str(entity.get("classname") or "")
         category = role_map.category_of.get(classname) if role_map else None
         skip = category in nonsolid_categories
+        if skip:
+            skipped_entities.add(index)
         if role_map and category is None and int(entity.get("brushes") or 0):
             provenance["entities_unknown_to_profile"] += 1
 
@@ -742,9 +1191,7 @@ def collect_solids(
                 message = str(e)
                 if "has no primitive" in message:
                     break
-                if "patch" in message:
-                    provenance["patches_ignored"] += 1
-                else:
+                if "patch" not in message:  # patches are collected below
                     provenance["unrecognized_primitives"] += 1
                 primitive += 1
                 continue
@@ -807,6 +1254,15 @@ def collect_solids(
             provenance["brushes_used"] += 1
 
     provenance["indeterminate_examples"] = indeterminate_examples
+    _collect_patches(
+        game_map,
+        solids,
+        provenance,
+        skipped_entities,
+        contents,
+        nonsolid_fragments,
+        patch_thickness,
+    )
     return solids, provenance
 
 
@@ -1078,6 +1534,10 @@ class NavGrid:
     too_low_total: int = 0
     findings: list[dict] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    stance: str = "stand"
+    clearance_solids: list[Solid] = field(default_factory=list)
+    clearance_index: BucketIndex | None = None
+    clearance_restricted: list[tuple[int, int, int]] = field(default_factory=list)
     _components: dict[tuple[int, int, int], int] | None = None
     _component_sizes: list[int] = field(default_factory=list)
 
@@ -1127,19 +1587,56 @@ class NavGrid:
         """
         ix, iy, iz = cell
         up = self.fall_cells if symmetric else self.step_up_cells
-        for dx, dy in _NEIGHBOURS:
-            column = self.columns.get((ix + dx, iy + dy))
-            if not column:
-                continue
-            if dx and dy and (self.is_solid(ix + dx, iy, iz) or self.is_solid(ix, iy + dy, iz)):
-                continue
-            for iz2 in column:
-                rise = iz2 - iz
-                if -self.fall_cells <= rise <= up:
-                    yield (
-                        (ix + dx, iy + dy, iz2),
-                        math.sqrt(dx * dx + dy * dy + rise * rise) * self.cell,
-                    )
+        width = self.movement.player_width
+        # Body clearance removes the cells against a riser. A step or drop can still cross
+        # that narrow band: lift, move horizontally, then lower, checking the swept body.
+        # Longer links are only allowed at a change of height, never across a flat gap.
+        reach = max(1, math.ceil(width.value / (2 * self.cell)) + 1) if width else 1
+        for distance in range(1, reach + 1):
+            for ux, uy in _NEIGHBOURS:
+                dx, dy = ux * distance, uy * distance
+                column = self.columns.get((ix + dx, iy + dy))
+                if not column:
+                    continue
+                for iz2 in column:
+                    rise = iz2 - iz
+                    if not -self.fall_cells <= rise <= up or (distance > 1 and rise == 0):
+                        continue
+                    dest = (ix + dx, iy + dy, iz2)
+                    if self.clearance_index is not None:
+                        if not self._body_move_clear(cell, dest):
+                            continue
+                    elif (
+                        dx
+                        and dy
+                        and (self.is_solid(ix + dx, iy, iz) or self.is_solid(ix, iy + dy, iz))
+                    ):
+                        continue
+                    yield dest, math.sqrt(dx * dx + dy * dy + rise * rise) * self.cell
+
+    def _body_move_clear(self, source, target) -> bool:
+        """A step-shaped swept box, also used in reverse for weak components.
+
+        The higher endpoint is the horizontal leg; testing the vertical legs prevents a
+        rise from passing through a ceiling. Intermediate columns need floor at one of the
+        endpoint levels, so widening the riser transition does not invent a jump over a gap.
+        """
+        assert self.clearance_index is not None
+        p0, p1 = self.centre(source), self.centre(target)
+        highest = max(p0[2], p1[2])
+        a, b = (p0[0], p0[1], highest), (p1[0], p1[1], highest)
+        span = max(abs(target[0] - source[0]), abs(target[1] - source[1]))
+        if span > 1:
+            for part in range(1, span):
+                ix = source[0] + (target[0] - source[0]) * part // span
+                iy = source[1] + (target[1] - source[1]) * part // span
+                if not any(self.is_solid(ix, iy, z - 1) for z in (source[2], target[2])):
+                    return False
+        return all(
+            segment_clear(self.clearance_solids, self.clearance_index, start, end)
+            for start, end in ((p0, a), (a, b), (b, p1))
+            if start != end
+        )
 
     def components(self) -> dict[tuple[int, int, int], int]:
         """Connected components of the walkable graph, labelled once and cached.
@@ -1219,9 +1716,17 @@ class NavGrid:
     # --- reporting --------------------------------------------------------
 
     def as_dict(self) -> dict[str, Any]:
+        headroom = getattr(self.movement, f"headroom_{self.stance}")
+        separation = self.movement.floor_separation
+        body_height = headroom.value + (separation.value if separation else 0.0)
         return {
             "map": self.map_path,
             "profile": self.profile,
+            "stance": self.stance,
+            "player_width": self.movement.player_width.as_dict()
+            if self.movement.player_width
+            else None,
+            "clearance_model": "expanded_brush_main_body_box" if self.clearance_index else "point",
             "cell": self.cell,
             "origin": list(self.origin),
             "dims": list(self.dims),
@@ -1230,7 +1735,9 @@ class NavGrid:
             "step_up_cells": self.step_up_cells,
             "fall_cells": self.fall_cells,
             "headroom_cells": self.headroom_cells,
-            "effective_headroom_units": self.headroom_cells * self.cell,
+            "voxel_headroom_units": self.headroom_cells * self.cell,
+            "body_clearance_height_units": body_height,
+            "effective_headroom_units": max(self.headroom_cells * self.cell, body_height),
             "geometry": self.geometry,
             "findings": self.findings,
             "notes": self.notes,
@@ -1299,6 +1806,7 @@ def cached_navgrid(
         kwargs.get("max_hull_vertices", MAX_HULL_VERTICES),
         kwargs.get("bucket", DEFAULT_BUCKET),
         bool(kwargs.get("open_state_changing", False)),
+        kwargs.get("stance", "stand"),
     )
     hit = _GRID_CACHE.get(key)
     if hit is not None:
@@ -1348,6 +1856,7 @@ def build_navgrid(
     bucket: float = DEFAULT_BUCKET,
     game_map: Any = None,
     open_state_changing: bool = False,
+    stance: str = "stand",
 ) -> NavGrid:
     """Voxelize a map into a walkable grid.
 
@@ -1358,8 +1867,8 @@ def build_navgrid(
     is still used to label the result and to word errors.
 
     A cell is **solid** when its centre is inside any brush, and **walkable** when it is empty,
-    the cell below it is solid, and there is at least the profile's `headroom_stand` of clear
-    space above it. Every one of those numbers comes from the profile; none is written here.
+    the cell below it is solid, and the selected stance's body box fits above it. `stance`
+    is `stand`, `crouch` or `prone`; missing profile dimensions are refused, never guessed.
 
     Complexity, for B brushes and a grid of nx x ny x nz cells:
 
@@ -1378,8 +1887,17 @@ def build_navgrid(
     """
     profile = resolve_profile(profile_id)
     movement = movement_constants(profile)
-    if cell <= 0:
+    if not math.isfinite(cell) or cell <= 0:
         raise AnalysisError(f"cell size must be positive, got {cell}")
+    if stance not in ("stand", "crouch", "prone"):
+        raise AnalysisError("stance must be stand, crouch or prone")
+    headroom = getattr(movement, f"headroom_{stance}")
+    if headroom is None or not math.isfinite(headroom.value) or headroom.value <= 0:
+        raise AnalysisError(f"profile {profile} states no positive headroom_{stance}")
+    separation = movement.floor_separation
+    if separation and (not math.isfinite(separation.value) or separation.value < 0):
+        raise AnalysisError(f"profile {profile} floor_separation must be finite and non-negative")
+    body_height = headroom.value + (separation.value if separation else 0.0)
 
     path = _resolve_map_path(map_path)
     if game_map is None:
@@ -1390,6 +1908,7 @@ def build_navgrid(
         role_map,
         max_hull_vertices=max_hull_vertices,
         open_state_changing=open_state_changing,
+        contents=shader_contents(profile, path) if game_map.patches() else None,
     )
     if not solids:
         raise AnalysisError(
@@ -1419,6 +1938,9 @@ def build_navgrid(
     solid = bytearray(total)
     ox, oy, oz = origin
     for brush in solids:
+        if brush.facet:
+            _rasterize_facet(brush, solid, origin, dims, cell)
+            continue
         # Cells whose centre can lie inside this brush, from its bounding box.
         cx0 = max(0, math.ceil((brush.mins[0] - ox) / cell - 0.5))
         cx1 = min(nx - 1, math.floor((brush.maxs[0] - ox) / cell - 0.5))
@@ -1441,9 +1963,17 @@ def build_navgrid(
                 start = (base_x + iy) * nz
                 solid[start + iz0 : start + iz1 + 1] = _SOLID * (iz1 - iz0 + 1)
 
-    headroom_cells = max(1, math.ceil(movement.headroom_stand.value / cell))
+    width = movement.player_width
+    # Keep voxel rounding of the nominal body height. The exact expanded brush test then
+    # reserves the engine's floor separation without adding a whole extra vertical cell.
+    # A profile without width has no expanded body test, so include it in the cell test.
+    headroom_cells = max(1, math.ceil((headroom.value if width else body_height) / cell))
     crouch = movement.headroom_crouch
     crouch_cells = max(1, math.ceil(crouch.value / cell)) if crouch else headroom_cells
+    clearance_solids = _body_obstacles(solids, width.value / 2, body_height) if width else []
+    clearance_index = BucketIndex(clearance_solids, bucket) if width else None
+    clearance_restricted: list[tuple[int, int, int]] = []
+    body_blocked_total = 0
 
     columns: dict[tuple[int, int], tuple[int, ...]] = {}
     restricted: list[tuple[int, int, int]] = []
@@ -1471,7 +2001,19 @@ def build_navgrid(
                 obstruction = solid.find(_SOLID, stand_on, end)
                 clear = (end if obstruction < 0 else obstruction) - stand_on
                 if clear >= headroom_cells:
-                    walkable.append(stand_on - start)
+                    point = (
+                        ox + (ix + 0.5) * cell,
+                        oy + (iy + 0.5) * cell,
+                        oz + (stand_on - start) * cell,
+                    )
+                    if clearance_index is not None and not segment_clear(
+                        clearance_solids, clearance_index, point, point
+                    ):
+                        body_blocked_total += 1
+                        if len(clearance_restricted) < restricted_sample_cap:
+                            clearance_restricted.append((ix, iy, stand_on - start))
+                    else:
+                        walkable.append(stand_on - start)
                     continue
                 # Every floor without room to stand is a candidate for `movement_check`,
                 # whichever side of crouch height the cell count falls on. The split below is
@@ -1499,6 +2041,7 @@ def build_navgrid(
         "walkable_columns": len(columns),
         "crouch_only_floor_cells": crouch_only_total,
         "too_low_floor_cells": too_low_total,
+        "body_blocked_floor_cells": body_blocked_total,
         "solids": len(solids),
     }
 
@@ -1519,17 +2062,34 @@ def build_navgrid(
                 "snap the offending brushes to the grid, then re-run",
             )
         )
-    if provenance["patches_ignored"]:
+    if provenance["patches_unmodelled"]:
+        examples = "; ".join(provenance.get("patch_unmodelled_examples") or [])
         findings.append(
             _finding(
                 "NAV_PATCHES_IGNORED",
                 "warning",
-                f"{provenance['patches_ignored']} patch(es) are not in this grid. Patches are "
-                "curved surfaces, not half-space solids, and the player collides with them in "
-                "game — so a ramp or a curved floor built from patches reads here as thin air.",
+                f"{provenance['patches_unmodelled']} solid patch(es) are not in this grid "
+                "because their control grid is one the engine refuses or cannot hold "
+                f"({examples}). The engine stops loading a map over such a patch, so fix it "
+                "before trusting any route here.",
                 "verified",
-                "nrc_mcp.analysis: patches are outside the half-space model this grid uses",
-                "check whether any of them carries walkable floor or blocks a route",
+                "nrc_solid::patch::collision mirrors CM_GeneratePatchCollide "
+                "(qcommon/cm_patch.c:1451-1475, MAX_FACETS at cm_patch.h:77)",
+                "give the patch odd dimensions of at least 3x3, or split it",
+            )
+        )
+    if provenance["patches_shader_unresolved"]:
+        findings.append(
+            _finding(
+                "NAV_PATCH_CONTENTS_GUESSED",
+                "info",
+                f"{provenance['patches_shader_unresolved']} patch(es) were judged solid or "
+                "not by shader name alone, because no shader script could be read (no project "
+                "scripts/ folder and no base game at NRC_FS_BASEPATH). A decal or trim whose "
+                "script says nonsolid is then a wall here.",
+                "verified",
+                "nrc_mcp.analysis.shader_contents read no scripts",
+                "set NRC_FS_BASEPATH to the game install, then re-run",
             )
         )
     if provenance["brushes_bounds_approximated"]:
@@ -1550,24 +2110,25 @@ def build_navgrid(
             _finding(
                 "NAV_NO_WALKABLE_SPACE",
                 "warning",
-                f"no cell in the map has {movement.headroom_stand.value:g} units of clear "
+                f"no cell fits the {stance} player box with {body_height:g} units of clear "
                 f"space above a floor (needed {headroom_cells} cell(s) of "
                 f"{cell:g}, so {headroom_cells * cell:g} units). Either the map has no "
                 "sealed interior at this cell size, or the cell size is too coarse for it.",
-                movement.headroom_stand.confidence,
-                f"profile {profile}: {movement.headroom_stand.key}",
+                "unverified",
+                f"profile {profile}: {headroom.key}; voxel body clearance",
                 f"try a smaller cell, e.g. cell={max(1, int(cell // 2))}",
             )
         )
 
     notes = [
-        "A voxel grid is not an AAS navmesh: it models a point-sized player walking and "
-        "falling, and knows nothing about jumps, ladders, water or teleporters.",
+        "A voxel grid is not an AAS navmesh: it models a player box walking and "
+        "falling, and knows nothing about jumps, ladders, water or teleporters. "
+        "Expanded face planes conservatively block some angled brush corners.",
         "the grid spans the geometry's own bounds, so the outermost top surface has no space "
         "modelled above it and is never walkable — correct for a sealed map's sky shell, and "
         "wrong for a map whose highest surface is a rooftop players use",
-        f"standing headroom {movement.headroom_stand.value:g} units "
-        f"({movement.headroom_stand.confidence}, {movement.headroom_stand.source}) is "
+        f"{stance} headroom {headroom.value:g} units "
+        f"({headroom.confidence}, {headroom.source}) is "
         f"enforced as {headroom_cells} cell(s) = {headroom_cells * cell:g} units, so the grid "
         "under-reports walkable space rather than over-reporting it",
         f"step up {movement.step_height.value:g} units -> {step_up_cells} cell(s); "
@@ -1576,6 +2137,30 @@ def build_navgrid(
         else f"step up {movement.step_height.value:g} units -> {step_up_cells} cell(s); the "
         "profile states no fall tolerance, so descents are limited to the step height",
     ]
+    if not width:
+        notes.append(
+            "the profile states no player width; body clearance is unchecked, so routes model a point"
+        )
+    if separation:
+        notes.append(
+            f"profile floor separation {separation.value:g} units ({separation.confidence}, "
+            f"{separation.source}) raises the nominal {stance} height {headroom.value:g} to "
+            f"{body_height:g} units for body clearance; exact-fit openings are not assumed passable"
+        )
+    if stance == "prone":
+        notes.append(
+            "prone uses the main body box only; leg collision, orientation and stance transitions are not modelled"
+        )
+    if provenance["patches_used"]:
+        notes.append(
+            f"{provenance['patches_used']} patch(es) are modelled as the engine's own "
+            f"{provenance['patch_facets']} collision facets: the curve subdivided only until "
+            f"each chord is within {PATCH_SUBDIVIDE_DISTANCE:g} units of it, as the engine does, "
+            "so a small pipe collides as a polygon well inside its drawn curve. A facet "
+            "fills every cell it passes through, so a patch floor or ceiling can read up to a "
+            "cell nearer than a brush face at the same height would. Facets block from both "
+            "sides, as the engine's bevelled facets did against a player box in testing"
+        )
 
     return NavGrid(
         map_path=str(path),
@@ -1599,6 +2184,10 @@ def build_navgrid(
         too_low_total=too_low_total,
         findings=findings,
         notes=notes,
+        stance=stance,
+        clearance_solids=clearance_solids,
+        clearance_index=clearance_index,
+        clearance_restricted=clearance_restricted,
     )
 
 
@@ -1789,6 +2378,12 @@ class Marker:
     #: Bounds of a brush entity with no origin key; None for point entities. Paths to a brush
     #: objective go to its floor footprint (`_approach_points`), not to the centre in `origin`.
     bounds: tuple[list[float], list[float]] | None = None
+    #: Other entities represented by this objective's approach area and team.
+    linked_entities: tuple[int, ...] = ()
+
+    @property
+    def entity_indices(self) -> tuple[int, ...]:
+        return (self.entity, *self.linked_entities)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1797,6 +2392,7 @@ class Marker:
             "origin": [round(v, 2) for v in self.origin],
             "team": self.team,
             "group": self.group,
+            **({"linked_entities": list(self.linked_entities)} if self.linked_entities else {}),
         }
 
 
@@ -1869,13 +2465,60 @@ def _brush_bounds(game_map: Any, entity: dict) -> tuple[list[float], list[float]
     return lo, hi
 
 
+def _group_linked_objectives(
+    objectives: list[Marker], entities: list[dict], role_map: Roles
+) -> list[Marker]:
+    """Keep one approach marker for an explicit, unambiguous profile-declared pair.
+
+    Names, proximity and class alone never imply duplication. Count every named entity and
+    referring marker, including ones without usable geometry, so ambiguous or broken links
+    stay visible. Multi-target and shared-target arrangements need separate modelling.
+    """
+    by_index = {marker.entity: marker for marker in objectives}
+    claimed: set[int] = set()
+    represented: set[int] = set()
+    for link in role_map.objective_links:
+        targets: dict[str, list[int]] = {}
+        sources: dict[str, list[int]] = {}
+        for entity in entities:
+            keys = _entity_keys(entity)
+            name = keys.get(link.target_name_key, "")
+            reference = keys.get(link.target_key, "")
+            if not link.case_sensitive:
+                name, reference = name.casefold(), reference.casefold()
+            index = int(entity["index"])
+            if name:
+                targets.setdefault(name, []).append(index)
+            if reference and entity.get("classname") == link.classname:
+                sources.setdefault(reference, []).append(index)
+        for name, source_ids in sources.items():
+            target_ids = targets.get(name, [])
+            if len(source_ids) != 1 or len(target_ids) != 1:
+                continue
+            source = by_index.get(source_ids[0])
+            target = by_index.get(target_ids[0])
+            if (
+                source is None
+                or target is None
+                or target.classname not in link.target_classnames
+                or source.entity == target.entity
+                or claimed.intersection((source.entity, target.entity))
+            ):
+                continue
+            source.linked_entities = (target.entity,)
+            claimed.update((source.entity, target.entity))
+            represented.add(target.entity)
+    return [marker for marker in objectives if marker.entity not in represented]
+
+
 def _markers(game_map: Any, role_map: Roles) -> tuple[list[Marker], list[Marker], int]:
     spawns: list[Marker] = []
     objectives: list[Marker] = []
     # (origin, group name) of each entity spawns are grouped around, when the profile says so.
     anchors: list[tuple[tuple[float, float, float], str]] = []
     without_origin = 0
-    for entity in game_map.entities():
+    entities = game_map.entities()
+    for entity in entities:
         classname = str(entity.get("classname") or "")
         is_spawn = classname in role_map.spawns
         is_objective = classname in role_map.objectives
@@ -1918,7 +2561,7 @@ def _markers(game_map: Any, role_map: Roles) -> tuple[list[Marker], list[Marker]
         for marker in spawns:
             if not marker.group:
                 marker.group = min(anchors, key=lambda a: math.dist(a[0], marker.origin))[1]
-    return spawns, objectives, without_origin
+    return spawns, _group_linked_objectives(objectives, entities, role_map), without_origin
 
 
 def _resolve_map_path(map_path: str | Path) -> Path:
@@ -1998,6 +2641,7 @@ def balance_report(
     max_paths: int = 64,
     symmetry_tolerance: float | None = None,
     open_state_changing: bool = False,
+    stance: str = "stand",
 ) -> dict[str, Any]:
     """Per-team traversal distance from each spawn group to each objective (§7.3).
 
@@ -2021,7 +2665,11 @@ def balance_report(
         # A supplied grid is the source of truth for which profile this report is about: it was
         # built against one, and resolving again could quietly pick a different one.
         navgrid = grid or cached_navgrid(
-            map_path, cell=cell, profile_id=profile_id, open_state_changing=open_state_changing
+            map_path,
+            cell=cell,
+            profile_id=profile_id,
+            open_state_changing=open_state_changing,
+            stance=stance,
         )
     except AnalysisError as e:
         return {"error": str(e), "profile": profile_id or ""}
@@ -2104,6 +2752,7 @@ def balance_report(
                     "team": row["team"],
                     "group": row["group"],
                     "objective_entity": objective.entity,
+                    "objective_entities": list(objective.entity_indices),
                     "objective": objective.classname,
                     "objective_team": objective.team,
                     "reachable": result["reachable"],
@@ -2584,7 +3233,11 @@ def movement_check(
     # that reported that as a defect would be wrong about a real map.
     crouch = movement.headroom_crouch
     stand = movement.headroom_stand
-    candidates = navgrid.restricted
+    separation = movement.floor_separation
+    extra_height = separation.value if separation else 0.0
+    stand_clearance = stand.value + extra_height
+    crouch_clearance = crouch.value + extra_height if crouch else None
+    candidates = navgrid.restricted + navgrid.clearance_restricted
     if len(candidates) > samples:
         candidates = rng.sample(candidates, samples)
 
@@ -2601,8 +3254,12 @@ def movement_check(
             "position": [round(x, 2), round(y, 2), round(floor, 2)],
             "clearance": round(clearance, 3),
         }
-        if clearance < stand.value:
-            (below_crouch if crouch and clearance < crouch.value else crouch_only).append(row)
+        if clearance < stand_clearance:
+            (
+                below_crouch
+                if crouch_clearance is not None and clearance < crouch_clearance
+                else crouch_only
+            ).append(row)
 
     crouch_only.sort(key=lambda r: r["clearance"])
     below_crouch.sort(key=lambda r: r["clearance"])
@@ -2610,8 +3267,12 @@ def movement_check(
         {
             "check": "standing_headroom",
             "constant": stand.as_dict(),
+            "floor_separation": separation.as_dict() if separation else None,
+            "required_clearance": stand_clearance,
             "sampled": len(candidates),
-            "candidates_total": navgrid.crouch_only_total + navgrid.too_low_total,
+            "candidates_total": navgrid.crouch_only_total
+            + navgrid.too_low_total
+            + navgrid.counts.get("body_blocked_floor_cells", 0),
             "crouch_only_positions": len(crouch_only),
             "narrowest": crouch_only[:top],
         }
@@ -2621,6 +3282,8 @@ def movement_check(
             {
                 "check": "crouch_headroom",
                 "constant": crouch.as_dict(),
+                "floor_separation": separation.as_dict() if separation else None,
+                "required_clearance": crouch_clearance,
                 "below_crouch_height": len(below_crouch),
                 "lowest": below_crouch[:top],
             }
@@ -2639,9 +3302,9 @@ def movement_check(
                 "MOVE_CROUCH_ONLY_SPACE",
                 "warning",
                 f"{len(crouch_only)} sampled floor position(s) have less than "
-                f"{stand.value:g} units of headroom (lowest {crouch_only[0]['clearance']:g} at "
+                f"{stand_clearance:g} units of headroom (lowest {crouch_only[0]['clearance']:g} at "
                 f"{crouch_only[0]['position']}); a player cannot stand there",
-                stand.confidence,
+                stand.confidence if not separation or separation.verified else "unverified",
                 f"profile {profile}: {stand.key} = {stand.value:g} ({stand.confidence}, "
                 f"{stand.source})",
                 "raise the ceiling, or make the crouch section deliberate",
@@ -2649,7 +3312,7 @@ def movement_check(
         )
 
     # --- step height --------------------------------------------------------
-    walkable = navgrid.walkable_cells()
+    walkable = navgrid.walkable_cells() + navgrid.clearance_restricted
     step = movement.step_height
     jump = movement.jump_up_max
     if len(walkable) > samples:

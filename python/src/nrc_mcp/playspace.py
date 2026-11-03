@@ -860,7 +860,7 @@ def _map_seals(check: Check, preset: str = "draft") -> Outcome:
 @invariant("profile_clean")
 def _profile_clean(check: Check, max_warnings: int | None = None) -> Outcome:
     """No error from the game profile's rules or the map script (validate_profile's checks)."""
-    from . import mapscript, rules  # noqa: PLC0415
+    from . import mapscript, rules, soundscript  # noqa: PLC0415
     from .kernel import load_map  # noqa: PLC0415
 
     path = _require_current(check)
@@ -868,6 +868,7 @@ def _profile_clean(check: Check, max_warnings: int | None = None) -> Outcome:
     ents = load_map(path).entities()
     found = rules.evaluate(pid, ents) + rules.unknown_classnames(pid, ents)
     found += mapscript.check(pid, ents, path)
+    found += soundscript.check(pid, ents, path)
     errors = sorted({f.code for f in found if f.severity == "error"})
     warnings = sorted({f.code for f in found if f.severity == "warning"})
     ok = not errors and (max_warnings is None or len(warnings) <= max_warnings)

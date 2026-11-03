@@ -6,13 +6,24 @@ annotations. See `nrc_mcp.server` for how the surface is assembled and scoped.
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
+from mcp.server.mcpserver import Image as _Image
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis as anamod
+from .. import balance as balancemod
+from .. import detail as detailmod
+from .. import mapscript, profiles
+from .. import objective_tests as testsmod
 from .. import playspace as playspacemod
+from .. import routes as routesmod
+from .. import spawns as spawnsmod
+from ..detail import Detail
+from ..kernel import parse_map
+from ..project_state import digest
 from ..runtime import (
     SESSION,
     _require_path,
@@ -20,9 +31,219 @@ from ..runtime import (
     tool,
 )
 
+# The entity helpers are mapfile's. It is registered before this module (surface.ORDER), so
+# importing it here cannot reorder the tool list.
+from . import mapfile
+
+
+def _session_grid(cell: float, pid: str, stance: str = "stand"):
+    """Reuse only a grid built from these exact session bytes and profile inputs."""
+    receipt = SESSION.receipt()
+    key = (str(SESSION.path), receipt["sha256"], pid, cell, stance, repr(profiles.load(pid)))
+    if key not in SESSION.grids:
+        SESSION.grids[key] = anamod.cached_navgrid(
+            _require_path(),
+            cell=cell,
+            profile_id=pid,
+            game_map=parse_map(SESSION.require().source()),
+            stance=stance,
+        )
+        while len(SESSION.grids) > 4:
+            SESSION.grids.pop(next(iter(SESSION.grids)))
+    return SESSION.grids[key]
+
+
+def _receipt(report: dict) -> dict:
+    return {**report, "revision": SESSION.receipt()}
+
+
+def _route_query(
+    start,
+    end,
+    start_entity,
+    end_entity,
+    stance,
+    cell,
+    profile_id,
+    start_stance,
+    end_stance,
+    stance_costs,
+    transition_cost,
+    max_nodes,
+    snap_radius,
+):
+    path = _require_path()
+    pid = _require_profile(profile_id)
+    source = SESSION.require().source()
+    editor_grid = SESSION.grid
+    snapshot = parse_map(source)
+    revision = SESSION.receipt()
+    revision["sha256"] = digest(source.encode("utf-8"))
+    revision["dirty"] = source.encode("utf-8") != SESSION.baseline_files.get(path.resolve())
+    cell = routesmod.number(cell, "cell", maximum=4096)
+    first = routesmod.endpoint(snapshot, pid, start, start_entity, "start")
+    last = routesmod.endpoint(snapshot, pid, end, end_entity, "end")
+    grids = {}
+    for selected in routesmod.stances(pid, stance):
+        key = (str(path), revision["sha256"], pid, cell, selected, repr(profiles.load(pid)))
+        if key not in SESSION.grids:
+            SESSION.grids[key] = anamod.cached_navgrid(
+                path,
+                cell=cell,
+                profile_id=pid,
+                game_map=snapshot,
+                stance=selected,
+            )
+            while len(SESSION.grids) > 4:
+                SESSION.grids.pop(next(iter(SESSION.grids)))
+        grids[selected] = SESSION.grids[key]
+    report = routesmod.find_route(
+        grids,
+        first,
+        last,
+        start_stance=start_stance,
+        end_stance=end_stance,
+        stance_costs=stance_costs,
+        transition_cost=transition_cost,
+        max_nodes=max_nodes,
+        snap_radius=snap_radius,
+    )
+    return {**report, "revision": revision, "editor_grid": editor_grid}, snapshot
+
+
+@tool("gameplay", "Route with stance changes")
+def route_report(
+    start: list[float] | None = None,
+    end: list[float] | None = None,
+    start_entity: int | None = None,
+    end_entity: int | None = None,
+    stance: str = "mixed",
+    cell: float = 16,
+    profile_id: str | None = None,
+    start_stance: str | None = None,
+    end_stance: str | None = None,
+    stance_costs: dict[str, float] | None = None,
+    transition_cost: float = 32,
+    max_nodes: int = 100000,
+    snap_radius: float | None = None,
+    detail: Detail = "summary",
+) -> dict:
+    """Find a directed route with a geometric witness and explicit stance changes.
+
+    Give exactly one of `start` (floor XYZ) / `start_entity`, and one of `end` /
+    `end_entity`. Spawn origins snap to floor; brush objectives use their approach area.
+    Linked objective entities resolve to the same interaction area. Snap displacement is
+    reported separately and excluded from route distance.
+
+    `stance` is stand/crouch/prone or `mixed` (all stances described by the profile).
+    Mixed routes start and end standing by default. `start_stance`/`end_stance` may select
+    a stance or `any`. Stance changes occur only where both body boxes fit on the same cell.
+
+    Minimized cost is distance times a stance weight plus `transition_cost` per change.
+    Defaults are stand=1, crouch=1.5, prone=2 and transition=32 weighted world units.
+    These are explicit planning preferences, NOT speeds or seconds. Override them with
+    `stance_costs`. Path vertices retain every corner and transition; only collinear
+    interior vertices are omitted. Step/drop witnesses follow their checked lift/horizontal/
+    lower sweep legs, and distance measures those legs. Width and floor separation are checked.
+
+    Uses the current unsaved map. This is voxel planning: no jumping, animation, prone
+    legs/turning or script-state simulation. Patches collide as the engine's own facets
+    (coarser than the drawn curve). `max_nodes` (1..250000) bounds search; exhaustion
+    returns reachable=null rather than claiming no route.
+    `route_render` draws the same report over the map geometry.
+
+    `detail="summary"` (default) omits the model caveats, per-grid constants and the
+    per-vertex `path` (`segments` holds the same vertices); `"full"` returns everything.
+    """
+    full = detailmod.wants_full(detail)
+    try:
+        report, _ = _route_query(
+            start,
+            end,
+            start_entity,
+            end_entity,
+            stance,
+            cell,
+            profile_id,
+            start_stance,
+            end_stance,
+            stance_costs,
+            transition_cost,
+            max_nodes,
+            snap_radius,
+        )
+        return report if full else detailmod.route_report(report)
+    except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
+        raise ToolError(str(e)) from e
+
+
+@tool("render", "Render route and stance changes")
+def route_render(
+    start: list[float] | None = None,
+    end: list[float] | None = None,
+    start_entity: int | None = None,
+    end_entity: int | None = None,
+    stance: str = "mixed",
+    cell: float = 16,
+    profile_id: str | None = None,
+    start_stance: str | None = None,
+    end_stance: str | None = None,
+    stance_costs: dict[str, float] | None = None,
+    transition_cost: float = 32,
+    max_nodes: int = 100000,
+    snap_radius: float | None = None,
+    width: int = 1000,
+    height: int = 800,
+    detail: Detail = "summary",
+) -> list:
+    """Draw a route over a top-down geometry view, coloured by stance with change markers.
+
+    Parameters and planning limitations match `route_report`. The PNG and JSON witness
+    use the same immutable current-map snapshot and revision. All floors project onto XY:
+    use the witness's Z coordinates to distinguish overlapping levels. Width/height must
+    be integers from 256 to 2048. An unsuccessful search still returns map geometry and
+    the reason; it never draws an invented connection. `detail` as in `route_report`.
+    """
+    full = detailmod.wants_full(detail)
+    try:
+        for name, value in (("width", width), ("height", height)):
+            if isinstance(value, bool) or not isinstance(value, int) or not 256 <= value <= 2048:
+                raise ValueError(f"{name} must be an integer from 256 to 2048")
+        report, snapshot = _route_query(
+            start,
+            end,
+            start_entity,
+            end_entity,
+            stance,
+            cell,
+            profile_id,
+            start_stance,
+            end_stance,
+            stance_costs,
+            transition_cost,
+            max_nodes,
+            snap_radius,
+        )
+        png, annotations = snapshot.render(
+            view="top",
+            overlay="shaded",
+            width=width,
+            height=height,
+            grid=report["editor_grid"],
+            grid_spacing=64.0,
+            wireframe=True,
+            padding=64,
+            route_segments=report["segments"],
+            route_transitions=report["transitions"],
+        )
+        witness = report if full else detailmod.route_report(report)
+        return [_Image(data=png, format="png"), json.dumps({**witness, "render": annotations})]
+    except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
+        raise ToolError(str(e)) from e
+
 
 @tool("gameplay", "Walkable grid statistics")
-def navgrid_stats(cell: float = 16, profile_id: str | None = None) -> dict:
+def navgrid_stats(cell: float = 16, profile_id: str | None = None, stance: str = "stand") -> dict:
     """Build the walkable grid and report its size and coverage.
 
     A cell is walkable when it is empty, the cell below is solid, and there is at least the
@@ -33,21 +254,33 @@ def navgrid_stats(cell: float = 16, profile_id: str | None = None) -> dict:
     reachability and will disagree with the engine at the margins. Everything else here is built on
     it, so run this first to see whether the map is tractable at the cell size you want.
 
+    `stance` selects stand, crouch or prone; player-width clearance is included. Prone
+    checks use the profile body box only, not a full turning/legs simulation.
+
     Read `reachable_share` before the rest: below 1.0, some standable floor cannot be reached
     from the largest region, and every distance the other reports derive is measured across a
     space the player cannot actually cross.
     """
-    map_path = _require_path()
+    _require_path()
     pid = _require_profile(profile_id)
     try:
-        g = anamod.cached_navgrid(map_path, cell=cell, profile_id=pid)
-        return anamod.navgrid_summary(g)
-    except (OSError, ValueError, MemoryError) as e:
+        g = _session_grid(cell, pid, stance)
+        return _receipt(anamod.navgrid_summary(g))
+    except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
 
 @tool("gameplay", "Team balance report")
-def balance_report(cell: float = 16, profile_id: str | None = None) -> dict:
+def balance_report(
+    cell: float = 16,
+    profile_id: str | None = None,
+    stance: str = "stand",
+    stages: list[dict] | None = None,
+    team_sizes: dict[str, int] | None = None,
+    run_speed: float | None = None,
+    respawn_seconds: dict[str, float] | None = None,
+    detail: Detail = "summary",
+) -> dict:
     """Per-team traversal distance from each spawn group to each objective.
 
     Reports path lengths over the walkable grid, the asymmetry between teams, and whether the map
@@ -55,17 +288,51 @@ def balance_report(cell: float = 16, profile_id: str | None = None) -> dict:
     from the profile, so this works for any game with a profile.
 
     Distances are walked, not straight-line — a 500-unit gap with a wall in it is not 500 units.
+    Uses the current unsaved map and staged script. `stance` selects stand/crouch/prone.
+
+    Profiles with reinforcement rules also report wave waits, estimated route times, active
+    spawn capacity and overlapping spawn boxes. `team_sizes` and `respawn_seconds` use the
+    profile's team IDs (red/blue in the shipped objective profile). `run_speed` overrides
+    units/second explicitly; crouch/prone times require it. No estimate models combat.
+
+    Optional `stages`: [{"name": "after gate", "spawn_entities": [3, 4],
+    "objective_entities": [8], "respawn_seconds": {"red": 20, "blue": 30}}]. These are
+    explicit spawn/objective selections on the SAME geometry snapshot, not script simulation.
+
+    `detail="summary"` (default): verdicts, counts, every error finding, and the rows that
+    need attention first; `omitted` names what was left out. `"full"` returns everything.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
-        return anamod.balance_report(map_path, pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
+        grid = _session_grid(cell, pid, stance)
+        report = anamod.balance_report(map_path, pid, cell=cell, grid=grid)
+        spec = profiles.load(pid).get("mapscript")
+        data = SESSION.read_file(mapscript.script_path(spec, SESSION.path)) if spec else None
+        report = balancemod.enrich(
+            report,
+            grid,
+            script_text=data.decode("utf-8", errors="replace") if data is not None else None,
+            stages=stages,
+            team_sizes=team_sizes,
+            run_speed=run_speed,
+            respawn_seconds=respawn_seconds,
+        )
+        if not full:
+            report = detailmod.balance_report(report, frozenset(balancemod.MODEL_NOTES))
+        return _receipt(report)
+    except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
 
 @tool("gameplay", "Sightline report")
-def sightline_report(samples: int = 200, cell: float = 16, profile_id: str | None = None) -> dict:
+def sightline_report(
+    samples: int = 200,
+    cell: float = 16,
+    profile_id: str | None = None,
+    detail: Detail = "summary",
+) -> dict:
     """Sightline length distribution and power positions.
 
     Samples walkable positions, casts rays between them at the profile's eye height, and reports how
@@ -73,48 +340,258 @@ def sightline_report(samples: int = 200, cell: float = 16, profile_id: str | Non
     game; "power positions" are the points that see the most of the map.
 
     Sampled, so the numbers move a little between runs. Read the distribution, not any single value.
+    `detail` as in `balance_report`.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
-        return anamod.sightline_report(map_path, samples=samples, profile_id=pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
+        report = anamod.sightline_report(
+            map_path, samples=samples, profile_id=pid, cell=cell, grid=_session_grid(cell, pid)
+        )
+        return _receipt(report if full else detailmod.sightline_report(report))
+    except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
 
 @tool("gameplay", "Movement clearance check")
-def movement_check(cell: float = 16, profile_id: str | None = None) -> dict:
+def movement_check(
+    cell: float = 16, profile_id: str | None = None, detail: Detail = "summary"
+) -> dict:
     """Check clearances against the profile's movement constants.
 
     Standing headroom, crouch headroom, step height, doorway widths. Every finding names the
     constant it used and that constant's confidence, and **anything derived from an unverified
     constant is reported as info, never an error**.
 
-    That clamp is not ceremony. The design document's own standing height was wrong by 13 units, and
-    a corridor sized from it would pass every geometric check while being unusable.
+    `detail` as in `balance_report`.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
-        return anamod.movement_check(map_path, pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
+        report = anamod.movement_check(map_path, pid, cell=cell, grid=_session_grid(cell, pid))
+        return _receipt(report if full else detailmod.movement_check(report))
+    except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
 
 
 @tool("gameplay", "Spawn safety report")
-def spawn_safety(cell: float = 16, profile_id: str | None = None) -> dict:
+def spawn_safety(
+    cell: float = 16, profile_id: str | None = None, detail: Detail = "summary"
+) -> dict:
     """Exits per spawn and distance to the nearest enemy spawn.
 
     A spawn with one exit is a spawn that can be held; a spawn close to an enemy spawn is a spawn
     that gets contested immediately. Both are design smells worth seeing before playtesting finds
-    them.
+    them. `detail="summary"` (default) lists the riskiest spawns first; `"full"` lists all.
     """
+    full = detailmod.wants_full(detail)
     map_path = _require_path()
     pid = _require_profile(profile_id)
     try:
-        return anamod.spawn_safety(map_path, pid, cell=cell)
-    except (OSError, ValueError, MemoryError) as e:
+        report = anamod.spawn_safety(map_path, pid, cell=cell, grid=_session_grid(cell, pid))
+        return _receipt(report if full else detailmod.spawn_safety(report))
+    except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
+
+
+@tool("gameplay", "Place a cluster of team spawns", writes=True)
+def spawn_cluster(
+    team: str,
+    count: int,
+    area: dict,
+    yaw: float = 0,
+    label: str | None = None,
+    group: str | None = None,
+    active: bool = True,
+    marker: bool = True,
+    spacing: float | None = None,
+    cell: float = 16,
+) -> dict:
+    """Place `count` team spawns where a player can stand, plus the team's spawn-region marker.
+
+    `area` is a box `{"min": [x, y, z], "max": [x, y, z]}`: spawns are laid out on a lattice
+    `spacing` apart (default: the profile's) across its x/y, and stand on floors whose height
+    lies within its z range. Each position is checked against the map's collision brushes
+    with the full player box: a floor under it, standing headroom above it, the floor under
+    the origin within a step (not hanging off a ledge), on the walkable grid, and clear of
+    existing spawns. When more positions pass than are needed, those nearest the area's
+    centre are used. If fewer pass, nothing is placed and the reply says why the rest failed.
+
+    Every game convention comes from the profile (`spawn_cluster:` in `nrc://profile/{id}`):
+    the team's spawn classname, the spawnflags for `active` or inactive spawns, the facing key
+    (`yaw`, degrees), and the marker entity with the team flag and `label` as the name players
+    pick in the spawn list. `team` is a side's label or name from the profile (ET: red/axis or
+    blue/allies). `marker=false` adds spawns to a region that already has its marker.
+
+    `group` names the cluster so a script can switch it, for a forward spawn: the spawns and
+    the marker get the names the profile gives, and `group.toggle` in the reply lists the
+    script actions that switch each (ET: `alertentity <group>` toggles the spawns active,
+    `alertentity <group>_wobj` swaps the marker's owner). Put them in your own events with
+    `script_set_event`. One call per group; a name already in use is refused.
+
+    All entities are added together or not at all. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    pid = _require_profile(None)
+    try:
+        spec = spawnsmod.recipe(pid)
+        side = spawnsmod.team_label(pid, team)
+        spawn = spec["spawn"]
+        mark = spec.get("marker") if marker else None
+        if marker and not isinstance(mark, dict):
+            raise spawnsmod.SpawnClusterError(
+                f"profile {pid} names no spawn-region marker; pass marker=false"
+            )
+        classname = str(spawnsmod.by_team(spawn, "classname", side, "spawn classname"))
+        flags = spawn.get("spawnflags") or {}
+        flag = flags.get("active" if active else "inactive")
+        offset = float(spawn.get("origin_height", 0))
+    except spawnsmod.SpawnClusterError as e:
+        raise ToolError(str(e)) from e
+    if count < 1:
+        raise ToolError(f"count must be at least 1, got {count}")
+    if mark is not None and not (label and label.strip()):
+        raise ToolError(
+            "label is the spawn region's name in the game's spawn list; pass one, or "
+            "marker=false to add spawns to a region that already has a marker"
+        )
+    if label is not None and ('"' in label or "\n" in label):
+        raise ToolError("label is one line of text with no double quotes")
+    if not isinstance(area, dict) or "min" not in area or "max" not in area:
+        raise ToolError('area must be a box {"min": [x, y, z], "max": [x, y, z]}')
+    lo, hi = area["min"], area["max"]
+    if len(lo) != 3 or len(hi) != 3 or any(a > b for a, b in zip(lo, hi, strict=True)):
+        raise ToolError("area min and max are three numbers each, min <= max on every axis")
+    if not math.isfinite(yaw):
+        raise ToolError("yaw must be a number of degrees")
+
+    named: dict[str, str] = {}
+    marker_named: dict[str, str] = {}
+    if group is not None:
+        try:
+            mapscript._word(group, "group name")
+        except mapscript.ScriptEditError as e:
+            raise ToolError(str(e)) from e
+        named = spawnsmod.names(spawn, group)
+        marker_named = spawnsmod.names(mark, group) if mark is not None else {}
+        wanted = {v.lower() for v in (*named.values(), *marker_named.values())}
+        taken = [
+            (e["index"], v)
+            for e in m.entities()
+            for k, v in e["keys"]
+            if k.lower() in ("targetname", "scriptname") and v.lower() in wanted
+        ]
+        if taken:
+            raise ToolError(
+                f"entity {taken[0][0]} already uses the name {taken[0][1]!r}; pick another group"
+            )
+
+    try:
+        grid = _session_grid(cell, pid)
+        movement = grid.movement
+        width = movement.player_width.value if movement.player_width else None
+        if width is None:
+            raise ToolError(f"profile {pid} states no player width, so spacing cannot be checked")
+        gap = float(spacing if spacing is not None else spec.get("default_spacing") or 0)
+        if not gap > width:
+            raise ToolError(
+                f"spacing {gap:g} must exceed the player width {width:g}: a player standing on "
+                "one spawn would make its neighbour count as occupied"
+            )
+        g = SESSION.grid
+        xs = spawnsmod.lattice(lo[0], hi[0], gap, width, g)
+        ys = spawnsmod.lattice(lo[1], hi[1], gap, width, g)
+        existing, _objectives, _ = anamod._markers(grid.game_map, anamod.roles(pid))
+        avoid = [(s.origin[0], s.origin[1], s.origin[2] - offset) for s in existing]
+        found = spawnsmod.find_spots(grid, xs, ys, lo[2], hi[2], avoid, gap)
+    except spawnsmod.SpawnClusterError as e:
+        raise ToolError(str(e)) from e
+    except (OSError, MemoryError, anamod.AnalysisError) as e:
+        raise ToolError(str(e)) from e
+    if len(found.spots) < count:
+        raise ToolError(
+            f"only {len(found.spots)} of {len(xs) * len(ys)} positions {gap:g} apart in the area "
+            f"can hold a standing player, and {count} were asked for; nothing was placed. "
+            f"Rejected: {found.rejected or 'none'}. Widen the area, lower spacing (above "
+            f"{width:g}), or adjust the z range to the floor's height"
+        )
+    chosen = spawnsmod.choose(found.spots, count, ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2))
+
+    def num(v: float) -> float | int:
+        v = round(v, 3)
+        return int(v) if float(v).is_integer() else v
+
+    items: list[tuple[str, list[float], dict[str, Any]]] = []
+    facing = str(spawn.get("facing_key") or "angle")
+    for s in chosen:
+        keys: dict[str, Any] = {facing: num(yaw)}
+        if flag is not None:
+            keys["spawnflags"] = flag
+        keys.update(named)
+        items.append((classname, [num(s.x), num(s.y), num(s.floor + offset)], keys))
+    if mark is not None:
+        mx = sum(s.x for s in chosen) / len(chosen)
+        my = sum(s.y for s in chosen) / len(chosen)
+        if g > 0:
+            mx, my = round(mx / g) * g, round(my / g) * g
+        mz = min(s.floor for s in chosen) + offset
+        mkeys: dict[str, Any] = {str(mark.get("label_key") or "description"): label}
+        try:
+            mkeys["spawnflags"] = spawnsmod.by_team(mark, "spawnflags", side, "marker flag")
+        except spawnsmod.SpawnClusterError as e:
+            raise ToolError(str(e)) from e
+        mkeys.update(marker_named)
+        items.append((str(mark["classname"]), [num(mx), num(my), num(mz)], mkeys))
+
+    prepared = [(c, o, mapfile._point_pairs(c, o, k)) for c, o, k in items]
+    candidate = m.copy()
+    try:
+        indices = [candidate.add_entity(pairs) for _c, _o, pairs in prepared]
+    except ValueError as e:
+        raise ToolError(f"{e}; nothing was added") from e
+    SESSION.map = candidate
+
+    notes: list[str] = []
+    for c, o, pairs in prepared:
+        for note in mapfile._placement_notes(c, pairs, o, None):
+            if note not in notes:
+                notes.append(note)
+    out: dict[str, Any] = {
+        "team": side,
+        "spawns": {
+            "classname": classname,
+            "entities": mapfile._index_span(indices[: len(chosen)]),
+            "origins": [p[1][1] for _c, _o, p in prepared[: len(chosen)]],
+            "keys": dict(list(prepared[0][2])[2:]),
+        },
+        "checked": {
+            "positions": len(xs) * len(ys),
+            "standable": len(found.spots),
+            "rejected": found.rejected,
+        },
+    }
+    if mark is not None:
+        out["marker"] = {
+            "classname": prepared[-1][0],
+            "entity": indices[-1],
+            "origin": prepared[-1][2][1][1],
+        }
+    if group is not None:
+        template = str(spec.get("toggle_action") or "")
+        key = str(spec.get("toggle_key") or "targetname")
+        toggle = {}
+        if template and key in named:
+            toggle["spawns"] = template.format(name=named[key])
+        if template and key in marker_named:
+            toggle["marker"] = template.format(name=marker_named[key])
+        out["group"] = {"spawns": named, "marker": marker_named, "toggle": toggle}
+    if notes:
+        out["notes"] = notes
+    out["entities_now"] = candidate.entity_count
+    out["next"] = "map_save to write them; spawn_safety and balance_report measure from them"
+    return out
 
 
 @tool("gameplay", "Lighting report")
@@ -130,7 +607,7 @@ def lighting_report(reach: float = 512, cell: float = 32, profile_id: str | None
     `reach` is a heuristic, not q3map2's falloff: walkable areas farther than that from every
     light are listed as possibly dim. With ambient or minimum light set they are lit anyway.
     """
-    map_path = _require_path()
+    _require_path()
     pid = _require_profile(profile_id)
     m = SESSION.require()
     ents = m.entities()
@@ -171,7 +648,7 @@ def lighting_report(reach: float = 512, cell: float = 32, profile_id: str | None
     dim: list[list[float]] = []
     if lights and ambient <= 0 and minlight <= 0:
         try:
-            grid = anamod.cached_navgrid(map_path, cell=cell, profile_id=pid)
+            grid = _session_grid(cell, pid)
         except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
             raise ToolError(str(e)) from e
         points = [tuple(lt["origin"]) for lt in lights]
@@ -252,3 +729,58 @@ def playable_space_diff(
         return playspacemod.diff(before, later, cell=cell, profile_id=profile_id)
     except (anamod.AnalysisError, playspacemod.PlayspaceError) as e:
         raise ToolError(str(e)) from e
+
+
+@tool("gameplay", "Generate engine playtests for the objectives")
+def objective_playtests(
+    objective: str | None = None, cell: float = 16, profile_id: str | None = None
+) -> dict:
+    """Write an `engine_playtest` scenario that plays every objective in the open map.
+
+    Objectives are recognised from the map's entities and script, not from how they were
+    made: each kind in the profile's `objectives:` (`nrc://profile/{id}`) carries a
+    `playtest:` template that says how to find one, which team and class play it, what they
+    do, and which observation proves it worked. For ET: Legacy: dynamite is planted, armed and
+    destroys the objective; a constructible or command post is built with pliers; a checkpoint
+    is captured and retaken, proved by where the attackers respawn; an escort vehicle is
+    followed to the end of its path and checked to stop without its escort; a stolen item is
+    picked up and delivered. When the objective's script events lead to a round end, the test
+    also waits for intermission and the winner its script sets.
+
+    Every standing position is floor the player box rests on with headroom, on the walkable
+    grid, inside the right volume and clear of the objective's brushes, and joined to one of
+    the team's spawns by a walkable route (`standing[].route`). `cell` is that grid's size.
+
+    `runs` are what to pass to `engine_playtest`: `scenario` and `timeout_seconds` each. A test
+    that ends the round closes its run, so a map with two winning objectives needs two runs.
+    `tests` lists each objective's test on its own, with what it `proves`; `skipped` lists the
+    objectives (and objective entities) no test could be made for, and why. `objective` limits
+    this to one objective, by name. Nothing is changed or launched; pack the map first.
+    """
+    pid = _require_profile(profile_id)
+    SESSION.require()
+    data = profiles.load(pid)
+    if not (data.get("objectives") or {}).get("playtest"):
+        raise ToolError(f"profile {pid} has no objective playtest templates")
+    spec = data.get("mapscript") or {}
+    text = ""
+    if SESSION.path is not None and spec:
+        raw = SESSION.read_file(mapscript.script_path(spec, SESSION.path))
+        text = (raw or b"").decode("utf-8", errors="replace")
+    try:
+        grid = _session_grid(cell, pid)
+        report = testsmod.generate(pid, grid, text, only=objective)
+    except (OSError, MemoryError, anamod.AnalysisError) as e:
+        raise ToolError(str(e)) from e
+    except (profiles.ProfileError, testsmod.playtestmod.PlaytestError) as e:
+        raise ToolError(str(e)) from e
+    if objective is not None and not report["tests"] and not report["skipped"]:
+        raise ToolError(f"no objective named {objective!r} is recognised in this map")
+    report["revision"] = SESSION.receipt()
+    report["next"] = (
+        "engine_playtest(pk3=<the packed map>, scenario=runs[i].scenario, "
+        "timeout_seconds=runs[i].timeout_seconds) for each run; pack after map_save"
+        if report["runs"]
+        else "nothing to run"
+    )
+    return report

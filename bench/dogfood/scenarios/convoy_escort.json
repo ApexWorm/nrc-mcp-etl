@@ -1,0 +1,46 @@
+{
+  "watch": ["truck"],
+  "steps": [
+    {"action": "join", "team": "blue", "role": "soldier", "timeout": 40, "label": "an Allied escort"},
+    {"action": "position", "origin": [1600, 640, 24], "angles": [10, 180, 0], "label": "stand in the escort volume beside the truck"},
+    {"action": "screenshot", "name": "escort_start"},
+    {
+      "action": "wait",
+      "label": "the truck moves while escorted",
+      "until": [{"scope": "entity", "name": "truck", "field": "position.0", "op": "lte", "value": 1500}],
+      "timeout": 15
+    },
+    {"action": "hold", "controls": ["crouch"], "seconds": 8, "label": "stay behind; the escort volume moves on without us"},
+    {
+      "action": "assert",
+      "label": "it stopped at a path point before the bend",
+      "until": [{"scope": "entity", "name": "truck", "field": "position.0", "op": "gte", "value": 1290}]
+    },
+    {"action": "screenshot", "name": "stopped"},
+    {"action": "position", "origin": [1340, 640, 24], "angles": [10, 200, 0], "label": "catch up with it"},
+    {
+      "action": "wait",
+      "label": "it follows the curved segment round the bend",
+      "until": [{"scope": "entity", "name": "truck", "field": "position.1", "op": "gte", "value": 800}],
+      "timeout": 20
+    },
+    {"action": "position", "origin": [900, 680, 24], "angles": [10, 180, 0], "label": "catch up after the bend"},
+    {
+      "action": "wait",
+      "until": [{"scope": "entity", "name": "truck", "field": "position.0", "op": "lte", "value": 760}],
+      "timeout": 15
+    },
+    {"action": "position", "origin": [650, 680, 24], "angles": [10, 180, 0], "label": "see it to the end"},
+    {
+      "action": "wait",
+      "label": "arrived runs the win",
+      "until": [
+        {"scope": "entity", "name": "truck", "field": "position.0", "op": "near", "value": 600, "tolerance": 1},
+        {"scope": "game", "field": "phase", "value": "intermission"},
+        {"scope": "game", "field": "winner", "value": "blue"}
+      ],
+      "timeout": 20
+    },
+    {"action": "screenshot", "name": "arrived"}
+  ]
+}

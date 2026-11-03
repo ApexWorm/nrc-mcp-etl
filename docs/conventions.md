@@ -129,9 +129,41 @@ Overlapping brushes are legal and splitting them gains nothing.
 Said plainly, because planning around a tool that does not exist wastes more time than the tool would
 have saved:
 
-- **Patches are not authorable.** They are read, validated, tessellated and rendered, never created.
-  Tier 3 geometry has to be built in the editor.
+- **Patch authoring covers cylinders, arches and bevels** through `patch_commit`. Free-form
+  curves and terrain still need the editor. Patches do not seal a map. Shader contents determine
+  their player collision, which the analysis grid omits; clip brushes can simplify collision.
 - **There are no measured reference dimensions**, and no cover-density or peek-angle analysis.
-- **No report gives you a time.** No player movement speed is verified, so `balance_report` answers
-  in world units and never in seconds. The distances are comparable to each other, which is what
-  balance actually needs.
+- **Travel times are estimates.** Reinforcement profiles add distance/speed estimates and a
+  zero-to-one-wave waiting range. Every result states its inputs; combat, sprint stamina and
+  acceleration are not simulated. Crouch/prone timing needs an explicit effective speed.
+
+Use `route_report` for a path witness and `route_render` to inspect it over the map. Mixed
+routes check clearance at each stance change; their weighted-distance cost is a planning
+preference, not a prediction of speed. Snapping, search limits and omitted collision features
+are reported. The overlay is top-down; read path Z coordinates for overlapping floors.
+
+Use `engine_playtest` to exercise a packaged map with real controls and fresh state assertions.
+Read `nrc://playtest/{profile_id}` before creating a scenario. Test setup may position the
+player, but objective changes come from gameplay; the observer only records state. Timeouts
+and failed assertions retain evidence. These single-client probes do not establish balance.
+
+Script checks also track profile-declared owner lifetimes. A wait in an entity's death event
+may lose its continuation when the entity is freed. Hand delayed work to a persistent owner
+immediately; for example, the explosive's death event can trigger the game manager, which
+then waits before ending the round. Runtime branches and short waits remain uncertain.
+
+## Editing and checking the same revision
+
+Map, script and generated-solid sidecar edits stay in the session until `map_save`. Use
+`map_checkpoint` before a group of edits and `map_restore` to undo them together. Saving or opening
+another map clears checkpoints. Save checks for external changes and uses atomic file replacements,
+with rollback on a write failure; multiple files are not a filesystem-wide atomic transaction.
+
+Compile and gameplay tools use the current session geometry. Compile retains a build snapshot and
+revision receipt under `out/builds/`; reports identify the geometry hash. A clean compile of an
+older saved file is never evidence about a newer unsaved edit. Companion revisions travel with the
+build snapshot. Texture/model libraries remain external dependencies, not frozen build inputs.
+
+Named solids remember their exact generated brushes, textures and grid. `solid_param_preview`
+checks a change; `solid_edit_param` replaces the tracked brushes and stages updated provenance.
+A manual change to those brushes refuses replacement, preserving the mapper's work.

@@ -1,0 +1,121 @@
+{
+  "watch": [
+    "relay"
+  ],
+  "steps": [
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40
+    },
+    {
+      "action": "screenshot",
+      "name": "red_spawn"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40
+    },
+    {
+      "action": "screenshot",
+      "name": "blue_spawn"
+    },
+    {
+      "action": "position",
+      "origin": [
+        1640,
+        640,
+        24
+      ],
+      "angles": [
+        65,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "weapon",
+      "name": "dynamite"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "attack"
+      ],
+      "seconds": 0.25,
+      "timeout": 5
+    },
+    {
+      "action": "wait",
+      "until": [
+        {
+          "scope": "game",
+          "field": "charge_count",
+          "value": 1,
+          "op": "gte"
+        }
+      ],
+      "timeout": 5
+    },
+    {
+      "action": "aim",
+      "angles": [
+        67,
+        -48,
+        0
+      ]
+    },
+    {
+      "action": "weapon",
+      "name": "pliers"
+    },
+    {
+      "action": "hold",
+      "until": [
+        {
+          "scope": "game",
+          "field": "armed_charges",
+          "value": 1,
+          "op": "gte"
+        }
+      ],
+      "timeout": 10,
+      "controls": [
+        "attack"
+      ]
+    },
+    {
+      "action": "screenshot",
+      "name": "armed"
+    },
+    {
+      "action": "wait",
+      "until": [
+        {
+          "scope": "entity",
+          "field": "present",
+          "value": false,
+          "name": "relay"
+        },
+        {
+          "scope": "game",
+          "field": "phase",
+          "value": "intermission"
+        },
+        {
+          "scope": "game",
+          "field": "winner",
+          "value": "blue"
+        }
+      ],
+      "timeout": 40
+    },
+    {
+      "action": "screenshot",
+      "name": "victory"
+    }
+  ]
+}

@@ -13,7 +13,9 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis, profiles
+from .. import detail as detailmod
 from .. import pack as packmod
+from ..detail import Detail
 from ..runtime import (
     SESSION,
     _require_profile,
@@ -23,23 +25,47 @@ from ..runtime import (
 
 
 @tool("shipping", "Build a pk3 archive", writes=True)
-def pack_pk3(bsp: str, complevel: int | None = None, png: bool = False) -> dict:
+def pack_pk3(
+    bsp: str,
+    complevel: int | None = None,
+    png: bool = False,
+    ignore: list[str] | None = None,
+    detail: Detail = "summary",
+) -> dict:
     """Build a release archive for a compiled BSP with `q3map2 -pk3` (§6.4).
 
-    The packer's own naming is the oracle: a `_FAILEDpack.pk3` means the BSP references a
-    resource that is not on disk, so the map would show missing content on a server even
-    though it compiled. That is reported as a failure whatever the exit code.
+    The packer's own naming is the first oracle: a `_FAILEDpack.pk3` means it could not find
+    a resource the BSP references. Each name it missed is then checked again, because the
+    packer cannot read shaders defined with `implicitMap` and reports them missing although the
+    base game ships them. A name counts as found when the base game supplies it, the map's own
+    shader script defines it (script and images are packed), a file of that name sits beside
+    the map, the profile lists it under `packaging.allowed_missing` (stock assets the base game
+    never shipped), or it matches `ignore`: exact names or shell patterns such as
+    `sound/world/*`, for resources you know the game does without. If all are found the
+    package is `_autopacked.pk3`; whatever is left is in `not_found` and the pack still fails.
+    `packer_not_found` is the packer's own list, `accounted_for` and `allowed_missing` say what
+    became of each.
 
     The archive is then fixed up from the active profile: companion files and the arena that
-    sit beside the map are added, files the base game already ships are dropped, and it is
-    written next to the folder that holds `maps/`, never into the game install.
+    sit beside the map are added, with the sound files its speaker and sound scripts name,
+    files the base game already ships are dropped, and it is written next to the folder that
+    holds `maps/`, never into the game install.
+
+    `detail="summary"` (default) keeps `not_found` and `allowed_missing` whole and caps the
+    other lists; `"full"` adds the packer's console tail and every row.
     """
+    full = detailmod.wants_full(detail)
     try:
-        return packmod.pack_pk3(
-            bsp, complevel=complevel, png=png, profile_id=active_profile() or None
+        report = packmod.pack_pk3(
+            bsp,
+            complevel=complevel,
+            png=png,
+            profile_id=active_profile() or None,
+            ignore=list(ignore or []),
         )
     except packmod.PackError as e:
         raise ToolError(str(e)) from e
+    return report if full else detailmod.pack_pk3(report)
 
 
 @tool("shipping", "List BSP resources")

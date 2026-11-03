@@ -1,8 +1,7 @@
 //! A tiny bitmap font, for the annotations that must be *in* the image.
 //!
-//! Deliberately limited to numerals, a few separators, and the axis letters X/Y/Z. Those are
-//! the labels that only mean something in place — a coordinate has to sit next to the tick
-//! it belongs to.
+//! Numerals, separators and a small uppercase alphabet cover coordinate ticks and route
+//! legends. Longer prose remains structured data rather than being burned into pixels.
 //!
 //! Everything else that §4.2 asks be surfaced — brush counts, dimensions, warnings, which
 //! overlay is active — comes back as structured data alongside the image
@@ -33,6 +32,30 @@ fn glyph(c: char) -> Option<[u8; 3]> {
         ',' => [0x00, 0x18, 0x00],
         ':' => [0x00, 0x0A, 0x00],
         '/' => [0x18, 0x04, 0x03],
+        '#' => [0x0A, 0x1F, 0x0A],
+        'A' => [0x1E, 0x05, 0x1E],
+        'B' => [0x1F, 0x15, 0x0A],
+        'C' => [0x0E, 0x11, 0x11],
+        'D' => [0x1F, 0x11, 0x0E],
+        'E' => [0x1F, 0x15, 0x11],
+        'F' => [0x1F, 0x05, 0x01],
+        'G' => [0x0E, 0x11, 0x1D],
+        'H' => [0x1F, 0x04, 0x1F],
+        'I' => [0x11, 0x1F, 0x11],
+        'J' => [0x08, 0x10, 0x0F],
+        'K' => [0x1F, 0x04, 0x1B],
+        'L' => [0x1F, 0x10, 0x10],
+        'M' => [0x1F, 0x02, 0x1F],
+        'N' => [0x1F, 0x01, 0x1E],
+        'O' => [0x0E, 0x11, 0x0E],
+        'P' => [0x1F, 0x05, 0x02],
+        'Q' => [0x0E, 0x19, 0x1E],
+        'R' => [0x1F, 0x05, 0x1A],
+        'S' => [0x12, 0x15, 0x09],
+        'T' => [0x01, 0x1F, 0x01],
+        'U' => [0x0F, 0x10, 0x0F],
+        'V' => [0x07, 0x18, 0x07],
+        'W' => [0x1F, 0x08, 0x1F],
         'X' => [0x1B, 0x04, 0x1B],
         'Y' => [0x07, 0x1C, 0x07],
         'Z' => [0x19, 0x15, 0x13],
@@ -116,7 +139,7 @@ mod tests {
 
     #[test]
     fn every_declared_glyph_is_reachable_and_lowercase_maps_up() {
-        for c in "0123456789-.,:/XYZ ".chars() {
+        for c in "0123456789-.,:/#ABCDEFGHIJKLMNOPQRSTUVWXYZ ".chars() {
             assert!(glyph(c).is_some(), "{c:?} should have a glyph");
         }
         assert_eq!(glyph('x'), glyph('X'));

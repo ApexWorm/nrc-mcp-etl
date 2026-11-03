@@ -80,8 +80,8 @@ def test_the_five_reports_share_one_grid(open_room, pid):
         server.navgrid_stats(cell=16, profile_id=pid)
 
     stats = analysis.navgrid_cache_stats()
-    assert stats["misses"] == 1, f"built the grid {stats['misses']} times, expected once"
-    assert stats["hits"] == 4
+    assert stats["bypassed"] == 1, "one snapshot grid should serve all five calls"
+    assert len(server.SESSION.grids) == 1
 
 
 def test_editing_the_map_invalidates_the_cached_grid(open_room, pid, tmp_path):
