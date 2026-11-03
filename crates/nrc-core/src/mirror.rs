@@ -170,9 +170,17 @@ fn mirror_texdef(face: &mut Face, old_normal: Vec3, axis: usize, at: f64) {
             let (s0, s1) = (shift[0].value(), shift[1].value());
             let (ss, st) = (axis_sign(bs), axis_sign(bt));
             let flipped = if bs[axis] != 0.0 {
-                Some((0, s0 + 2.0 * at * ss * cos / sx, s1 - 2.0 * at * st * sin / sy))
+                Some((
+                    0,
+                    s0 + 2.0 * at * ss * cos / sx,
+                    s1 - 2.0 * at * st * sin / sy,
+                ))
             } else if bt[axis] != 0.0 {
-                Some((1, s0 + 2.0 * at * ss * sin / sx, s1 + 2.0 * at * st * cos / sy))
+                Some((
+                    1,
+                    s0 + 2.0 * at * ss * sin / sx,
+                    s1 + 2.0 * at * st * cos / sy,
+                ))
             } else {
                 None
             };
@@ -333,12 +341,22 @@ brushDef
             let nb = fb.plane().unwrap();
             // The plane is the reflection of the original, facing outward.
             let expect = reflect_vec(na.normal, axis);
-            assert!((nb.normal - expect).length() < 1e-9, "{:?} vs {:?}", nb.normal, expect);
+            assert!(
+                (nb.normal - expect).length() < 1e-9,
+                "{:?} vs {:?}",
+                nb.normal,
+                expect
+            );
             // Every point keeps its texture coordinate.
             for p in fa.point_vecs() {
                 let mut q = p.to_array();
                 q[axis] = 2.0 * at - q[axis];
-                assert!(close(st(fa, p), st(fb, q.into())), "{:?} {:?}", fa.tex, fb.tex);
+                assert!(
+                    close(st(fa, p), st(fb, q.into())),
+                    "{:?} {:?}",
+                    fa.tex,
+                    fb.tex
+                );
             }
             for p in [vec3(3.0, 5.0, 7.0), vec3(-11.0, 13.0, 2.0)] {
                 // Project an arbitrary point onto the original plane, then reflect it.

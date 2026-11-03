@@ -460,7 +460,9 @@ def _archive_shaders(archive: Path) -> set[str]:
                     continue
                 text = z.read(member).decode("utf-8", errors="replace")
                 try:
-                    names.update(s["name"].lower() for s in optimize.parse_shader_text(text, member))
+                    names.update(
+                        s["name"].lower() for s in optimize.parse_shader_text(text, member)
+                    )
                 except optimize.OptimizeError:
                     continue
     except (OSError, zipfile.BadZipFile):

@@ -1416,7 +1416,9 @@ def test_depends_supplies_what_another_archive_holds(failing, tmp_path):
     """A map built on another map's art: that archive's shaders and images count as found."""
     other = tmp_path / "other_map.pk3"
     with zipfile.ZipFile(other, "w") as z:
-        z.writestr("scripts/other.shader", "textures/other/glow\n{\n\t{\n\t\tmap $lightmap\n\t}\n}\n")
+        z.writestr(
+            "scripts/other.shader", "textures/other/glow\n{\n\t{\n\t\tmap $lightmap\n\t}\n}\n"
+        )
         z.writestr("textures/other/rock.jpg", b"x")
     failing["state"]["names"] = ["textures/other/glow", "textures/other/rock"]
     r = pack.pack_pk3(failing["bsp"], profile_id="test", depends=[other])

@@ -54,7 +54,9 @@ def gauge_events(script: str) -> list[tuple[str, list[str], list[str]]]:
     if not block:
         return []
     events = []
-    for head, body in re.findall(r"^\t(\w[^\n{]*?)\s*\n\t\{(.*?)\n\t\}", block.group(1), re.S | re.M):
+    for head, body in re.findall(
+        r"^\t(\w[^\n{]*?)\s*\n\t\{(.*?)\n\t\}", block.group(1), re.S | re.M
+    ):
         words = head.split()
         actions = []
         for line in body.splitlines():
@@ -72,7 +74,9 @@ def gauge_events(script: str) -> list[tuple[str, list[str], list[str]]]:
 def objective_texts(objdata: str) -> tuple[dict, dict]:
     desc = dict(re.findall(r'wm_mapdescription\s+(\w+)\s+"([^"]*)"', objdata))
     objs: dict[str, list[str]] = {"axis": [], "allied": []}
-    for team, _, text in re.findall(r'wm_objective_(axis|allied)_desc\s+(\d+)\s+"([^"]*)"', objdata):
+    for team, _, text in re.findall(
+        r'wm_objective_(axis|allied)_desc\s+(\d+)\s+"([^"]*)"', objdata
+    ):
         objs[team].append(text)
     return desc, objs
 
@@ -128,9 +132,7 @@ async def main(args):
         mirrored = await run.call("map_mirror", axis="x", at=0, vehicles=VEHICLES)
         # Save As, script along: a mirror moves all playable space, so the before/after
         # comparison would only report that; the geometry is validated instead (below).
-        await run.call(
-            "map_save", path=str(maps / f"{NAME}.map"), check_playable_space=False
-        )
+        await run.call("map_save", path=str(maps / f"{NAME}.map"), check_playable_space=False)
         keys = {
             k: v.strip().strip('"')
             for k, v in re.findall(r"^\s*(\w+)[ \t]+([^\r\n]*)", arena, re.M)
@@ -195,16 +197,22 @@ async def main(args):
             "watch": ["truck", "forward_gate", "depot_gate"],
             "steps": [
                 {"action": "join", "team": "blue", "role": "engineer", "timeout": 60},
-                {"action": "assert", "until": [
-                    {"scope": "player", "field": "position.0", "value": 1900, "op": "gt"},
-                    {"scope": "player", "field": "position.1", "value": 100, "op": "lt"},
-                ]},
+                {
+                    "action": "assert",
+                    "until": [
+                        {"scope": "player", "field": "position.0", "value": 1900, "op": "gt"},
+                        {"scope": "player", "field": "position.1", "value": 100, "op": "lt"},
+                    ],
+                },
                 {"action": "screenshot", "name": "allied_start"},
                 {"action": "join", "team": "red", "role": "engineer", "timeout": 60},
-                {"action": "assert", "until": [
-                    {"scope": "player", "field": "position.0", "value": 0, "op": "gt"},
-                    {"scope": "player", "field": "position.1", "value": 2000, "op": "gt"},
-                ]},
+                {
+                    "action": "assert",
+                    "until": [
+                        {"scope": "player", "field": "position.0", "value": 0, "op": "gt"},
+                        {"scope": "player", "field": "position.1", "value": 2000, "op": "gt"},
+                    ],
+                },
                 {"action": "screenshot", "name": "axis_forward_bunker"},
             ],
         }
@@ -224,7 +232,9 @@ async def main(args):
         if args.objectives:
             generated = await run.call("objective_playtests", cell=args.cell)
             result["objective_tests"] = {
-                "tests": [{"objective": t["objective"], "kind": t["kind"]} for t in generated["tests"]],
+                "tests": [
+                    {"objective": t["objective"], "kind": t["kind"]} for t in generated["tests"]
+                ],
                 "skipped": generated["skipped"],
                 "runs": [],
             }
