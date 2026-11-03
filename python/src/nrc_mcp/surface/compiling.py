@@ -15,14 +15,15 @@ from pathlib import Path
 from mcp.server.mcpserver import Image as _Image
 from mcp.server.mcpserver.exceptions import ToolError
 
+from .. import botnav, botplay, profiles
 from .. import bsp as bspmod
 from .. import detail as detailmod
 from .. import optimize as optmod
 from .. import playtest as playtestmod
-from .. import profiles
 from ..detail import Detail
 from ..engine import EngineError
 from ..kernel import repo_root, run_mise_task
+from ..pack import _map_root
 from ..runtime import (
     SESSION,
     _require_path,
@@ -80,6 +81,81 @@ def engine_playtest(
             _Image(data=Path(p).read_bytes(), format="jpeg") for p in report["screenshots"][-3:]
         )
     return content
+
+
+@tool("compiling", "Run bots on the map in the engine", writes=True)
+def bot_playtest(
+    pk3: str,
+    waypoints: str | None = None,
+    seconds: float = 90,
+    bots: int = 6,
+    addon_dir: str | None = None,
+    port: int = 0,
+    profile_id: str | None = None,
+    keep: bool = False,
+    detail: Detail = "summary",
+) -> dict:
+    """Load a packaged map with its bot waypoints on a dedicated server, add bots, watch them.
+
+    `waypoints` is the file `bot_waypoints_write` staged (default: the open map's staged
+    file). The server runs for `seconds` (10..600) in a throwaway game home, with a
+    throwaway copy of the bot add-on's folder (`addon_dir`, default the game install's own,
+    for ET: Legacy `legacy/omni-bot`; it is only read) whose nav folder holds just this
+    file, so no stock or stale waypoints can stand in for it. `bots` (1..32) bots join via
+    the add-on's own command. `port` is the server's UDP port (0 picks a free one).
+
+    Reports what the add-on logged (`waypoints_loaded`, one count per map load; any
+    `load_errors`), per bot how far it travelled, how many distinct waypoints it passed
+    and the stances it was seen in (a read-only observer samples every 2 seconds), and the
+    game's own objective `events` (dynamite planted/defused, flags stolen, announcements,
+    the round ending). `ok` means the file loaded without errors and at least one bot
+    moved along the waypoints. Whether bots attempt an objective in a given run depends on
+    the add-on's goal choices and the fight; read `events`, and run longer for more.
+    `keep=true` retains the folders and names the logs. Needs the engine and game data.
+
+    `detail="summary"` (default) leaves out the per-bot rows when more than 12 bots ran;
+    `"full"` always returns them.
+    """
+    full = detailmod.wants_full(detail)
+
+    path = Path(pk3)
+    if not path.is_absolute():
+        path = repo_root() / path
+    pid = profile_id or active_profile()
+    if not pid:
+        raise ToolError("select a profile or pass profile_id")
+    for name, value, lo, hi in (("seconds", seconds, 10, 600), ("bots", bots, 1, 32)):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not lo <= value <= hi:
+            raise ToolError(f"{name} must be between {lo} and {hi}")
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+        raise ToolError("port must be an integer from 0 to 65535")
+    try:
+        spec = botnav.spec(pid)
+        if waypoints is None:
+            if SESSION.path is None:
+                raise ToolError("pass waypoints, or open the map whose staged file to use")
+
+            waypoints = str(
+                _map_root(SESSION.path)
+                / str(spec["stage_dir"])
+                / botnav.install_path(spec, SESSION.path.stem)
+            )
+        report = botplay.run(
+            path,
+            pid,
+            [waypoints],
+            seconds=float(seconds),
+            bots=int(bots),
+            addon_dir=addon_dir,
+            port=port,
+            keep=keep,
+        )
+    except (EngineError, botnav.BotNavError, profiles.ProfileError, OSError, ValueError) as e:
+        raise ToolError(str(e)) from e
+    if not full and len(report["bots"]) > 12:
+        report["bots"] = report["bots"][:12]
+        report["omitted"] = {"bots": 'rows past the first 12; detail="full" returns all'}
+    return report
 
 
 @tool("compiling", "Compile with q3map2", writes=True)

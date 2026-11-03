@@ -12,10 +12,11 @@ from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .. import analysis, profiles
+from .. import analysis, botnav, profiles, routes
 from .. import detail as detailmod
 from .. import pack as packmod
 from ..detail import Detail
+from ..kernel import parse_map
 from ..runtime import (
     SESSION,
     _require_profile,
@@ -310,3 +311,93 @@ def levelshot_make(position: list[float], yaw_deg: float = 0.0) -> dict:
     path = root / str(shot.get("directory", "levelshots")) / f"{stem}.tga"
     _write(path, image)
     return {"path": str(path), "size": [w, h]}
+
+
+@tool("shipping", "Seed bot waypoints", writes=True, destructive=True, idempotent=True)
+def bot_waypoints_write(
+    cell: float = 16,
+    spacing: float | None = None,
+    omnibot_path: str | None = None,
+    detail: Detail = "summary",
+) -> dict:
+    """Seed the bot add-on's waypoint file for the open map from its stance navigation grids.
+
+    For ET: Legacy this is an Omni-bot `.way` file (format version 9, read and written as
+    the add-on's own serializer does). Waypoints sit about `spacing` units apart (default
+    from the profile) on the walkable cells of the stand, crouch and prone grids (`cell`,
+    as in `route_report`); each is connected to its neighbours only where the straight line
+    between them is walkable, since bots steer straight between waypoints. Waypoints that
+    need crouch or prone carry that flag (bots press it while heading there); connections
+    that exist only once a state-changing brush is blown carry the blockable flag the
+    add-on re-tests at runtime. Team spawns and every objective approach area get a named
+    waypoint; parts of the map no spawn connects to are dropped.
+
+    The add-on reads waypoints from its own folder, never from the map's pk3, so the file
+    is staged beside the map's folder under the profile's add-on layout (for ET: Legacy
+    `omni-bot/et/nav/<map>.way`), to be copied into the server's `omnibot_path`. Pass
+    `omnibot_path` to also write it there. Uses the current unsaved map.
+
+    `objectives` says, per objective, whether the graph reaches it from each team's spawn
+    waypoints. Objective goals themselves come from the game, not this file. Not seeded:
+    jump, ladder, door-use, sniping or camping spots, or a map script.
+    `bot_playtest` loads the file in the engine with bots and reports what they did.
+
+    `detail="summary"` (default) leaves out the per-pin rows; `"full"` returns them.
+    """
+    full = detailmod.wants_full(detail)
+    pid, _pkg, root, stem = _release()
+    try:
+        bots = botnav.spec(pid)
+        cell = routes.number(cell, "cell", maximum=4096)
+        if spacing is not None:
+            spacing = routes.number(spacing, "spacing", maximum=4096)
+        game_map = parse_map(SESSION.require().source())
+        waypoint_file, report = botnav.build(
+            SESSION.path, game_map, pid, cell=cell, spacing=spacing
+        )
+        data = botnav.write(waypoint_file, bots["format"])
+        if botnav.write(botnav.read(data, bots["format"]), bots["format"]) != data:
+            raise ToolError("the written file does not read back identically; nothing written")
+    except (botnav.BotNavError, analysis.AnalysisError, ValueError, MemoryError) as e:
+        raise ToolError(str(e)) from e
+    relative = botnav.install_path(bots, stem)
+    staged = root / str(bots["stage_dir"]) / relative
+    _write(staged, data)
+    installed = None
+    if omnibot_path:
+        folder = Path(omnibot_path)
+        if not folder.is_dir():
+            raise ToolError(f"omnibot_path {folder} is not a folder; the staged file is {staged}")
+        installed = folder / relative
+        _write(installed, data)
+    warnings = []
+    for row in report["objectives"]:
+        missing = [k for k, v in row.items() if k.startswith("reached_from_") and not v]
+        if missing or not row["waypoints"]:
+            warnings.append(
+                f"objective {row['name'] or row['entity']} (entity {row['entity']}): "
+                + ("no walkable cell near it" if not row["waypoints"] else ", ".join(missing))
+                + " is false"
+            )
+    if report["components"]["count"] > 1:
+        warnings.append(
+            f"the graph has {report['components']['count']} unconnected parts "
+            f"(sizes {report['components']['sizes']}); bots cannot cross between them"
+        )
+    if report["unplaced_pins"]:
+        warnings.append(f"{len(report['unplaced_pins'])} spawn/objective markers found no cell")
+    out = {
+        "path": str(staged),
+        "installed": str(installed) if installed else None,
+        "install_as": str(relative),
+        "bytes": len(data),
+        **report,
+        "warnings": warnings,
+    }
+    if not full:
+        pins = out.pop("pins")
+        out["pins"] = {
+            kind: sum(1 for p in pins if p["kind"] == kind) for kind in ("spawn", "objective")
+        }
+        out["omitted"] = {"pins": 'per-marker cells and waypoints; detail="full" lists them'}
+    return out

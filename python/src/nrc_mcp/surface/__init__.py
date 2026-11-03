@@ -115,6 +115,8 @@ PRESETS: dict[str, tuple[str, ...]] = {
         "levelshot_make",
         "objective_playtests",
         "engine_playtest",
+        "bot_waypoints_write",
+        "bot_playtest",
     ),
 }
 #: A whole map-making session, start to finish: the three phases together.
