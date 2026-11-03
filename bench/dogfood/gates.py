@@ -243,6 +243,7 @@ def analyse(entries: list[dict]) -> dict:
     }
     phases: dict[str, dict] = {}
     deaths_in_trench: dict[str, int] = {}
+    trench_deaths: dict[str, int] = {}
     near_wall: dict[str, int] = {}
     door_passes = {"red": 0, "blue": 0}
     last: dict[int, tuple] = {}
@@ -256,6 +257,8 @@ def analyse(entries: list[dict]) -> dict:
                     elif name == "wall_destroyed" and phase != "wall_destroyed":
                         phase = "wall_destroyed"
             phases.setdefault(phase, {}).setdefault("events", []).append(text)
+            if "MOD_TRIGGER_HURT" in text:
+                trench_deaths[phase] = trench_deaths.get(phase, 0) + 1
             continue
         packet = e["sample"]
         row = phases.setdefault(phase, {})
@@ -286,6 +289,7 @@ def analyse(entries: list[dict]) -> dict:
     return {
         "phases": phases,
         "samples_in_trench": deaths_in_trench,
+        "trench_deaths": trench_deaths,
         "samples_at_wall_before_it_went": near_wall,
         "door_crossings_between_samples": door_passes,
     }

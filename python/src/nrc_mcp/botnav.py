@@ -413,8 +413,8 @@ def seed(
     # Pieces: bucket by (column block, stance rank), split by two-way connectivity in that rank.
     buckets: dict[tuple[int, int, int], list] = {}
     for c, r in g.rank.items():
-        if c in decks:
-            continue  # no waypoint stands on a deck: see the bridge pass below
+        if c in decks or c in openings:
+            continue  # no waypoint stands on a deck or in a wall: see the spans below
         buckets.setdefault((c[0] // k, c[1] // k, r), []).append(c)
     piece_of: dict[tuple[int, int, int], int] = {}
     pieces: list[list[tuple[int, int, int]]] = []
@@ -580,13 +580,18 @@ def seed(
         for legs, x, y in zip(plans, nodes, nodes[1:], strict=False):
             apply(x, y, r, legs)
 
-    # Bridges. The add-on sends a bot to the waypoint nearest a goal, closed links or not
-    # (PathPlannerWaypoint.cpp:1500-1515 filters only closed waypoints), so a waypoint on a
-    # deck would be the goal of the constructible that builds it, unreachable until it is
-    # built. No piece stands on a deck; instead each pair of pieces on its edges is joined
-    # by one link straight across it, from lip to lip, as stock files span a bridge.
-    if decks:
-        _span_decks(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_at, gate)
+    # Bridges and walls. The add-on sends a bot to the waypoint nearest a goal, closed links
+    # or not (PathPlannerWaypoint.cpp:1500-1515 filters only closed waypoints), so a waypoint
+    # on a deck or inside a wall would be the goal of the objective that opens it, and
+    # unreachable until it is open. No piece stands on either; instead each pair of pieces on
+    # its edges is joined by one link straight across, from lip to lip, as stock files span a
+    # bridge (battery 18-30) or a wall (battery 371-373).
+    spans = {"deck": 0, "wall": 0}
+    for kind, cells in (("deck", decks), ("wall", openings)):
+        if cells:
+            spans[kind] = _span(
+                g, cells, pieces, piece_of, piece_rank, reps, plan, apply, node_at, gate
+            )
 
     # A connection through a door that does not end in the doorway: the bot presses use on
     # it too. A team door's connections must end in the doorway, where the team flags are.
@@ -652,6 +657,8 @@ def seed(
         "bridge_waypoints": len(bridged),
         "bridge_connections_split": gate["bridge_splits"],
         "bridge_connections_rejected": gate["bridge_rejected"],
+        "deck_spans": spans["deck"],
+        "wall_spans": spans["wall"],
         "door_waypoints": len(door_bits),
         "team_door_bypasses_dropped": dropped_door,
         "spacing": k * cell,
@@ -665,8 +672,11 @@ def seed(
     )
 
 
-def _span_decks(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_at, gate) -> None:
-    """Join the pieces around each deck by links across it (see `seed`)."""
+def _span(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_at, gate) -> int:
+    """Join the pieces around each patch of `decks` (deck or wall cells) by links straight
+    across it, lip to lip (see `seed`); of the candidates for a pair of pieces, the one
+    that keeps furthest from the patch's sides, then the shortest. Returns the spans made."""
+    made = 0
     seen: set = set()
     for start in sorted(decks):
         if start in seen:
@@ -681,6 +691,20 @@ def _span_decks(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_
                     if d in decks and d not in seen:
                         seen.add(d)
                         todo.append(d)
+        columns = {(c[0], c[1]) for c in patch}
+        # How far each column is from the patch's sides (0 on the side).
+        side = {
+            (x, y): 0
+            for x, y in columns
+            if any((x + dx, y + dy) not in columns for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+        }
+        ring = deque(side)
+        while ring:
+            x, y = ring.popleft()
+            for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if n in columns and n not in side:
+                    side[n] = side[(x, y)] + 1
+                    ring.append(n)
         # Bank cells a move leads to or from, per piece.
         edge: dict[int, set] = {}
         for c in patch:
@@ -697,11 +721,17 @@ def _span_decks(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_
                 for ea in sorted(edge[a]):
                     for eb in sorted(edge[b]):
                         legs = plan(ea, eb, r)
-                        if not legs or len(legs) != 1 or not legs[0][3]:
+                        if not legs or len(legs) != 1:
                             continue
-                        length = math.dist(g.centre(ea), g.centre(eb))
-                        if best is None or length < best[0]:
-                            best = (length, ea, eb, legs)
+                        walked = [c for c in legs[0][2] if c in patch]
+                        if not walked:
+                            continue
+                        score = (
+                            -min(side[(c[0], c[1])] for c in walked),
+                            math.dist(g.centre(ea), g.centre(eb)),
+                        )
+                        if best is None or score < best[0]:
+                            best = (score, ea, eb, legs)
                 if best is None:
                     continue
                 _length, ea, eb, legs = best
@@ -725,6 +755,8 @@ def _span_decks(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_
                     hop = plan(u, v, r)
                     if hop is not None:
                         apply(x, y, r, hop)
+                made += 1
+    return made
 
 
 def _door_reps(pieces: list[list], doors: dict) -> dict[int, tuple[int, int, int]]:

@@ -256,7 +256,14 @@ def test_blown_wall_connections_are_blockable(tmp_path):
     walled = [w for w in wf.waypoints if w.flags & blockable]
     assert report["state_changing_entities"] and walled
     assert all(400 <= w.position[0] <= 640 for w in walled)
+    # None inside the wall: the add-on would make it the goal for planting there, and it
+    # is unreachable while the wall stands. The wall is spanned from one side to the other.
+    assert not [w for w in wf.waypoints if 480 < w.position[0] < 544]
+    assert report["wall_spans"] > 0
     assert report["components"]["count"] == 1
+    # None inside the wall: the add-on would make it the dynamite goal's waypoint,
+    # unreachable while the wall stands. The crossing spans it lip to lip.
+    assert not [w for w in wf.waypoints if 480 < w.position[0] < 544]
     # The only crossings are the blockable ones.
     for w in wf.waypoints:
         for t in w.connections:
