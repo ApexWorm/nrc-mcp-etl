@@ -13,7 +13,9 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis, profiles
+from .. import detail as detailmod
 from .. import pack as packmod
+from ..detail import Detail
 from ..runtime import (
     SESSION,
     _require_profile,
@@ -28,6 +30,7 @@ def pack_pk3(
     complevel: int | None = None,
     png: bool = False,
     ignore: list[str] | None = None,
+    detail: Detail = "summary",
 ) -> dict:
     """Build a release archive for a compiled BSP with `q3map2 -pk3` (§6.4).
 
@@ -47,9 +50,13 @@ def pack_pk3(
     sit beside the map are added, with the sound files its speaker and sound scripts name,
     files the base game already ships are dropped, and it is written next to the folder that
     holds `maps/`, never into the game install.
+
+    `detail="summary"` (default) keeps `not_found` and `allowed_missing` whole and caps the
+    other lists; `"full"` adds the packer's console tail and every row.
     """
+    full = detailmod.wants_full(detail)
     try:
-        return packmod.pack_pk3(
+        report = packmod.pack_pk3(
             bsp,
             complevel=complevel,
             png=png,
@@ -58,6 +65,7 @@ def pack_pk3(
         )
     except packmod.PackError as e:
         raise ToolError(str(e)) from e
+    return report if full else detailmod.pack_pk3(report)
 
 
 @tool("shipping", "List BSP resources")

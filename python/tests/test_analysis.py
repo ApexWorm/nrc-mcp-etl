@@ -165,6 +165,8 @@ def test_movement_constants_are_the_engine_source_figures(constants, pid):
     assert constants.headroom_stand.confidence == "verified"
     assert constants.step_height.value == pytest.approx(18)
     assert constants.headroom_crouch.value == pytest.approx(48)
+    assert constants.floor_separation.value == pytest.approx(0.125)
+    assert constants.floor_separation.verified
     assert constants.player_width.value == pytest.approx(36)
     assert constants.ledge_grab_max is None
     assert constants.fall_no_damage.value == pytest.approx(242)
@@ -261,11 +263,12 @@ def test_unverified_reasoning_can_never_be_worse_than_info():
 # ---------------------------------------------------------------------------
 
 
-def test_a_room_voxelizes_to_exactly_its_interior_floor(simple_room):
-    """512-unit room with 16-unit walls: 480 x 480 of interior, 30 x 30 cells at cell=16."""
+def test_a_room_voxelizes_to_player_centres_that_fit_inside_its_walls(simple_room):
+    """The 30x30 floor cells lose an edge row where the player's body hits each wall."""
     grid = simple_room
-    assert grid.counts["walkable_columns"] == 900
-    assert grid.counts["walkable_cells"] == 900
+    assert grid.counts["walkable_columns"] == 784
+    assert grid.counts["walkable_cells"] == 784
+    assert grid.counts["body_blocked_floor_cells"] == 116
     assert grid.counts["floor_cells"] == 900
     assert len(grid.component_sizes()) == 1, "one room is one connected component"
     assert grid.cell == 16
@@ -282,12 +285,12 @@ def test_headroom_is_the_profile_height_rounded_up_to_whole_cells(simple_room, c
     assert grid.fall_cells == math.floor(constants.fall_no_damage.value / 16)
 
 
-def test_a_room_too_low_to_stand_in_is_not_walkable(tmp_path, kern, pid):
+def test_a_room_too_low_to_stand_in_is_not_walkable(tmp_path, kern, pid, constants):
     """The W2 regression, made mechanical.
 
-    At cell=8 the grid needs ceil(69.375 / 8) = 9 cells, i.e. 72 units. A 64-unit room is
-    therefore not walkable and a 72-unit one is. Had the design document's 56 been used, the
-    64-unit room would have passed.
+    At cell=8 the original profile needs ceil(69.375 / 8) = 9 cells, i.e. 72 units. The
+    higher room also reserves any profile floor separation. Had the design document's 56
+    been used, the 64-unit room would have passed.
     """
     low = write_map(tmp_path, room(0, 0, 256, 256, height=64), name="low.map")
     grid = analysis.build_navgrid(low, cell=8, profile_id=pid)
@@ -297,7 +300,9 @@ def test_a_room_too_low_to_stand_in_is_not_walkable(tmp_path, kern, pid):
     assert "NAV_NO_WALKABLE_SPACE" in codes
     assert grid.counts["floor_cells"] > 0, "there is a floor, just no room above it"
 
-    high = write_map(tmp_path, room(0, 0, 256, 256, height=72), name="high.map")
+    separation = constants.floor_separation.value if constants.floor_separation else 0
+    height = math.ceil((constants.headroom_stand.value + separation) / 8) * 8
+    high = write_map(tmp_path, room(0, 0, 256, 256, height=height), name="high.map")
     assert analysis.build_navgrid(high, cell=8, profile_id=pid).counts["walkable_cells"] > 0
 
 
@@ -332,7 +337,7 @@ def test_utility_brushes_are_not_collision_geometry(tmp_path, kern, pid):
     path = write_map(tmp_path, brushes, name="hint.map")
     grid = analysis.build_navgrid(path, cell=16, profile_id=pid)
     assert grid.geometry["brushes_nonsolid_shader"] == 1
-    assert grid.counts["walkable_columns"] == 900, "the room is untouched"
+    assert grid.counts["walkable_columns"] == 784, "the room is untouched"
     assert len(grid.component_sizes()) == 1
 
 
@@ -491,6 +496,111 @@ def test_steps_within_the_profile_limit_are_walkable_and_bigger_ones_are_not(tmp
         high = (392.0, 256.0, float(rise))
         assert analysis.path_distance(grid, low, high)["reachable"] is expect_up, rise
         assert analysis.path_distance(grid, high, low)["reachable"] is True, rise
+
+
+@pytest.mark.parametrize("opening,reachable", [(24, False), (48, True)])
+def test_routes_require_a_player_width_opening(tmp_path, kern, opening, reachable):
+    brushes = room(0, 0, 512, 512)
+    brushes.extend(
+        [
+            box((16, 248, 0), (256 - opening // 2, 264, 256)),
+            box((256 + opening // 2, 248, 0), (496, 264, 256)),
+        ]
+    )
+    path = write_map(tmp_path, brushes)
+    grid = analysis.build_navgrid(path, cell=8, profile_id="etl")
+    result = analysis.path_distance(grid, (256, 64, 0), (256, 448, 0))
+    assert result["reachable"] is reachable
+    assert grid.as_dict()["player_width"]["value"] == 36
+    assert grid.counts["body_blocked_floor_cells"] > 0
+
+
+def test_swept_body_does_not_cross_a_wall_between_voxel_centres(tmp_path, kern):
+    brushes = room(0, 0, 512, 512)
+    brushes.append(box((16, 255, 0), (496, 257, 256)))
+    path = write_map(tmp_path, brushes)
+    grid = analysis.build_navgrid(path, cell=16, profile_id="etl")
+    assert not analysis.path_distance(grid, (256, 64, 0), (256, 448, 0))["reachable"]
+
+
+@pytest.mark.parametrize(
+    "height,expected",
+    [
+        (80, {"stand": True, "crouch": True, "prone": True}),
+        (56, {"stand": False, "crouch": True, "prone": True}),
+        (48, {"stand": False, "crouch": False, "prone": True}),
+        (40, {"stand": False, "crouch": False, "prone": False}),
+    ],
+)
+def test_routes_use_the_selected_stance_height(tmp_path, kern, height, expected):
+    path = write_map(tmp_path, room(0, 0, 256, 256, height=height))
+    for stance, reachable in expected.items():
+        grid = analysis.build_navgrid(path, cell=8, profile_id="etl", stance=stance)
+        route = analysis.path_distance(grid, (64, 64, 0), (192, 192, 0))
+        assert route["reachable"] is reachable, stance
+        assert grid.as_dict()["stance"] == stance
+        if stance == "prone":
+            assert any("leg collision" in note for note in grid.notes)
+
+
+def test_stance_is_in_the_grid_cache_key(tmp_path, kern):
+    path = write_map(tmp_path, room(0, 0, 256, 256, height=56))
+    analysis.clear_navgrid_cache()
+    stand = analysis.cached_navgrid(path, cell=8, profile_id="etl")
+    crouch = analysis.cached_navgrid(path, cell=8, profile_id="etl", stance="crouch")
+    assert stand.counts["walkable_cells"] == 0
+    assert crouch.counts["walkable_cells"] > 0
+    assert analysis.cached_navgrid(path, cell=8, profile_id="etl", stance="crouch") is crouch
+
+
+@pytest.mark.parametrize("cell", [8, 16])
+@pytest.mark.parametrize(
+    "stance,height,reachable",
+    [
+        ("prone", 40, False),
+        ("prone", 48, True),
+        ("crouch", 48, False),
+        ("crouch", 56, True),
+        ("stand", 72, False),
+        ("stand", 80, True),
+    ],
+)
+def test_floor_separation_blocks_exact_fit_tunnels(tmp_path, kern, cell, stance, height, reachable):
+    """Real prone movement stopped at a 40-unit roof with the player origin at z=24.125."""
+    brushes = room(0, 0, 512, 256)
+    brushes.append(box((192, 16, height), (320, 240, 256)))
+    grid = analysis.build_navgrid(
+        write_map(tmp_path, brushes), cell=cell, profile_id="etl", stance=stance
+    )
+    assert analysis.path_distance(grid, (64, 128, 0), (448, 128, 0))["reachable"] is reachable
+    report = grid.as_dict()
+    nominal = report["movement"][f"headroom_{stance}"]["value"]
+    separation = report["movement"]["floor_separation"]
+    assert separation["value"] == 0.125 and separation["confidence"] == "verified"
+    assert separation["source"] == "etlegacy_source"
+    assert report["body_clearance_height_units"] == nominal + 0.125
+    assert report["voxel_headroom_units"] == math.ceil(nominal / cell) * cell
+    assert report["effective_headroom_units"] == max(
+        report["voxel_headroom_units"], nominal + 0.125
+    )
+
+
+def test_movement_report_includes_floor_separation_in_headroom_thresholds(tmp_path, kern):
+    path = write_map(tmp_path, room(0, 0, 256, 256, height=48))
+    grid = analysis.build_navgrid(path, cell=8, profile_id="etl")
+    checks = {c["check"]: c for c in analysis.movement_check(path, grid=grid)["checks"]}
+    assert checks["standing_headroom"]["required_clearance"] == 72.125
+    assert checks["standing_headroom"]["crouch_only_positions"] == 0
+    assert checks["crouch_headroom"]["required_clearance"] == 48.125
+    assert checks["crouch_headroom"]["below_crouch_height"] > 0
+
+
+def test_unknown_or_missing_stance_dimensions_are_refused(tmp_path, kern):
+    path = write_map(tmp_path, room(0, 0, 256, 256))
+    with pytest.raises(analysis.AnalysisError, match="stance must be"):
+        analysis.build_navgrid(path, profile_id="etl", stance="flying")
+    with pytest.raises(analysis.AnalysisError, match="headroom_prone"):
+        analysis.build_navgrid(path, profile_id="urt43", stance="prone")
 
 
 # ---------------------------------------------------------------------------

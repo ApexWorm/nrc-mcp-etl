@@ -1,0 +1,39 @@
+{
+  "watch": ["cp_allies", "axisdoor", "fwdflag"],
+  "steps": [
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 40},
+    {"action": "assert", "until": [{"scope": "player", "field": "position.0", "value": 600, "op": "lt"}]},
+    {"action": "screenshot", "name": "allied_camp"},
+    {"action": "position", "origin": [1460, 384, 24], "angles": [0, 0, 0]},
+    {"action": "hold", "controls": ["forward"], "seconds": 1.5, "timeout": 10},
+    {"action": "screenshot", "name": "flag_touched_by_allies"},
+    {"action": "join", "team": "red", "role": "engineer", "timeout": 40},
+    {"action": "assert", "until": [{"scope": "player", "field": "position.0", "value": 2600, "op": "gt"}]},
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 40},
+    {"action": "assert", "until": [
+      {"scope": "player", "field": "position.0", "value": 1300, "op": "gt"},
+      {"scope": "player", "field": "position.0", "value": 1800, "op": "lt"}
+    ]},
+    {"action": "screenshot", "name": "allies_spawn_at_captured_flag"},
+    {"action": "position", "origin": [1024, 610, 24], "angles": [30, 90, 0]},
+    {"action": "weapon", "name": "pliers"},
+    {"action": "hold", "controls": ["attack"], "timeout": 60,
+     "until": [{"scope": "entity", "name": "cp_allies", "field": "built", "value": true}]},
+    {"action": "screenshot", "name": "command_post_built"},
+    {"action": "position", "origin": [2352, 576, 24], "angles": [0, 0, 0]},
+    {"action": "hold", "controls": ["activate"], "seconds": 1, "timeout": 10},
+    {"action": "assert", "until": [{"scope": "entity", "name": "axisdoor", "field": "position.2", "value": 1, "op": "lt"}]},
+    {"action": "screenshot", "name": "door_shut_for_allies"},
+    {"action": "join", "team": "red", "role": "engineer", "timeout": 40},
+    {"action": "position", "origin": [2480, 576, 24], "angles": [0, 180, 0]},
+    {"action": "hold", "controls": ["activate"], "timeout": 10,
+     "until": [{"scope": "entity", "name": "axisdoor", "field": "position.2", "value": 40, "op": "gt"}]},
+    {"action": "screenshot", "name": "door_open_for_axis"},
+    {"action": "position", "origin": [1612, 384, 24], "angles": [0, 180, 0]},
+    {"action": "hold", "controls": ["forward"], "seconds": 1.5, "timeout": 10},
+    {"action": "screenshot", "name": "flag_reclaimed_by_axis"},
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 40},
+    {"action": "assert", "until": [{"scope": "player", "field": "position.0", "value": 600, "op": "lt"}]},
+    {"action": "screenshot", "name": "allies_back_at_camp"}
+  ]
+}

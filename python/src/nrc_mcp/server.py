@@ -27,6 +27,7 @@ have failed correct maps (`nrc://corrections`).
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -89,6 +90,14 @@ def resource_conventions() -> str:
     return p.read_text() if p.is_file() else "docs/conventions.md is missing"
 
 
+@mcp.resource("nrc://playtest/{profile_id}", mime_type="application/json")
+def resource_playtest(profile_id: str) -> str:
+    """Supported playtest actions, state conditions and examples for a game profile."""
+    from . import playtest
+
+    return json.dumps(playtest.describe(profile_id), indent=2)
+
+
 @mcp.resource("nrc://corrections")
 def resource_corrections() -> str:
     """Design claims that turned out to be wrong when verified against real sources.
@@ -127,7 +136,9 @@ Work in this order, and do not skip the decision step.
    needs collision, then `render_camera` to look at it.
 5. `validate`, then `compile_map` with the draft preset, then `map_save`.
 
-Patches cannot be authored here. If the feature needs one, say so and stop.
+For a cylinder, arch or bevel, use `patch_commit`; check shader collision in game, or add
+simple clip geometry. Patches do not seal the map and are omitted from the analysis grid.
+Other patch shapes still require the editor.
 """
 
 
@@ -175,8 +186,9 @@ Add {gametype} support to the open map.
 
 1. `profile_summary` — the classnames, keys and counts are all profile data, never guessed.
 2. `query_entities` — see what is already there before adding anything.
-3. Place spawns and objectives with `entity_place`, key them with `entity_set_keys`, then
-   `validate_profile` to check arrangement and counts.
+3. Place team spawns with `spawn_cluster` where the game has a recipe for them, other
+   entities with `entities_place` (one call for many), key them with `entity_set_keys`,
+   then `validate_profile` to check arrangement and counts.
 4. `spawn_safety` and `balance_report` — a spawn with one exit can be held, and an
    asymmetric walk to the objective is a design problem the geometry will not reveal.
 5. `playable_space_diff` before `map_save`.
@@ -216,8 +228,11 @@ TOOL_NAMES = (
     "map_new",
     "map_stats",
     "map_save",
+    "map_checkpoint",
+    "map_restore",
     "query_entities",
     "entity_place",
+    "entities_place",
     "entity_set_keys",
     "entity_remove_keys",
     "brush_geometry",
@@ -231,6 +246,7 @@ TOOL_NAMES = (
     "script_set_event",
     "script_remove",
     "objective_place",
+    "path_place",
     "bsp_report",
     "bsp_entity_diff",
     "pack_pk3",
@@ -244,6 +260,7 @@ TOOL_NAMES = (
     "solid_compile",
     "solid_preview",
     "solid_commit",
+    "solids_commit",
     "brush_set_detail",
     "patch_commit",
     "solid_inspect",
@@ -264,10 +281,13 @@ TOOL_NAMES = (
     "compile_ab",
     "ab_history",
     "navgrid_stats",
+    "route_report",
+    "route_render",
     "balance_report",
     "sightline_report",
     "movement_check",
     "spawn_safety",
+    "spawn_cluster",
     "lighting_report",
     "playable_space_diff",
     "bench_run",
@@ -278,6 +298,7 @@ TOOL_NAMES = (
     "task_list",
     "task_run",
     "compile_map",
+    "engine_playtest",
     "profile_summary",
 )
 
@@ -299,7 +320,8 @@ def describe_surface() -> str:
         "nrc-mcp surface",
         "",
         f"{len(registered)} tools in {len(by_group)} groups; {writers} of them write.",
-        "Narrow it with NRC_MCP_GROUPS=<group,...> or NRC_MCP_READ_ONLY=1.",
+        "Narrow it with NRC_MCP_GROUPS=<group or preset,...> or NRC_MCP_READ_ONLY=1.",
+        f"Presets: {', '.join(surface.PRESETS)}.",
         "",
         "TOOLS",
     ]
@@ -316,6 +338,7 @@ def describe_surface() -> str:
         "RESOURCES",
         "  nrc://tasks                the live mise task list",
         "  nrc://profile/{id}         a game profile as YAML",
+        "  nrc://playtest/{id}        playtest actions, state conditions and examples",
         "  nrc://conventions          design tiers, caulk, authoring order, what is not built",
         "  nrc://corrections          verified corrections to the design document",
         "  nrc://solid-ir             the Solid IR operator reference",
@@ -330,8 +353,8 @@ def describe_surface() -> str:
         "  reference sizes    there is no measured dimension corpus, so sizing comes from",
         "                     the profile's verified constants.",
         "  cover analysis     cover density and peek angles are not implemented.",
-        "  traversal time     no player speed is verified, so distances are in world units",
-        "                     and never in seconds.",
+        "  traversal time     reinforcement profiles estimate route and wave-wait times;",
+        "                     these are not engine measurements or combat simulation.",
         "  rotated geometry   brushes whose plane points are off-grid are reported as",
         "                     BRUSH_NOT_EXACT and excluded from analysis rather than",
         "                     approximated. Every report carries the count.",
@@ -359,30 +382,43 @@ def all_groups() -> list[str]:
     return [g for g in seen if g]
 
 
-def select_surface(groups: str | None = None, read_only: bool = False) -> dict:
-    """Narrow the registered tools to the requested groups, and report what happened.
+def all_presets() -> dict[str, tuple[str, ...]]:
+    """The named session subsets (`surface.PRESETS`): build, analyse, ship, level."""
+    return dict(surface.PRESETS)
 
-    Unknown group names and an empty selection are both errors. Silently serving zero tools
+
+def select_surface(groups: str | None = None, read_only: bool = False) -> dict:
+    """Narrow the registered tools to the requested groups or presets, and report what happened.
+
+    Each name is a group (where tools live) or a preset (what one kind of session calls,
+    see `surface.PRESETS`); the selection is the union of all of them.
+
+    Unknown names and an empty selection are both errors. Silently serving zero tools
     would look exactly like a broken server to the client, and silently ignoring a typo
     would serve a surface nobody asked for — both are worse than refusing to start.
     """
     available = all_groups()
+    presets = all_presets()
     wanted = [g.strip() for g in (groups or "").split(",") if g.strip()]
 
     if groups is not None and groups.strip() and not wanted:
         raise SurfaceError(f"NRC_MCP_GROUPS={groups!r} names no groups")
     if wanted:
-        unknown = [g for g in wanted if g not in available]
+        unknown = [g for g in wanted if g not in available and g not in presets]
         if unknown:
             raise SurfaceError(
-                f"unknown tool group(s): {', '.join(unknown)}. Available: {', '.join(available)}"
+                f"unknown tool group(s): {', '.join(unknown)}. Available: {', '.join(available)}; "
+                f"presets: {', '.join(presets)}"
             )
+    wanted_groups = {g for g in wanted if g in available}
+    wanted_tools = {name for g in wanted if g in presets for name in presets[g]}
 
     dropped: list[str] = []
     for t in list(mcp._tool_manager.list_tools()):
         group = (t.meta or {}).get("group")
         writes = t.annotations is not None and t.annotations.read_only_hint is False
-        if (wanted and group not in wanted) or (read_only and writes):
+        selected = not wanted or group in wanted_groups or t.name in wanted_tools
+        if not selected or (read_only and writes):
             mcp.remove_tool(t.name)
             dropped.append(t.name)
 

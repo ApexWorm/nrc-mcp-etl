@@ -108,3 +108,37 @@ def test_a_missing_binary_is_named(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path))
     with pytest.raises(engine.EngineError, match="none of nothere found"):
         engine.find_binary(["nothere"], str(tmp_path))
+
+
+def test_nonzero_exit_after_load_is_not_a_pass(fake_engine, monkeypatch):
+    package = pk3(fake_engine / "m_autopacked.pk3", ["maps/m.bsp"])
+
+    def crash(cmd, cwd, seconds, env):
+        (cwd / "mod").mkdir(exist_ok=True)
+        (cwd / "mod/console.log").write_text(REAL_LOG_GOOD)
+        return -11
+
+    monkeypatch.setattr(engine, "_run", crash)
+    result = engine.smoke(package, "test", keep=True)
+    assert result["runs"][0]["loaded"]
+    assert not result["ok"]
+    assert not result["runs"][0]["exit_ok"]
+
+
+@pytest.mark.parametrize("connected", [False, True])
+def test_client_requires_an_active_connection_marker(fake_engine, monkeypatch, connected):
+    package = pk3(fake_engine / "m_autopacked.pk3", ["maps/m.bsp"])
+    marker = "Going from CS_PRIMED to CS_ACTIVE"
+    monkeypatch.setitem(SPEC, "client_connected", marker)
+    monkeypatch.setattr(engine, "find_binary", lambda *a: fake_engine / "install/fakeded")
+    monkeypatch.setattr(engine, "_start_display", lambda: (None, {}))
+
+    def run(cmd, cwd, seconds, env):
+        (cwd / "mod").mkdir(exist_ok=True)
+        (cwd / "mod/console.log").write_text(REAL_LOG_GOOD + (marker if connected else ""))
+        return None
+
+    monkeypatch.setattr(engine, "_run", run)
+    result = engine.smoke(package, "test", client=True, keep=True)
+    assert result["ok"] is connected
+    assert result["runs"][1]["connected"] is connected

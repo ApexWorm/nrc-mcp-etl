@@ -6,7 +6,7 @@ annotations. See `nrc_mcp.server` for how the surface is assembled and scoped.
 
 from __future__ import annotations
 
-from pathlib import Path
+import hashlib
 from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
@@ -22,6 +22,31 @@ from ..runtime import (
 # `solid_preview` renders what it compiled, so the sculpt surface borrows the render
 # surface's annotated-image helper. One direction only: render never imports sculpt.
 from .render import _image_and_notes
+
+
+def _store() -> dict:
+    path = solids.sidecar_path(_require_path())
+    try:
+        return solids.decode(SESSION.read_file(path), path)
+    except solids.SolidStoreError as e:
+        raise ToolError(str(e)) from e
+
+
+def _entry(name: str) -> tuple[dict, dict]:
+    store = _store()
+    entry = store["solids"].get(name)
+    if not isinstance(entry, dict):
+        raise ToolError(f"no solid named {name!r}; recorded: {sorted(store['solids'])}")
+    return store, entry
+
+
+def _generated(map_, name: str) -> list[tuple[int, int, str]]:
+    marker = f"// nrc-mcp solid:{name}"
+    return [row for row in map_.brush_sources() if marker in row[2].splitlines()]
+
+
+def _fingerprints(brushes: list[tuple[int, int, str]]) -> list[str]:
+    return sorted(hashlib.sha256(source.encode()).hexdigest() for _, _, source in brushes)
 
 
 @tool("sculpt", "Solid IR reference")
@@ -114,31 +139,164 @@ def solid_commit(
     naming `label`, so a human reading the `.map` can see where they came from and delete them
     as a unit.
 
-    With `remember`, the IR is recorded in a `<map>.solids.json` sidecar under `label`, so the
+    With `remember`, the IR is staged in a `<map>.solids.json` sidecar under `label`, so the
     shape can be re-parameterized later with `solid_edit_param` — "make that corridor 32 units
     wider" instead of moving faces by hand. The `.map` stays canonical; the sidecar is
     advisory and re-derivable.
+
+    To commit several solids, use `solids_commit`: one call, all or none.
     """
     m = SESSION.require()
     k = _kernel()
     g = grid if grid is not None else SESSION.grid
+    store = _store() if remember else None
+    if store is not None:
+        if label in store["solids"] or _generated(m, label):
+            raise ToolError(f"solid {label!r} already exists; use solid_edit_param or a new label")
+        try:
+            solids.record({"solids": {}}, label, ir)  # Validate before any mutation.
+        except solids.SolidStoreError as e:
+            raise ToolError(str(e)) from e
+    candidate = m.copy()
     try:
         result = k.solid_commit(
-            m, ir, textures, g, target_classname, False, label, new_entity, target_entity
+            candidate, ir, textures, g, target_classname, False, label, new_entity, target_entity
         )
     except ValueError as e:
         raise ToolError(str(e)) from e
 
-    if remember and SESSION.path is not None:
-        try:
-            solids.put(SESSION.path, label, ir, brushes=result["brushes_created"])
-            result["sidecar"] = str(solids.sidecar_path(SESSION.path))
-        except solids.SolidStoreError as e:
-            # The brushes are already in the map; failing to record the IR is a lesser problem
-            # and must not be reported as though the commit failed.
-            result["sidecar_error"] = str(e)
+    if store is not None:
+        solids.record(
+            store,
+            label,
+            ir,
+            brushes=result["brushes_created"],
+            textures=textures,
+            grid=g,
+            provenance=_fingerprints(_generated(candidate, label)),
+        )
+        sidecar = solids.sidecar_path(SESSION.path)
+        SESSION.stage_file(sidecar, solids.encode(store))
+        result["sidecar"] = str(sidecar)
+        result["staged"] = True
+    SESSION.map = candidate
     result["next"] = "call map_save to write the map, or render_contact_sheet to look at it"
     return result
+
+
+#: The fields one `solids_commit` item may carry: `solid_commit`'s own, minus the shared ones.
+_ITEM_FIELDS = {"ir", "label", "textures", "target_classname", "new_entity", "target_entity"}
+
+#: The sidecar module, under a name `solids_commit`'s `solids` argument does not shadow.
+_sidecar = solids
+
+
+@tool("sculpt", "Commit several solids to map", writes=True)
+def solids_commit(
+    solids: list[dict[str, Any]],
+    textures: dict | None = None,
+    grid: int | None = None,
+    remember: bool = True,
+) -> dict:
+    """Commit many Solid IR trees in one call, all or none: crates, pillars, a row of rooms.
+
+    Each item is what `solid_commit` takes for one solid: `{"ir": ..., "label": ...}` plus,
+    optionally, `textures`, `target_classname`, `new_entity` and `target_entity`. The
+    top-level `textures` applies to every item that gives none of its own.
+
+    Items are compiled in order onto a copy of the map, and the copy replaces the map only
+    if every one succeeds: a refusal names the item (`solids[2] (label 'crate_2'): ...`) and
+    changes nothing, sidecar included. Labels must be new and distinct. With `remember`, each
+    tree is staged in the sidecar under its label, so `solid_edit_param` can re-shape any of
+    them later.
+
+    The reply is compact: per item its label, brush count and entity, plus totals, and any
+    compiler warnings tagged with their label. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    k = _kernel()
+    g = grid if grid is not None else SESSION.grid
+    if not solids:
+        raise ToolError("no solids given; pass a list of {ir, label, ...}")
+    store = _store() if remember else None
+    seen: set[str] = set()
+    for i, item in enumerate(solids):
+        where = f"solids[{i}]"
+        if not isinstance(item, dict):
+            raise ToolError(f"{where}: each item is an object {{ir, label, ...}}")
+        extra = sorted(set(item) - _ITEM_FIELDS)
+        if extra:
+            raise ToolError(
+                f"{where}: unknown field(s) {extra}; an item takes {sorted(_ITEM_FIELDS)}"
+            )
+        label = item.get("label")
+        if not isinstance(label, str) or not label:
+            raise ToolError(f"{where}: label must be a non-empty string")
+        if not isinstance(item.get("ir"), dict):
+            raise ToolError(f"{where} (label {label!r}): ir must be a Solid IR tree")
+        if label in seen:
+            raise ToolError(f"{where}: label {label!r} is used twice in this call")
+        seen.add(label)
+        if store is not None:
+            if label in store["solids"] or _generated(m, label):
+                raise ToolError(
+                    f"{where}: solid {label!r} already exists; use solid_edit_param or a new label"
+                )
+            try:
+                _sidecar.record({"solids": {}}, label, item["ir"])
+            except _sidecar.SolidStoreError as e:
+                raise ToolError(f"{where}: {e}") from e
+
+    candidate = m.copy()
+    made: list[dict[str, Any]] = []
+    warnings: list[dict[str, str]] = []
+    totals = {"brushes_created": 0, "faces": 0, "off_grid_vertices": 0}
+    result: dict[str, Any] = {}
+    for i, item in enumerate(solids):
+        label = item["label"]
+        tex = item.get("textures", textures)
+        try:
+            result = k.solid_commit(
+                candidate,
+                item["ir"],
+                tex,
+                g,
+                item.get("target_classname", "worldspawn"),
+                False,
+                label,
+                bool(item.get("new_entity", False)),
+                item.get("target_entity"),
+            )
+        except ValueError as e:
+            raise ToolError(f"solids[{i}] (label {label!r}): {e}; nothing was committed") from e
+        for key in totals:
+            totals[key] += int(result.get(key) or 0)
+        warnings += [{"label": label, "warning": w} for w in result.get("warnings") or []]
+        made.append(
+            {"label": label, "brushes": result["brushes_created"], "entity": result["entity"]}
+        )
+        if store is not None:
+            _sidecar.record(
+                store,
+                label,
+                item["ir"],
+                brushes=result["brushes_created"],
+                textures=tex,
+                grid=g,
+                provenance=_fingerprints(_generated(candidate, label)),
+            )
+
+    out: dict[str, Any] = {"committed": len(made), "solids": made, **totals}
+    if warnings:
+        out["warnings"] = warnings
+    out["map_brushes_now"] = result.get("map_brushes_now")
+    if store is not None:
+        sidecar = _sidecar.sidecar_path(SESSION.path)
+        SESSION.stage_file(sidecar, _sidecar.encode(store))
+        out["sidecar"] = str(sidecar)
+    SESSION.map = candidate
+    out["next"] = "call map_save to write the map, or render_contact_sheet to look at it"
+    return out
 
 
 @tool("sculpt", "Add a curved surface", writes=True)
@@ -159,17 +317,18 @@ def patch_commit(
     """Add a curved surface - brushes cannot curve, so the engine draws curves from patches.
 
     Kinds:
-      - `cylinder`: a vertical column. `centre` is the middle of its base, `length` its height.
+      - `cylinder`: a column or pipe along `axis` (`x`, `y`, or default `z`). `centre` is
+        the circle's centre at the starting end; `length` extends along the positive axis.
       - `arch`: a half-round vault spanning a doorway or corridor, running along `axis`
         (`x` or `y`). `centre` is the middle of the circle at one end, on the springing line;
         `length` is the depth along the axis.
-      - `bevel`: a quarter-round, vertical, for softening a corner. `start_deg` (0, 90, 180,
-        270) picks the quarter; `centre` and `length` as for a cylinder.
+      - `bevel`: a quarter-round for softening a corner, vertical by default. `start_deg`
+        (0, 90, 180, 270) picks the quarter; `centre`, `length`, and `axis` as for a cylinder.
 
     `facing` is the side that is drawn: `out` (default for cylinder and bevel) or `in` (default
-    for an arch, seen from below). A patch is a surface, not a solid: it does not seal the map
-    and players walk through it unless something solid - usually a clip brush - stands behind
-    it. Nothing reaches disk until `map_save`.
+    for an arch, seen from below). Patches do not seal the map. Player collision depends on
+    the shader's contents; solid patches collide in game but are omitted from the analysis
+    grid. Clip brushes can provide simpler collision. Nothing reaches disk until `map_save`.
     """
     m = SESSION.require()
     k = _kernel()
@@ -187,7 +346,9 @@ def patch_commit(
         result = k.patch_commit(m, spec, shader, target_classname, new_entity, target_entity, label)
     except ValueError as e:
         raise ToolError(str(e)) from e
-    result["next"] = "map_save to write it; a clip brush behind it makes it solid to players"
+    result["next"] = (
+        "map_save to write it; check shader collision in game or add simple clip geometry"
+    )
     return result
 
 
@@ -248,7 +409,7 @@ def solid_inspect(name: str | None = None, ir: dict | None = None) -> dict:
         if SESSION.path is None:
             raise ToolError("no map is open, so there is no sidecar to read.")
         try:
-            entry = solids.get(SESSION.path, name)
+            _, entry = _entry(name)
         except solids.SolidStoreError as e:
             raise ToolError(str(e)) from e
         ir = entry["ir"]
@@ -263,7 +424,7 @@ def solid_list() -> dict:
     """Solid IR trees recorded for the open map, with their brush counts."""
     _require_path()
     try:
-        store = solids.load(SESSION.path)
+        store = _store()
     except solids.SolidStoreError as e:
         raise ToolError(str(e)) from e
     return {
@@ -275,19 +436,43 @@ def solid_list() -> dict:
     }
 
 
-def _recompile_param(name: str, path: str, value: Any) -> tuple[Path, dict, dict, dict]:
-    """The shared half of the two param tools: edit the tree and compile both versions."""
-    sidecar = _require_path()
+def _recompile_param(name: str, path: str, value: Any) -> dict:
+    """Prepare an exact replacement on a working copy, including its staged sidecar."""
+    m = SESSION.require()
+    store, entry = _entry(name)
+    original = _generated(m, name)
+    if not entry.get("provenance"):
+        raise ToolError(
+            "this older solid has no brush provenance; automatic replacement is refused. "
+            "Recreate it with a new label to enable guarded parameter editing"
+        )
+    if not original or _fingerprints(original) != entry["provenance"]:
+        raise ToolError(
+            f"generated brushes for {name!r} changed or are missing; nothing changed. "
+            "Manual geometry, textures and flags are preserved"
+        )
+    entities = {ei for ei, _, _ in original}
+    if len(entities) != 1:
+        raise ToolError(
+            f"generated brushes for {name!r} were split across entities; nothing changed"
+        )
     try:
-        entry = solids.get(sidecar, name)
         edited = solids.edit_param(entry["ir"], path, value)
     except solids.SolidStoreError as e:
         raise ToolError(str(e)) from e
 
     k = _kernel()
     try:
-        before = k.solid_compile(entry["ir"], None, SESSION.grid)
-        after = k.solid_compile(edited, None, SESSION.grid)
+        textures = entry.get("textures")
+        grid = entry.get("grid", SESSION.grid)
+        before = k.solid_compile(entry["ir"], textures, grid)
+        after = k.solid_compile(edited, textures, grid)
+        replacement = k.Map.parse('{\n"classname" "worldspawn"\n}\n')
+        k.solid_commit(replacement, edited, textures, grid, "worldspawn", False, name)
+        candidate = m.copy()
+        candidate.replace_brushes(
+            next(iter(entities)), [(pi, source) for _, pi, source in original], replacement.source()
+        )
     except ValueError as e:
         # The parameter was structurally valid and still produced impossible geometry, so
         # the tree comes back in the message — it is what the caller needs to adjust.
@@ -297,12 +482,29 @@ def _recompile_param(name: str, path: str, value: Any) -> tuple[Path, dict, dict
         ) from e
 
     keep = ("brushes", "faces", "bounds", "volume")
-    return (
-        sidecar,
+    solids.record(
+        store,
+        name,
         edited,
-        {kk: before[kk] for kk in keep},
-        {kk: after[kk] for kk in keep},
+        brushes=after["brushes"],
+        notes=f"edited {path}",
+        textures=textures,
+        grid=grid,
+        provenance=_fingerprints(_generated(candidate, name)),
     )
+    return {
+        "map": candidate,
+        "store": store,
+        "report": {
+            "name": name,
+            "path": path,
+            "value": value,
+            "ir": edited,
+            "before": {kk: before[kk] for kk in keep},
+            "after": {kk: after[kk] for kk in keep},
+            "brushes_replaced": len(original),
+        },
+    }
 
 
 @tool("sculpt", "Preview a parameter change")
@@ -318,42 +520,28 @@ def solid_param_preview(name: str, path: str, value: Any) -> dict:
 
     Nothing is recorded and nothing is drawn. `solid_edit_param` is the one that writes.
     """
-    _, edited, before, after = _recompile_param(name, path, value)
-    return {
-        "name": name,
-        "path": path,
-        "value": value,
-        "before": before,
-        "after": after,
-        "ir": edited,
-        "recorded": False,
-    }
+    prepared = _recompile_param(name, path, value)
+    return {**prepared["report"], "recorded": False}
 
 
-@tool("sculpt", "Record a parameter change", writes=True)
+@tool("sculpt", "Replace a generated solid", writes=True, destructive=True)
 def solid_edit_param(name: str, path: str, value: Any) -> dict:
-    """Change one parameter of a recorded solid and **record** the edited tree.
+    """Change one parameter and replace exactly the solid's unchanged generated brushes.
 
     `solid_param_preview` takes the same arguments and reports the same numbers without
     writing; call that first.
 
-    This writes the edited tree to the `<map>.solids.json` sidecar. The old brushes are
-    **not** removed automatically — that would mean guessing which brushes came from this
-    solid, and guessing wrong would delete a mapper's work. Delete them yourself, then call
-    `solid_commit` to draw the new ones.
+    Geometry, textures, flags and comments are fingerprinted at creation. If any generated
+    brush changed manually, replacement is refused. Other brushes and entity keys are kept.
+    The recorded textures and grid are reused. Map and sidecar stay staged until map_save;
+    a map checkpoint can undo both together.
     """
-    sidecar, edited, before, after = _recompile_param(name, path, value)
-    solids.put(sidecar, name, edited, brushes=after["brushes"], notes=f"edited {path}")
+    prepared = _recompile_param(name, path, value)
+    SESSION.stage_file(solids.sidecar_path(_require_path()), solids.encode(prepared["store"]))
+    SESSION.map = prepared["map"]
     return {
-        "name": name,
-        "path": path,
-        "value": value,
-        "before": before,
-        "after": after,
-        "ir": edited,
+        **prepared["report"],
         "recorded": True,
-        "next": (
-            "the sidecar now holds the edited tree; delete the old brushes, then call "
-            "solid_commit to draw the new ones"
-        ),
+        "staged": True,
+        "next": "render_contact_sheet to inspect the replacement; map_save writes map and sidecar",
     }

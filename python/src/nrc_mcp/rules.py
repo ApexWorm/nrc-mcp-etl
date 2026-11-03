@@ -24,6 +24,9 @@ would have failed correct maps (`docs/spec-corrections.md`).
     Entities of `classname` must have `key` in `values`.
 `key_required`
     Entities of `classname` must have `key` at all.
+`key_forbidden`
+    Entities of `classname` must not have `key` (or any of `keys`), even empty. With
+    `when_keys`, only entities that have every one of those keys are checked.
 `distinct_group_per_team`
     For entities of `classname` selected by a gametype list, no `group_key` value may be
     shared between two different `team_key` values.
@@ -41,7 +44,8 @@ would have failed correct maps (`docs/spec-corrections.md`).
     Every value of each key in `keys` must name an entity's `targetname_key`. Keys in
     `list_keys` hold several names, split on `separator`. `classname` narrows the entities
     checked; without it every entity is. `exclude_classnames` skips classes whose key of the
-    same name means something else.
+    same name means something else. With `target_classes`, a name must name an entity of one
+    of those classes. `case_sensitive: false` matches names as the engine's Q_stricmp does.
 `flags_any`
     Entities of `classname` must have at least one of the spawnflag values in `flags`.
 `targeted_by`
@@ -55,11 +59,23 @@ would have failed correct maps (`docs/spec-corrections.md`).
     On entities of `classname` where both of the two `keys` are set, their resolved entries
     must be equally many.
 `key_pattern`
-    Where entities of `classname` have `key`, its value must match the regular expression
-    `pattern` in full.
+    Where entities of `classname` (every entity, without one) have `key`, its value must match
+    the regular expression `pattern` in full.
+`forbid`
+    No entity of `classname` may match the selection: every spawnflag in `when_flags_all`, one
+    in `when_flags_any`, none in `when_flags_none`, every key in `when_keys` set and none in
+    `when_keys_absent`. For combinations the engine ignores or mishandles.
+`second_target`
+    Where the `key` of an entity of `classname` names first one of `first_classes`, a second
+    entity of that name must be one of `second_classes`. With `distinct_flags`, the rule
+    instead checks only seconds of those classes, which must be on a different side (the
+    first of those spawnflags it sets, else the last).
+
+`key_required`, `key_forbidden`, `flags_any` and `flag_count_min` take `classnames` (a list)
+in place of `classname`, and then count the entities of all of them together.
 
 Every check may carry `applies_when: {classname_present: X}` so a rule about one gametype
-stays silent on maps that do not use it. `classname_absent: X` and
+stays silent on maps that do not use it. `classname_absent: X` (or a list, all absent) and
 `flag_present: {classname: X, flag: N}` (or a list of those, any matching) narrow it further.
 """
 
@@ -130,6 +146,13 @@ def _of_class(entities: list[dict], classname: str) -> list[dict]:
     return [e for e in entities if e.get("classname") == classname]
 
 
+def _of_classes(p: dict, entities: list[dict]) -> list[dict]:
+    """Entities of the rule's `classnames`, or of its one `classname`."""
+    names = p.get("classnames")
+    wanted = {str(n) for n in names} if names else {str(p.get("classname", ""))}
+    return [e for e in entities if e.get("classname") in wanted]
+
+
 def _gametype_list(value: str) -> set[str]:
     """Parse a gametype key value.
 
@@ -169,7 +192,8 @@ def _applies(rule: dict, entities: list[dict]) -> bool:
     if present and not _of_class(entities, str(present)):
         return False
     absent = cond.get("classname_absent")
-    if absent and _of_class(entities, str(absent)):
+    absent_names = absent if isinstance(absent, list) else [absent] if absent else []
+    if any(_of_class(entities, str(name)) for name in absent_names):
         return False
     # `flag_present`: some entity of a class has a spawnflag set. A list means any of them.
     wanted = cond.get("flag_present")
@@ -227,12 +251,29 @@ def _check_key_in_enum(p: dict, entities: list[dict]) -> tuple[bool, dict]:
 def _check_key_required(p: dict, entities: list[dict]) -> tuple[bool, dict]:
     cls = str(p.get("classname", ""))
     key = str(p.get("key", ""))
-    missing = [e["index"] for e in _of_class(entities, cls) if key not in _keys(e)]
+    missing = [e["index"] for e in _of_classes(p, entities) if key not in _keys(e)]
     return not missing, {
         "found": len(missing),
         "classname": cls,
         "key": key,
         "entities": missing,
+    }
+
+
+def _check_key_forbidden(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    keys = [str(k) for k in p.get("keys") or [p.get("key", "")]]
+    when = [str(k) for k in p.get("when_keys") or []]
+    bad: list[tuple[int, str, str]] = []
+    for e in _of_classes(p, entities):
+        k = _keys(e)
+        hit = next((key for key in keys if key in k), None)
+        if hit is not None and all(w in k for w in when):
+            bad.append((e["index"], hit, k.get(hit)))
+    return not bad, {
+        "found": len(bad),
+        "key": " or ".join(keys),
+        "detail": [f"entity {i} {key} {v!r}" for i, key, v in bad[:8]],
+        "entities": [i for i, _, _ in bad],
     }
 
 
@@ -313,7 +354,7 @@ def _check_flag_count_min(p: dict, entities: list[dict]) -> tuple[bool, dict]:
     cls = str(p.get("classname", ""))
     flag = int(p.get("flag", 0))
     want = int(p.get("count", 1))
-    members = _of_class(entities, cls)
+    members = _of_classes(p, entities)
     flagged = [e for e in members if spawnflags(e) & flag]
     return len(flagged) >= want, {
         "found": len(flagged),
@@ -351,7 +392,14 @@ def _check_targets_resolve(p: dict, entities: list[dict]) -> tuple[bool, dict]:
     silent until the moment it was meant to do something.
     """
     name_key = str(p.get("targetname_key", "targetname"))
-    names = {v for e in entities if (v := _keys(e).get(name_key, "").strip())}
+    fold = p.get("case_sensitive", True) is False
+    classes = {str(c) for c in p.get("target_classes") or []}
+    names = {
+        v.lower() if fold else v
+        for e in entities
+        if (v := _keys(e).get(name_key, "").strip())
+        and (not classes or e.get("classname") in classes)
+    }
     single = [str(k) for k in p.get("keys") or []]
     lists = [str(k) for k in p.get("list_keys") or []]
     sep = str(p.get("separator", ";"))
@@ -367,7 +415,7 @@ def _check_targets_resolve(p: dict, entities: list[dict]) -> tuple[bool, dict]:
             raw = k.get(key, "")
             values = raw.split(sep) if key in lists else [raw]
             for v in (v.strip() for v in values):
-                if v and v not in names:
+                if v and (v.lower() if fold else v) not in names:
                     dangling.append((e["index"], key, v))
     return not dangling, {
         "found": len(dangling),
@@ -414,11 +462,7 @@ def _flags(e: dict) -> int:
 
 def _check_flags_any(p: dict, entities: list[dict]) -> tuple[bool, dict]:
     want = [int(f) for f in p.get("flags") or []]
-    bad = [
-        e
-        for e in _of_class(entities, str(p.get("classname", "")))
-        if not any(_flags(e) & f for f in want)
-    ]
+    bad = [e for e in _of_classes(p, entities) if not any(_flags(e) & f for f in want)]
     return not bad, {
         "found": len(bad),
         "expected": " or ".join(str(f) for f in want),
@@ -503,14 +547,79 @@ def _check_list_counts_match(p: dict, entities: list[dict]) -> tuple[bool, dict]
 def _check_key_pattern(p: dict, entities: list[dict]) -> tuple[bool, dict]:
     key = str(p.get("key", ""))
     pattern = re.compile(str(p.get("pattern", "")))
+    cls = p.get("classname")
     bad = [
         (e["index"], v)
-        for e in _of_class(entities, str(p.get("classname", "")))
+        for e in (_of_class(entities, str(cls)) if cls else entities)
         if (v := _keys(e).get(key)) is not None and not pattern.fullmatch(v)
     ]
     return not bad, {
         "found": len(bad),
         "detail": [f"entity {i} {key} {v!r}" for i, v in bad[:8]],
+        "entities": [i for i, _ in bad],
+    }
+
+
+def _selected(p: dict, entities: list[dict]) -> list[dict]:
+    """Entities of `classname` narrowed by spawnflags and by which keys they carry."""
+    all_of = [int(f) for f in p.get("when_flags_all") or []]
+    any_of = [int(f) for f in p.get("when_flags_any") or []]
+    none_of = [int(f) for f in p.get("when_flags_none") or []]
+    has = [str(k) for k in p.get("when_keys") or []]
+    lacks = [str(k) for k in p.get("when_keys_absent") or []]
+    out = []
+    for e in _of_class(entities, str(p.get("classname", ""))):
+        f, k = _flags(e), _keys(e)
+        if not all(f & x for x in all_of) or (any_of and not any(f & x for x in any_of)):
+            continue
+        if any(f & x for x in none_of):
+            continue
+        if not all(k.get(x, "").strip() for x in has) or any(k.get(x, "").strip() for x in lacks):
+            continue
+        out.append(e)
+    return out
+
+
+def _check_forbid(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    bad = _selected(p, entities)
+    return not bad, {"found": len(bad), "entities": [e["index"] for e in bad]}
+
+
+def _check_second_target(p: dict, entities: list[dict]) -> tuple[bool, dict]:
+    """What a trigger's target names after the first match, which the engine also links.
+
+    The engine takes the first entity with the name, then looks on for a second when the first
+    is one of `first_classes`. The second must be one of `second_classes`, and, when
+    `distinct_flags` is given, belong to a different side: the first of those flags it sets,
+    else the last flag.
+    """
+    key = str(p.get("key", "target"))
+    name_key = str(p.get("name_key", "targetname"))
+    firsts = {str(c) for c in p.get("first_classes") or []}
+    seconds = {str(c) for c in p.get("second_classes") or []}
+    sides = [int(f) for f in p.get("distinct_flags") or []]
+
+    def side(e: dict) -> int:
+        return next((f for f in sides if _flags(e) & f), sides[-1] if sides else 0)
+
+    bad: list[tuple[int, str]] = []
+    for e in _of_class(entities, str(p.get("classname", ""))):
+        want = _keys(e).get(key, "").strip().lower()
+        named = [x for x in entities if want and _keys(x).get(name_key, "").strip().lower() == want]
+        if len(named) < 2 or named[0].get("classname") not in firsts:
+            continue
+        first, second = named[0], named[1]
+        if seconds and second.get("classname") not in seconds:
+            # A rule about sides leaves the wrong class to the rule about classes.
+            if not sides:
+                bad.append((e["index"], f"{want!r} also names a {second.get('classname')}"))
+        elif sides and side(first) == side(second):
+            bad.append(
+                (e["index"], f"{want!r} names entities {first['index']} and {second['index']}")
+            )
+    return not bad, {
+        "found": len(bad),
+        "detail": [f"entity {i}: {d}" for i, d in bad[:8]],
         "entities": [i for i, _ in bad],
     }
 
@@ -522,6 +631,7 @@ CHECKS = {
     "count_max": lambda p, e: _check_count(p, e, "max"),
     "key_in_enum": lambda p, e: _check_key_in_enum(p, e),
     "key_required": lambda p, e: _check_key_required(p, e),
+    "key_forbidden": lambda p, e: _check_key_forbidden(p, e),
     "distinct_group_per_team": lambda p, e: _check_distinct_group_per_team(p, e),
     "forbid_gametype": lambda p, e: _check_forbid_gametype(p, e),
     "group_size": lambda p, e: _check_group_size(p, e),
@@ -534,6 +644,8 @@ CHECKS = {
     "list_targets": lambda p, e: _check_list_targets(p, e),
     "list_counts_match": lambda p, e: _check_list_counts_match(p, e),
     "key_pattern": lambda p, e: _check_key_pattern(p, e),
+    "forbid": lambda p, e: _check_forbid(p, e),
+    "second_target": lambda p, e: _check_second_target(p, e),
 }
 
 

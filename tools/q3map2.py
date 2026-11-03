@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -313,8 +314,8 @@ def compile_map(
         root = stage_dir or find_windows_workdir()
         if root is None:
             raise Q3Map2Error("staging required but no Windows work directory available")
-        workdir = root / map_path.stem
-        workdir.mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
+        workdir = Path(tempfile.mkdtemp(prefix=f"{map_path.stem}-", dir=root))
         work_map = workdir / map_path.name
         shutil.copyfile(map_path, work_map)
         staged = True
@@ -332,7 +333,10 @@ def compile_map(
     # Collect artefacts before any cleanup, and copy them out of staging so a compile is
     # reproducible from the repo without reaching into a Windows temp directory.
     artifacts: list[str] = []
-    out_dir = Path(os.environ.get("NRC_ROOT", ".")) / "out" / map_path.stem
+    out_dir = Path(
+        os.environ.get("NRC_BUILD_OUTPUT")
+        or Path(os.environ.get("NRC_ROOT", ".")) / "out" / map_path.stem
+    )
     for suffix in ARTIFACT_SUFFIXES:
         produced = work_map.with_suffix(suffix)
         if produced.exists():

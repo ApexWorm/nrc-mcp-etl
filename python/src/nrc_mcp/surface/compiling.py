@@ -6,14 +6,22 @@ annotations. See `nrc_mcp.server` for how the surface is assembled and scoped.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
+from mcp.server.mcpserver import Image as _Image
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import bsp as bspmod
+from .. import detail as detailmod
 from .. import optimize as optmod
+from .. import playtest as playtestmod
 from .. import profiles
+from ..detail import Detail
+from ..engine import EngineError
 from ..kernel import repo_root, run_mise_task
 from ..runtime import (
     SESSION,
@@ -21,6 +29,54 @@ from ..runtime import (
     active_profile,
     tool,
 )
+
+
+@tool("compiling", "Play a bounded engine scenario", writes=True)
+def engine_playtest(
+    pk3: str,
+    scenario: dict,
+    profile_id: str | None = None,
+    timeout_seconds: float = 180,
+    include_images: bool = True,
+    detail: Detail = "summary",
+) -> list:
+    """Exercise a packaged map with real player controls and fresh state assertions.
+
+    Read `nrc://playtest/{profile_id}` for the scenario schema, supported inputs and fields.
+    A scenario has `watch` names and ordered `steps`: join, position, aim, weapon, hold,
+    wait, assert or screenshot. Each `until` is a list of predicates that must all match
+    one fresh observation, e.g. {"scope":"player","field":"alive","value":true}.
+    Joins wait for a living player; holds release on success, timeout and failure.
+
+    `position` and `aim` are explicit test setup. Other actions use ordinary controls;
+    the profile observer reads state without changing entities or executing scripts.
+    Steps have bounded timeouts, with an overall limit of 600 seconds. An isolated game
+    home, commands, observations, screenshots and result.json are retained even on failure.
+    This tests a single client, not multiplayer balance. Requires a supported profile,
+    POSIX console transport, game data and a display (or Xvfb).
+
+    Returns the JSON receipt and, by default, the last three screenshot image blocks.
+    `include_images=false` returns just the JSON receipt; all image paths remain recorded.
+    `detail="summary"` (default) gives passing steps as verdicts and failed steps in full;
+    `"full"` adds every observation, the scenario echo and the command line.
+    """
+    full = detailmod.wants_full(detail)
+    path = Path(pk3)
+    if not path.is_absolute():
+        path = repo_root() / path
+    pid = profile_id or active_profile()
+    if not pid:
+        raise ToolError("select a profile or pass profile_id")
+    try:
+        report = playtestmod.run(path, pid, scenario, timeout_seconds=timeout_seconds)
+    except (EngineError, profiles.ProfileError, OSError, ValueError) as e:
+        raise ToolError(str(e)) from e
+    content = [json.dumps(report if full else detailmod.engine_playtest(report))]
+    if include_images:
+        content.extend(
+            _Image(data=Path(p).read_bytes(), format="jpeg") for p in report["screenshots"][-3:]
+        )
+    return content
 
 
 @tool("compiling", "Compile with q3map2", writes=True)
@@ -32,15 +88,71 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
 
     On a WSL host where q3map2 is a Windows binary, the wrapper stages the map onto the
     Windows filesystem and copies artefacts back to `out/` — paths are handled for you.
+
+    With no path (or the open map's path), compile a snapshot of the current unsaved map
+    and staged companions. The result identifies that revision and its retained build folder.
     """
     if preset not in ("draft", "iterate", "quality", "final"):
         raise ToolError(f"unknown preset {preset!r} — choose draft, iterate, quality or final.")
-    target = path
-    if target is None:
+    explicit = Path(path) if path else None
+    if explicit is not None and not explicit.is_absolute():
+        explicit = repo_root() / explicit
+    use_session = explicit is None or (
+        SESSION.path is not None and explicit.resolve() == SESSION.path.resolve()
+    )
+    receipt = None
+    if use_session:
+        SESSION.require()
         if SESSION.path is None:
             raise ToolError("no map is open and no path was given.")
-        target = str(SESSION.path)
-    run = run_mise_task(f"compile:{preset}", [target])
+        receipt = SESSION.receipt()
+        source = SESSION.path.resolve()
+        builds = repo_root() / "out" / "builds"
+        builds.mkdir(parents=True, exist_ok=True)
+        build = Path(
+            tempfile.mkdtemp(prefix=f"{source.stem}-{receipt['sha256'][:12]}-", dir=builds)
+        )
+        target = build / "maps" / source.name
+        target.parent.mkdir()
+        root = source.parent.parent if source.parent.name.lower() == "maps" else source.parent
+        # Keep asset resolution intact without copying a whole texture/model library.
+        for name in ("textures", "models", "sound", "sounds", "video", "levelshots"):
+            if (root / name).exists():
+                (build / name).symlink_to(root / name, target_is_directory=True)
+        if (root / "scripts").is_dir():
+            shutil.copytree(root / "scripts", build / "scripts")
+        for companion in source.parent.iterdir():
+            if companion.resolve() in SESSION.baseline_files:
+                continue
+            if companion.is_file() and companion.suffix.lower() not in (
+                ".map",
+                ".bsp",
+                ".prt",
+                ".srf",
+                ".lin",
+                ".pk3",
+            ):
+                shutil.copy2(companion, target.parent / companion.name)
+        for companion, data in {**SESSION.baseline_files, **SESSION.pending_files}.items():
+            if data is not None and companion != source and companion.parent == source.parent:
+                (target.parent / companion.name).write_bytes(data)
+        target.write_text(SESSION.require().source(), encoding="utf-8", newline="")
+        (build / "revision.json").write_text(
+            json.dumps(
+                {"revision": receipt, "profile": active_profile(), "preset": preset}, indent=2
+            )
+            + "\n"
+        )
+    else:
+        target = explicit
+    run = run_mise_task(
+        f"compile:{preset}",
+        [str(target)],
+        extra_env={"NRC_BUILD_OUTPUT": str(target.parent)} if receipt is not None else None,
+    )
+    if receipt is not None:
+        run["revision"] = receipt
+        run["build_directory"] = str(build)
     # The wrapper's own report, lifted out of the task output: whether the map leaked (and
     # why, when there is no pointfile to trace) is the first thing to know after a compile.
     report = optmod._last_json_object(run.get("stdout") or "")
@@ -48,6 +160,12 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
         run["leaked"] = bool(report.get("leaked"))
         run["hint"] = report.get("hint") or ""
         run["artifacts"] = report.get("artifacts") or []
+    if receipt is not None:
+        SESSION.last_compile = {
+            "source": str(target),
+            "revision": receipt,
+            "artifacts": run.get("artifacts", []),
+        }
     return run
 
 
@@ -141,9 +259,13 @@ def structural_audit(grid: int | None = None, limit: int = 50) -> dict:
     """
     _require_path()
     try:
-        return optmod.structural_audit(
-            SESSION.path, grid if grid is not None else SESSION.grid, limit=limit
+        report = optmod.structural_audit(
+            SESSION.path,
+            grid if grid is not None else SESSION.grid,
+            limit=limit,
+            game_map=SESSION.require(),
         )
+        return {**report, "revision": SESSION.receipt()}
     except (OSError, ValueError) as e:
         raise ToolError(str(e)) from e
 
@@ -155,8 +277,7 @@ def hint_suggest(prt_path: str, limit: int = 10) -> dict:
     Needs a `.prt`, which `-vis -saveprt` writes: compile with the `final` preset, or run
     `task_run("compile:final", [map])`.
 
-    §6.1 calls this "tedious, high-skill, high-payoff work that almost nobody does properly by
-    hand". Each suggestion names the leaf, its portal count and a proposed splitting plane, with a
+    Each suggestion names the leaf, its portal count and a proposed splitting plane, with a
     predicted before/after — predicted, because confirming it needs another `-vis` run.
     """
     p = Path(prt_path)
@@ -182,9 +303,16 @@ def leak_trace(lin_path: str | None = None) -> dict:
     detail and non-opaque), detail brushes, and model entities, which never seal. Shaders are
     looked up in the base game (with the game path set) and the map's own scripts.
 
-    Defaults to the `.lin` beside the open map.
+    Defaults to the most recent session build's `.lin`, with that build's revision.
+    Without a session build, checks beside the open map. Explicit paths remain supported.
     """
-    if lin_path:
+    build = SESSION.last_compile if lin_path is None else None
+    source = SESSION.path
+    if build:
+        source = Path(build["source"])
+        candidates = [Path(p) for p in build["artifacts"] if str(p).endswith(".lin")]
+        p = candidates[0] if candidates else source.with_suffix(".lin")
+    elif lin_path:
         p = Path(lin_path)
         if not p.is_absolute():
             p = repo_root() / p
@@ -203,12 +331,16 @@ def leak_trace(lin_path: str | None = None) -> dict:
     pid = active_profile() or None
     base = _basegame_dir(os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH"), pid)
     try:
-        return optmod.leak_trace(
+        report = optmod.leak_trace(
             p,
-            SESSION.path,
+            source,
             profile_id=pid,
             basegame_dirs=[base] if base and Path(base).is_dir() else None,
         )
+        if build:
+            report["revision"] = build["revision"]
+            report["stale"] = build["revision"] != SESSION.receipt()
+        return report
     except (OSError, ValueError) as e:
         raise ToolError(str(e)) from e
 
@@ -245,7 +377,10 @@ def shader_audit(
             "hint": "pass shader_dirs or basegame_dir, or set the game path in mise.local.toml",
         }
     try:
-        return optmod.shader_audit(SESSION.path, dirs, pid, [basegame] if basegame else None)
+        report = optmod.shader_audit(
+            SESSION.path, dirs, pid, [basegame] if basegame else None, game_map=SESSION.require()
+        )
+        return {**report, "revision": SESSION.receipt()}
     except (OSError, ValueError) as e:
         raise ToolError(str(e)) from e
 

@@ -1,0 +1,218 @@
+{
+  "steps": [
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40
+    },
+    {
+      "action": "screenshot",
+      "name": "red_spawn"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40
+    },
+    {
+      "action": "screenshot",
+      "name": "blue_spawn"
+    },
+    {
+      "action": "position",
+      "origin": [
+        320,
+        128,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "until": [
+        {
+          "scope": "player",
+          "field": "position.0",
+          "value": 1200,
+          "op": "gt"
+        },
+        {
+          "scope": "player",
+          "field": "stance",
+          "value": "stand"
+        }
+      ],
+      "timeout": 8,
+      "controls": [
+        "forward"
+      ]
+    },
+    {
+      "action": "screenshot",
+      "name": "standing_exit"
+    },
+    {
+      "action": "position",
+      "origin": [
+        320,
+        384,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 1.5,
+      "timeout": 3
+    },
+    {
+      "action": "assert",
+      "until": [
+        {
+          "scope": "player",
+          "field": "position.0",
+          "value": 384,
+          "op": "lt"
+        },
+        {
+          "scope": "player",
+          "field": "stance",
+          "value": "stand"
+        }
+      ],
+      "timeout": 30
+    },
+    {
+      "action": "screenshot",
+      "name": "crouch_blocked"
+    },
+    {
+      "action": "hold",
+      "until": [
+        {
+          "scope": "player",
+          "field": "position.0",
+          "value": 1200,
+          "op": "gt"
+        },
+        {
+          "scope": "player",
+          "field": "stance",
+          "value": "crouch"
+        },
+        {
+          "scope": "player",
+          "field": "alive",
+          "value": true
+        }
+      ],
+      "timeout": 18,
+      "controls": [
+        "forward",
+        "crouch"
+      ]
+    },
+    {
+      "action": "screenshot",
+      "name": "crouch_exit"
+    },
+    {
+      "action": "position",
+      "origin": [
+        320,
+        640,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 1.5,
+      "timeout": 3
+    },
+    {
+      "action": "assert",
+      "until": [
+        {
+          "scope": "player",
+          "field": "position.0",
+          "value": 384,
+          "op": "lt"
+        },
+        {
+          "scope": "player",
+          "field": "stance",
+          "value": "stand"
+        }
+      ],
+      "timeout": 30
+    },
+    {
+      "action": "screenshot",
+      "name": "prone_blocked"
+    },
+    {
+      "action": "hold",
+      "until": [
+        {
+          "scope": "player",
+          "field": "stance",
+          "value": "prone"
+        }
+      ],
+      "timeout": 3,
+      "controls": [
+        "prone"
+      ]
+    },
+    {
+      "action": "hold",
+      "until": [
+        {
+          "scope": "player",
+          "field": "position.0",
+          "value": 1200,
+          "op": "gt"
+        },
+        {
+          "scope": "player",
+          "field": "stance",
+          "value": "prone"
+        },
+        {
+          "scope": "player",
+          "field": "alive",
+          "value": true
+        }
+      ],
+      "timeout": 18,
+      "controls": [
+        "forward"
+      ]
+    },
+    {
+      "action": "screenshot",
+      "name": "prone_exit"
+    }
+  ]
+}

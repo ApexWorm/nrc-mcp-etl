@@ -141,6 +141,7 @@
 "classname" "info_player_intermission"
 "origin" "512 64 200"
 "angles" "30 90 0"
+"spawnflags" "3"
 }
 {
 "classname" "team_WOLF_objective"

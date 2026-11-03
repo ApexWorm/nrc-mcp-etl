@@ -80,6 +80,22 @@ def test_applies_when_keeps_a_rule_silent_on_maps_that_do_not_use_it(monkeypatch
     assert len(run(rule, [ent(0, "site")], monkeypatch)) == 1
 
 
+@pytest.mark.parametrize("absent", ["fallback", ["fallback", "alternate"]])
+def test_applies_when_absent_skips_if_any_declared_fallback_exists(monkeypatch, absent):
+    rule = {
+        "id": "R",
+        "check": "count_min",
+        "severity": "error",
+        "confidence": "verified",
+        "message": "missing camera",
+        "applies_when": {"classname_absent": absent},
+        "params": {"classname": "camera", "count": 1},
+    }
+    assert len(run(rule, [ent(0, "other")], monkeypatch)) == 1
+    for name in absent if isinstance(absent, list) else [absent]:
+        assert run(rule, [ent(0, name)], monkeypatch) == []
+
+
 def test_distinct_group_per_team_is_the_corrected_survivor_rule(monkeypatch):
     rule = {
         "id": "R",
@@ -379,6 +395,44 @@ def test_the_etl_profile_refuses_a_map_a_spectator_cannot_join():
     assert codes(team_spawns)["ETL_SPECTATOR_POINT_REQUIRED"] == "error"
     for fallback in ("info_player_intermission", "info_player_deathmatch", "info_player_start"):
         assert "ETL_SPECTATOR_POINT_REQUIRED" not in codes([*team_spawns, ent(3, fallback)])
+
+
+@pytest.mark.parametrize(
+    ("flags", "missing"),
+    [
+        ([None], {"AXIS", "ALLIES"}),
+        (["0"], {"AXIS", "ALLIES"}),
+        (["1"], {"ALLIES"}),
+        (["2"], {"AXIS"}),
+        (["0", "1"], {"ALLIES"}),
+        (["1", "2"], set()),
+        (["3"], set()),
+        (["7"], set()),
+    ],
+)
+def test_etl_round_end_needs_a_camera_for_each_winner(flags, missing):
+    """A neutral camera joins fine but crashed a real workshop run on wm_endround."""
+    cameras = [
+        ent(i, "info_player_intermission", **({"SpawnFlags": flag} if flag is not None else {}))
+        for i, flag in enumerate(flags)
+    ]
+    findings = [f for f in rules.evaluate("etl", cameras) if f.code.startswith("ETL_INTERMISSION_")]
+    assert {f.code for f in findings} == {
+        f"ETL_INTERMISSION_{team}_POINT_REQUIRED" for team in missing
+    }
+    assert all(f.severity == "error" and f.confidence == "verified" for f in findings)
+    assert all("if " in f.message and "Couldn't find a spawn point" in f.message for f in findings)
+
+
+@pytest.mark.parametrize("fallback", ["info_player_deathmatch", "info_player_start"])
+@pytest.mark.parametrize("neutral_camera", [False, True])
+def test_etl_round_end_accepts_engine_fallback_spawns(fallback, neutral_camera):
+    entities = [ent(0, fallback)]
+    if neutral_camera:
+        entities.append(ent(1, "info_player_intermission"))
+    findings = rules.evaluate("etl", entities)
+    assert not any(f.code.startswith("ETL_INTERMISSION_") for f in findings)
+    assert not any(f.code == "ETL_SPECTATOR_POINT_REQUIRED" for f in findings)
 
 
 def test_the_etl_profile_errors_only_on_the_script_multiplayer_count_the_engine_stops_on():
@@ -918,6 +972,57 @@ def test_pack_pk3_drops_what_the_base_game_ships_and_says_so(packer):
     assert "maps/nrcroom.bsp" in contents, "the map's own BSP always ships"
 
 
+def test_pack_pk3_preserves_modified_asset_at_base_game_path(packer):
+    with zipfile.ZipFile(packer["install"] / "basedir" / "pak0.pk3", "w") as z:
+        z.writestr("textures/base/wall.TGA", b"original base texture")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+    with zipfile.ZipFile(r["packages"][0]) as z:
+        assert z.read("textures/base/wall.tga") == b"x", "the map's override must survive"
+
+
+@pytest.mark.parametrize("effective", [b"x", b"newer base texture"])
+def test_pack_pk3_compares_with_later_archive_not_shadowed_copy(packer, effective):
+    # Uppercase Z still sorts after lowercase pak0 in the engine's case-insensitive order.
+    with zipfile.ZipFile(packer["install"] / "basedir" / "Z_patch.pk3", "w") as z:
+        z.writestr("TEXTURES/BASE/WALL.tga", effective)
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == (["textures/base/wall.tga"] if effective == b"x" else [])
+    assert ("textures/base/wall.tga" in names(r["packages"][0])) == (effective != b"x")
+
+
+def test_pack_pk3_keeps_assets_when_base_archive_is_unreadable(packer):
+    (packer["install"] / "basedir" / "z_broken.pk3").write_bytes(b"not a zip")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+    assert "textures/base/wall.tga" in names(r["packages"][0])
+
+
+def test_pack_pk3_keeps_assets_with_ambiguous_case_colliding_archives(packer):
+    with zipfile.ZipFile(packer["install"] / "basedir" / "PAK0.pk3", "w") as z:
+        z.writestr("textures/base/wall.tga", b"x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+
+
+def test_pack_pk3_keeps_assets_with_ambiguous_members(packer):
+    with zipfile.ZipFile(packer["install"] / "basedir" / "z_patch.pk3", "w") as z:
+        z.writestr("textures/base/wall.tga", b"x")
+        z.writestr("TEXTURES/BASE/WALL.TGA", b"x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == []
+
+
+def test_fix_up_never_treats_its_input_or_previous_output_as_base_game(tmp_path):
+    base = tmp_path / "base"
+    base.mkdir()
+    produced = make_pk3(base / "z_packed.pk3", ["textures/mine/wall.tga"])
+    dest = make_pk3(base / "z_previous.pk3", ["textures/mine/wall.tga"])
+    _, dropped = pack._fix_up(produced, dest, tmp_path / "maps" / "m.bsp", {}, base)
+    assert dropped == []
+    assert names(dest) == ["textures/mine/wall.tga"]
+
+
 def test_pack_pk3_keeps_base_game_files_when_no_base_path_is_set(packer, monkeypatch):
     monkeypatch.delenv("NRC_FS_BASEPATH")
     r = pack.pack_pk3(packer["bsp"], profile_id="test")
@@ -1071,6 +1176,82 @@ def test_pack_pk3_moves_a_failed_package_out_across_devices_and_fixes_it_up(pack
     (failed,) = r["failed_packages"]
     assert "maps/nrcroom.script" in names(failed), "fixed up like a good package"
     assert not list(install.glob("*.pk3")), "nothing left in the install"
+
+
+def test_key_forbidden_reports_a_key_even_when_empty_and_honours_when_keys(monkeypatch):
+    rule = _rule("key_forbidden", classnames=["a", "b"], key="targetname")
+    assert run(rule, [ent(0, "a"), ent(1, "c", targetname="x")], monkeypatch) == []
+    (f,) = run(rule, [ent(0, "a", targetname=""), ent(1, "b", targetname="t")], monkeypatch)
+    assert f.entities == [0, 1]
+    gated = _rule("key_forbidden", classname="p", key="k5", when_keys=["k1", "k2"])
+    assert run(gated, [ent(0, "p", k1="a", k5="e")], monkeypatch) == []
+    assert run(gated, [ent(0, "p", k1="a", k2="b", k5="e")], monkeypatch)
+
+
+def test_classnames_count_entities_of_every_listed_class_together(monkeypatch):
+    rule = _rule("flag_count_min", classnames=["t1", "t2"], flag=1, count=1)
+    assert run(rule, [ent(0, "t2", spawnflags="1")], monkeypatch) == []
+    assert run(rule, [ent(0, "t1", spawnflags="2")], monkeypatch)
+    required = _rule("key_required", classnames=["t1", "t2"], key="scriptname")
+    (f,) = run(required, [ent(0, "t1", scriptname="s"), ent(1, "t2")], monkeypatch)
+    assert f.entities == [1]
+    flags = _rule("flags_any", classnames=["t1", "t2"], flags=[1, 2])
+    (f,) = run(flags, [ent(0, "t1", spawnflags="4"), ent(1, "t2", spawnflags="2")], monkeypatch)
+    assert f.entities == [0]
+
+
+def test_targets_resolve_can_demand_a_class_and_fold_case(monkeypatch):
+    rule = _rule(
+        "targets_resolve",
+        classname="pt",
+        keys=["target"],
+        target_classes=["pt"],
+        case_sensitive=False,
+    )
+    ok = [ent(0, "pt", targetname="A", target="b"), ent(1, "pt", targetname="B")]
+    assert run(rule, ok, monkeypatch) == []
+    wrong_class = [ent(0, "pt", targetname="a", target="b"), ent(1, "other", targetname="b")]
+    (f,) = run(rule, wrong_class, monkeypatch)
+    assert f.entities == [0]
+    strict = _rule("targets_resolve", keys=["target"])
+    assert run(strict, ok, monkeypatch), "names stay case-sensitive unless the rule says not"
+
+
+def test_the_etl_profile_knows_what_breaks_a_path_or_a_carried_objective():
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    world = ent(0, "worldspawn")
+
+    def found(*entities):
+        return {f.code: f.severity for f in rules.evaluate("etl", [world, *entities])}
+
+    assert found(ent(1, "script_mover"))["ETL_SCRIPT_MOVER_SCRIPTNAME"] == "error"
+    a = ent(1, "info_train_spline_main", targetname="p0", target="P1", control="c0")
+    b = ent(2, "info_train_spline_main", targetname="p1")
+    c = ent(3, "info_train_spline_control", targetname="C0")
+    clean = found(a, b, c)
+    assert not [k for k in clean if k.startswith("ETL_SPLINE") or k == "ETL_TARGETS_RESOLVE"]
+    broken = found(
+        ent(1, "info_train_spline_main", targetname="p0", target="x", control="y"),
+        ent(2, "light", targetname="x"),
+    )
+    assert broken["ETL_SPLINE_TARGET_CLASS"] == "warning"
+    assert broken["ETL_SPLINE_CONTROL_CLASS"] == "warning"
+    five = {f"control{i}" if i > 1 else "control": "c0" for i in range(1, 6)}
+    over = found(ent(1, "info_train_spline_main", targetname="p", **five), c)
+    assert over["ETL_SPLINE_CONTROL_LIMIT"] == "error"
+
+    docs = ent(1, "team_CTF_redflag", scriptname="docs", targetname="docs", model="m.md3")
+    codes = found(docs)
+    assert codes["ETL_CARRY_TARGETNAME"] == "warning"
+    assert codes["ETL_CARRY_DELIVERY_RED"] == "warning"
+    assert "ETL_CARRY_DELIVERY_BLUE" not in codes
+    wrong_team = ent(2, "trigger_flagonly_multiple", scriptname="d", spawnflags="2")
+    assert "ETL_CARRY_DELIVERY_RED" in found(docs, wrong_team)
+    right = ent(2, "trigger_flagonly_multiple", scriptname="d", spawnflags="1")
+    assert "ETL_CARRY_DELIVERY_RED" not in found(docs, right)
+    codes = found(ent(1, "team_CTF_blueflag", scriptname="d"), ent(2, "trigger_flagonly"))
+    assert {"ETL_CARRY_MODEL", "ETL_FLAGONLY_TEAM", "ETL_FLAGONLY_SCRIPTNAME"} <= set(codes)
 
 
 # ---------------------------------------------------------------------------

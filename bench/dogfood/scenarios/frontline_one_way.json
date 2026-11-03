@@ -1,0 +1,27 @@
+{
+  "watch": ["fwdflag"],
+  "steps": [
+    {"action": "join", "team": "red", "role": "engineer", "timeout": 40},
+    {"action": "position", "origin": [1612, 384, 24], "angles": [0, 180, 0]},
+    {"action": "hold", "controls": ["forward"], "seconds": 1.5, "timeout": 10},
+    {"action": "screenshot", "name": "axis_cannot_raise"},
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 40},
+    {"action": "assert", "until": [{"scope": "player", "field": "position.0", "value": 600, "op": "lt"}]},
+    {"action": "position", "origin": [1460, 384, 24], "angles": [0, 0, 0]},
+    {"action": "hold", "controls": ["forward"], "seconds": 1.5, "timeout": 10},
+    {"action": "screenshot", "name": "allies_raise"},
+    {"action": "join", "team": "red", "role": "engineer", "timeout": 40},
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 40},
+    {"action": "assert", "until": [
+      {"scope": "player", "field": "position.0", "value": 1300, "op": "gt"},
+      {"scope": "player", "field": "position.0", "value": 1800, "op": "lt"}
+    ]},
+    {"action": "join", "team": "red", "role": "engineer", "timeout": 40},
+    {"action": "position", "origin": [1612, 384, 24], "angles": [0, 180, 0]},
+    {"action": "hold", "controls": ["forward"], "seconds": 1.5, "timeout": 10},
+    {"action": "screenshot", "name": "axis_lower"},
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 40},
+    {"action": "assert", "until": [{"scope": "player", "field": "position.0", "value": 600, "op": "lt"}]},
+    {"action": "screenshot", "name": "allies_back_at_camp"}
+  ]
+}

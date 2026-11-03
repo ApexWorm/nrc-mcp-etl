@@ -342,6 +342,11 @@ depends     = ["kernel:build"]
 # Modes: --check (free), --estimate (one count_tokens call), --run (spends).
 run         = "uv run --with anthropic python tools/tier2.py"
 
+[tasks."bench:dogfood"]
+description = "Build example maps over MCP or exercise their gameplay in the engine"
+depends     = ["kernel:build"]
+run         = "uv run python tools/dogfood.py"
+
 [tasks."selfdev:protected"]
 description = "Verify the hash pins on paths self-dev may not touch (§11.4)"
 run         = "uv run python tools/protected.py --verify"
