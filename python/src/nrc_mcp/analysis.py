@@ -1202,7 +1202,15 @@ def collect_solids(
                 provenance["brushes_nonsolid_entity"] += 1
                 continue
             shaders = [str(s) for s in geometry.get("shaders") or []]
-            if shaders and all(_nonsolid_shader(s, nonsolid_fragments) for s in shaders):
+            # q3map2 ORs the contents of a brush's sides (map.cpp:517-537): it stops a player
+            # only if some side's shader does. A side counts as clear by its name, or when
+            # the shader scripts define it without solid contents (an alphaMod volume,
+            # water); a shader no script defines stays solid, as the compiler makes it.
+            if shaders and all(
+                _nonsolid_shader(s, nonsolid_fragments)
+                or (contents is not None and contents.blocks_player(s) is False)
+                for s in shaders
+            ):
                 provenance["brushes_nonsolid_shader"] += 1
                 continue
             if not geometry.get("usable"):
@@ -1908,7 +1916,7 @@ def build_navgrid(
         role_map,
         max_hull_vertices=max_hull_vertices,
         open_state_changing=open_state_changing,
-        contents=shader_contents(profile, path) if game_map.patches() else None,
+        contents=shader_contents(profile, path),
     )
     if not solids:
         raise AnalysisError(

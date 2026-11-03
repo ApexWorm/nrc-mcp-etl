@@ -348,3 +348,17 @@ ORACLE_OASIS: list[tuple[float, float, float]] = [
     (9147, 5224, -347.71145629883),
     (9113, 5223, -347.71145629883),
 ]
+
+
+@pytest.mark.parametrize(("shader", "blocks"), [("t/volume", False), ("t/wall", True)])
+def test_a_brush_whose_scripts_make_it_nonsolid_does_not_block(kern, tmp_path, shader, blocks):
+    """An alphaMod volume across a corridor: nodraw, nonsolid, compiled into no collision."""
+    maps = project(
+        tmp_path,
+        "textures/t/volume\n{\n q3map_alphaMod volume\n surfaceparm nodraw\n"
+        " surfaceparm nonsolid\n surfaceparm trans\n}\n",
+    )
+    path = write_map(maps, [*room(0, 0, 512, 256), box((240, 0, 0), (272, 256, 256), shader)])
+    result, grid = route(path, stances=("stand",))
+    assert grid.geometry["brushes_nonsolid_shader"] == (0 if blocks else 1)
+    assert result["reachable"] is not blocks

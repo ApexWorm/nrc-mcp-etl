@@ -34,6 +34,41 @@ SOURCE = "etl_supply"
 VEHICLES = ["truck", "truck_crate", "truck_trigger", "truck_toi"]
 BOT_PORT = 27964
 
+#: q3map2's alphaMod volumes (docs/shaderManual/terrain-and-alphamod-blends.html) and the
+#: hint brushes' skip faces, as the stock Quake 3 common shaders define them.
+COMPILE_SHADERS = """
+textures/editor/alpha_000
+{
+	q3map_alphaMod volume
+	q3map_alphaMod set 0
+	surfaceparm nodraw
+	surfaceparm nonsolid
+	surfaceparm trans
+	qer_trans 0.5
+}
+
+textures/editor/alpha_100
+{
+	q3map_alphaMod volume
+	q3map_alphaMod set 1
+	surfaceparm nodraw
+	surfaceparm nonsolid
+	surfaceparm trans
+	qer_trans 0.5
+}
+
+textures/common/hintskip
+{
+	qer_nocarve
+	surfaceparm nodraw
+	surfaceparm nonsolid
+	surfaceparm structural
+	surfaceparm trans
+	surfaceparm noimpact
+	surfaceparm skip
+}
+"""
+
 
 def mirror_loc(text: str) -> str:
     """A location file's "x y z name" lines with x negated."""
@@ -139,6 +174,11 @@ async def main(args):
         (maps / f"{NAME}_loc_override.dat").write_text(mirror_loc(loc), encoding="latin-1")
         # Beside maps/, so the compiler's -fs_pakpath finds the original textures and models.
         (run.root / source_pk3.name).symlink_to(source_pk3)
+        # Compile-only shaders the source uses and no archive defines (they came with the
+        # author's editor setup): without them q3map2 builds the terrain's alphaMod volumes
+        # and hint-skip faces as solid, drawn brushes.
+        (run.root / "scripts").mkdir()
+        (run.root / "scripts" / f"{NAME}_compile.shader").write_text(COMPILE_SHADERS)
 
         opened = await run.call("map_open", path=str(maps / f"{SOURCE}.map"))
         assert opened["round_trip"]["identical"], opened["round_trip"]
@@ -179,14 +219,8 @@ async def main(args):
         compiled = await run.call("compile_map", preset=args.preset)
         assert compiled["ok"] and not compiled.get("leaked"), compiled
         bsp = next(p for p in compiled["artifacts"] if p.endswith(".bsp"))
-        # The source names four shaders no archive defines or holds an image for (a
-        # compile-only hint, two editor alphas, one decal); the release pk3 lacks them too.
-        missing_upstream = [
-            "textures/common/hintskip",
-            "textures/editor/alpha_000",
-            "textures/editor/alpha_100",
-            "textures/rubble/debri_m01b",
-        ]
+        # One decal the source names has no image anywhere; the release pk3 lacks it too.
+        missing_upstream = ["textures/rubble/debri_m01b"]
         packed = await run.call(
             "pack_pk3", bsp=bsp, depends=[str(source_pk3)], ignore=missing_upstream
         )
@@ -226,6 +260,35 @@ async def main(args):
                 depends=[str(source_pk3)],
             )
             result["engine_smoke"] = {k: receipt.get(k) for k in ("ok", "error", "result_path")}
+            run.artifact("result", result)
+            # The objective flow, hand-written (objective_playtests finds no standing place
+            # it can route to on this map, mirrored or not): escort the truck a little,
+            # dynamite the forward bunker gate, respawn in the bunker the script hands the
+            # Allies, dynamite the depot gate. `position` is test setup, not a route.
+            flow = json.loads(
+                (Path(__file__).parent / "scenarios" / "supply_mirror_flow.json").read_text()
+            )
+            try:
+                receipt = await run.call(
+                    "engine_playtest",
+                    pk3=package,
+                    scenario=flow,
+                    profile_id="etl",
+                    timeout_seconds=420,
+                    include_images=False,
+                    depends=[str(source_pk3)],
+                )
+            except ToolCallError as e:
+                receipt = {"ok": False, "error": str(e)}
+            result["engine_flow"] = {
+                "ok": receipt.get("ok"),
+                "error": receipt.get("error"),
+                "steps": [
+                    {k: s.get(k) for k in ("index", "action", "ok", "seconds", "error")}
+                    for s in receipt.get("steps", [])
+                ],
+                "result_path": receipt.get("result_path"),
+            }
             run.artifact("result", result)
 
         if args.objectives:
