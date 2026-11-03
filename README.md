@@ -136,7 +136,13 @@ checks the script against the map: syntax the engine refuses, unknown events and
 no entity runs, and `trigger` / `alertentity` / `setstate` / `setautospawn` arguments that name
 nothing. Lifetime checks warn when a delayed continuation may outlive its entity, including
 long waits in an explosive's death event. Short waits and uncertain control flow produce
-informational risks rather than claimed execution failures. `balance_report` and `spawn_safety` group ET spawns by their nearest
+informational risks rather than claimed execution failures.
+It also checks the map's speaker script (`sound/maps/<map>.sps`) and sound scripts
+(`sound/scripts/<map>.sounds`) beside it: their syntax, the sound files they name, sound script
+names used by a `target_speaker` or by `playsound` and the voice announcements (only the shared
+list and the map's own file are loaded, so another map's names do not resolve), and the speakers
+`enablespeaker` / `disablespeaker` / `togglespeaker` name. `pack_pk3` packs both files and the
+sounds of the map's own they name. `balance_report` and `spawn_safety` group ET spawns by their nearest
 `team_WOLF_objective`, read objective ownership from spawnflags, and measure to
 `trigger_objective_info` volumes. `ship_check` looks for the script, objdata, command map,
 tracemap and location file. Prone routes use the main body box only; the legs and turning footprint remain unmodelled.
@@ -465,7 +471,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `entity_set_keys` · `entity_remove_keys` | Set or remove keys on any entity, brush entities and worldspawn included. |
 | `brush_geometry` | Exact vertices and derived properties of one brush. |
 | `validate` | Geometry and file-format findings. |
-| `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
+| `validate_profile` | Entities against the game profile's rules, and the map script, speaker script and sound scripts where the game has them. |
 | `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
 | `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite`, `constructible`, a neutral or one team's `command_post`, and a forward spawn flag with its spawn region and spawns, `checkpoint` or `checkpoint_one_way`; and `escort` and `steal`). Point entities go in `points` by role. Team-only doors are not a kind: give a door the `allowteams` key, which `validate_profile` checks. |
 | `path_place` | Lay a path for a mover: a chain of linked path points, straight or curved by control points, with long straight legs optionally split. Its `start` is what `objective_place(kind="escort")` follows. |
@@ -515,7 +521,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `bsp_report` · `bsp_entity_diff` | Read a compiled BSP; compare its entities to the source. |
 | `structural_audit` | Brushes marked structural that need not be. |
 | `hint_suggest` | Hint brush planes, proposed from a portal file. |
-| `leak_trace` | Where the map leaks, from the pointfile. |
+| `leak_trace` | Where the map leaks, from the pointfile, and what on the path cannot seal: a brush with a see-through side, detail, a model. |
 | `shader_audit` | Shader references against the scripts on disk; a name nothing supplies is an error once the base game is scanned. |
 | `texture_search` | Base-game texture names by keyword, so faces use textures every server has. |
 | `compile_ab` · `ab_history` | Compile two variants and diff what matters; every past comparison. |
@@ -550,7 +556,7 @@ The overlay uses the same map snapshot and marks stand/crouch/prone, endpoints a
 | `ship_check` | Naming, levelshot, arena file, companion files, package contents. |
 | `arena_write` · `objdata_write` | The arena file (the map in the menu: name, briefing, gametypes) and the limbo objective descriptions. |
 | `commandmap_make` · `levelshot_make` | The command map - map coordinates on the worldspawn, a top-down section image and its shaders - and the loading-screen levelshot. |
-| `pack_pk3` | Build the release archive. |
+| `pack_pk3` | Build the release archive. Names the packer misses but the base game or the map supplies do not fail it; `ignore` lets named resources be missing. |
 | `repack_analyze` | Every resource the BSP references, and which of them nothing supplies (what fails a pack). |
 
 **The toolchain itself**
@@ -770,9 +776,10 @@ bots until someone waypoints it in game.
 For playable examples built through real MCP calls, see [the dogfood scenarios](bench/dogfood/README.md).
 They retain source maps, packages, tool receipts and engine gameplay evidence under `out/dogfood/`.
 
-**Decompiled or editor-asset-dependent sources are partial.** Splash Damage's released ET sources
-round-trip and compile, but reference editor-only models that the game does not ship: the packer
-reports them as missing, and battery leaks without them.
+**Old sources meet a newer compiler.** Splash Damage's released ET sources round-trip, compile and
+pack, and load in the engine. battery's source leaks under today's q3map2, which counts a
+`surfaceparm alphashadow` grate as see-through and so does not let it close the bunker floor;
+`leak_trace` names that brush. See `docs/et-full-size-maps.md`.
 
 **Limited patch authoring.** `patch_commit` makes cylinders, arches and quarter-round bevels as
 `patchDef2`; free-form curves and terrain are still editor work. Patches do not seal the map.

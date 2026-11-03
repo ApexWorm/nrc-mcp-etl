@@ -205,3 +205,23 @@ def test_the_wire_carries_compact_json(opened):
     result = asyncio.run(srv.mcp.call_tool("spawn_safety", {"cell": 32}))
     text = result.content[0].text
     assert "\n" not in text and json.loads(text)["detail"] == "summary"
+
+
+def test_a_pack_summary_keeps_what_decides_the_pack():
+    names = [f"textures/x/{i}" for i in range(30)]
+    report = {
+        "ok": False,
+        "not_found": names,
+        "allowed_missing": [{"name": n, "pattern": None, "reason": "r"} for n in names],
+        "packer_not_found": names,
+        "accounted_for": [{"name": n, "by": "the base game"} for n in names],
+        "dropped_basegame": names,
+        "output_tail": "x" * 2000,
+    }
+    brief = detail.pack_pk3(report)
+    assert brief["not_found"] == names and len(brief["allowed_missing"]) == 30
+    assert len(brief["accounted_for"]) == detail.ROWS_LIMIT
+    assert brief["omitted"]["accounted_for"]["total"] == 30
+    assert "output_tail" not in brief and "output_tail" in brief["omitted"]
+    for key in report:
+        assert key in brief or key in brief["omitted"]

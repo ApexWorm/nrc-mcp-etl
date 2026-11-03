@@ -350,3 +350,19 @@ def engine_playtest(report: dict) -> dict:
             "result_path holds the full receipt"
         )
     return _finish(out, omitted)
+
+
+def pack_pk3(report: dict) -> dict:
+    """What decides the pack, in full; what the packer and the fix-up did, capped.
+
+    `not_found` (what fails the pack) and `allowed_missing` (what was let off, and why) are
+    never cut. The packer's own list, what accounted for each name, and the base-game files
+    dropped are capped; the packer's console tail is left out.
+    """
+    omitted: dict = {}
+    out = dict(report)
+    _drop(report, out, omitted, "output_tail", "the packer's console tail")
+    for field in ("packer_not_found", "accounted_for", "dropped_basegame", "optional_not_found"):
+        if isinstance(report.get(field), list):
+            out[field] = rows(report[field], omitted, field, order="as reported")
+    return _finish(out, omitted)

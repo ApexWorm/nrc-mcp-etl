@@ -80,16 +80,24 @@ def pack_pk3(
     complevel: int | None = None,
     png: bool = False,
     profile_id: str | None = None,
+    ignore: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build a pk3 for a compiled BSP with `q3map2 -pk3`, then fix up what it produced.
 
-    The packer's own naming is the oracle: if it produces `_FAILEDpack.pk3`, some resource the
-    BSP references does not exist on disk, and the map will show missing textures on a server
-    even though it compiled. That is reported as a failure regardless of exit code.
+    The packer's own naming is the first oracle: `_FAILEDpack.pk3` means some resource the BSP
+    references was not found. Each name it could not find is then checked once more, because
+    the packer misses some that exist: it skips a shader defined with `implicitMap` and the
+    like (autopk3.cpp:466-468), then looks for an image of the shader's own name, which finds
+    nothing. A name is accounted for when the base game supplies it, when the map's own shader
+    script defines it (the script and its images are then packed), when it sits beside the map,
+    when the profile lists it under `packaging.allowed_missing`, or when it matches `ignore`
+    (names or shell patterns). If every name is accounted for the package is renamed to
+    `_autopacked.pk3`; anything left over is genuinely missing and the pack still fails.
 
     With `profile_id`, the archive also gains the profile's companion files and arena that sit
-    beside the map, and loses what the base game already ships (when `NRC_FS_BASEPATH` is set).
-    Either way it ends up next to the map's folder, never in the game install.
+    beside the map, the sound files the map's sound and speaker scripts name, and loses what the
+    base game already ships (when `NRC_FS_BASEPATH` is set). Either way it ends up next to the
+    map's folder, never in the game install.
     """
     target = Path(bsp)
     if not target.is_file():
@@ -113,8 +121,23 @@ def pack_pk3(
     run = _q3map2(flags, target)
 
     # The packer reports where it wrote the archive; that report is authoritative.
-    produced = _find_packages(target, _packer_text(run))
+    console = _packer_text(run)
+    produced = _find_packages(target, console)
     basegame = Path(base) / str(pkg["basegame"]) if base and pkg.get("basegame") else None
+    packer_not_found = _not_found(console)
+    optional_missing = _not_found(console, "~fail")
+    found = _account_for(packer_not_found, target, pkg, basegame, ignore or [])
+    extra, unpacked = _script_sounds(target, profile_id, basegame)
+    found["add"] += extra
+    sound_missing: list[str] = []
+    for name, where in unpacked:
+        allowed = _allowance(name, pkg, ignore or [])
+        if allowed is not None:
+            found["allowed"].append(allowed)
+        else:
+            sound_missing.append(f"{name} (named by {where})")
+    found["missing"] += sound_missing
+    not_found = found["missing"]
 
     moved: list[Path] = []
     added: list[str] = []
@@ -124,21 +147,30 @@ def pack_pk3(
         # A failed package is fixed up too: it is still the map, missing only what the packer
         # could not find, and testing it should not also lose its script.
         if zipfile.is_zipfile(p):
-            a, d = _fix_up(p, dest, target, pkg, basegame)
+            a, d = _fix_up(p, dest, target, pkg, basegame, found["add"])
             added += a
             dropped += d
+            # Every name the packer missed is accounted for: the package is good. Without names
+            # (output that could not be read) its verdict stands.
+            if dest.name.endswith(FAILURE_SUFFIX) and packer_not_found and not not_found:
+                good_name = dest.with_name(dest.name[: -len(FAILURE_SUFFIX)] + SUCCESS_SUFFIX)
+                dest.replace(good_name)
+                dest = good_name
         elif p.resolve() != dest.resolve():
             dest.parent.mkdir(parents=True, exist_ok=True)
             # A move, not a rename: the install and the map are often on different devices.
             shutil.move(p, dest)
         if p.resolve() != dest.resolve() and p.exists():
             p.unlink()
+        # A missing script sound fails a package the packer passed: the packer never saw it.
+        if dest.name.endswith(SUCCESS_SUFFIX) and sound_missing:
+            bad_name = dest.with_name(dest.name[: -len(SUCCESS_SUFFIX)] + FAILURE_SUFFIX)
+            dest.replace(bad_name)
+            dest = bad_name
         moved.append(dest)
     failed = [p for p in moved if p.name.endswith(FAILURE_SUFFIX)]
     good = [p for p in moved if p.name.endswith(SUCCESS_SUFFIX)]
-    console = _packer_text(run)
-    not_found = _not_found(console)
-    optional_missing = _not_found(console, "~fail")
+    unused = [pat for pat in ignore or [] if not any(a["pattern"] == pat for a in found["allowed"])]
 
     return {
         "ok": run["ok"] and not failed and bool(good),
@@ -146,6 +178,10 @@ def pack_pk3(
         "failed_packages": [str(p) for p in failed],
         "missing_resources": bool(failed),
         "not_found": not_found[:100],
+        "packer_not_found": packer_not_found[:100],
+        "accounted_for": found["supplied"][:100],
+        "allowed_missing": found["allowed"][:100],
+        **({"unused_ignore": unused} if unused else {}),
         "optional_not_found": optional_missing[:100],
         "added_companions": added,
         "dropped_basegame": dropped,
@@ -154,7 +190,8 @@ def pack_pk3(
                 f"the packer could not find {len(not_found)} resource(s): "
                 + ", ".join(not_found[:8])
                 + ("..." if len(not_found) > 8 else "")
-                + "; for a texture, find a real name with texture_search"
+                + "; for a texture, find a real name with texture_search. A resource you know "
+                "the game does without can be passed in ignore"
             )
             if not_found
             else f"a {FAILURE_SUFFIX} package means the BSP references a resource that is not "
@@ -172,6 +209,156 @@ def _not_found(text: str, marker: str = "!FAIL!") -> list[str]:
     (it sets packFAIL, autopk3.cpp:574-576, 589-591, 602-628, 640-641); `~fail` marks an optional
     one - the levelshot, the .aas, .arena and .defi (autopk3.cpp:585-587, 643-653)."""
     return sorted({ln.split(marker, 1)[1].strip() for ln in text.splitlines() if marker in ln})
+
+
+def _beside(root: Path, name: str, extensions: tuple[str, ...] = ()) -> tuple[str, Path] | None:
+    """`name` as a file under `root`, as is or with one of `extensions`: (archive path, file).
+
+    The engine looks paths up without regard to case; a folder on disk may not, so a miss on
+    the exact spelling is retried in lower case.
+    """
+    for n in dict.fromkeys([name, name.lower()]):
+        for candidate in [n] + [f"{n}.{e}" for e in extensions]:
+            f = root / candidate
+            if f.is_file():
+                return candidate, f
+    return None
+
+
+def _runtime_images(shader: dict) -> list[str]:
+    """The images the renderer loads for a parsed shader: stage maps and implicit* images, not
+    the editor's or the light compiler's. `-` means the shader's own name (shaders.cpp:960-990).
+    """
+    skip: set[str] = set()
+    words = shader.get("directives") or []
+    for j, w in enumerate(words[:-1]):
+        if w in ("qer_editorimage", "q3map_lightimage"):
+            skip.add(words[j + 1].lower())
+    out: list[str] = []
+    for img in shader.get("images") or []:
+        low = img.lower()
+        if low in skip or low[:1] in ("$", "*"):
+            continue
+        name = shader["name"] if low == "-" else img
+        out.append(name.rsplit(".", 1)[0] if "." in name.rsplit("/", 1)[-1] else name)
+    return list(dict.fromkeys(out))
+
+
+def _allowance(name: str, pkg: dict, ignore: list[str]) -> dict | None:
+    """Why `name` may be missing: it matches `ignore`, or the profile's `allowed_missing`."""
+    import fnmatch  # noqa: PLC0415
+
+    low = name.lower()
+    pattern = next((p for p in ignore if fnmatch.fnmatchcase(low, p.lower())), None)
+    if pattern is not None:
+        return {"name": name, "pattern": pattern, "reason": "ignored"}
+    for a in pkg.get("allowed_missing") or []:
+        if isinstance(a, dict) and str(a.get("path", "")).lower() == low:
+            return {
+                "name": name,
+                "pattern": None,
+                "reason": " ".join(str(a.get("reason", "")).split()),
+                "referenced_by": a.get("referenced_by"),
+            }
+    return None
+
+
+def _account_for(
+    names: list[str], bsp: Path, pkg: dict, basegame: Path | None, ignore: list[str]
+) -> dict[str, list]:
+    """Sort the names the packer could not find into supplied, allowed and missing.
+
+    `add` lists (archive path, file) pairs to pack so that a supplied name works: the map's own
+    shader script that defines it, and that script's images.
+    """
+    from . import optimize  # noqa: PLC0415
+
+    out: dict[str, list] = {"supplied": [], "allowed": [], "missing": [], "add": []}
+    if not names:
+        return out
+    shipped = basegame_entries(basegame) if basegame else set()
+    index = (
+        optimize.basegame_index([basegame], skip_prefix=bsp.stem)
+        if basegame
+        else {"shaders": {}, "images": set()}
+    )
+    root = _map_root(bsp)
+    own: dict[str, tuple[dict, str]] = {}
+    for f in sorted((root / "scripts").glob("*.shader")):
+        try:
+            for sh in optimize.parse_shader_file(f):
+                own.setdefault(sh["name"].lower(), (sh, f"scripts/{f.name}"))
+        except (optimize.OptimizeError, OSError):
+            continue
+    images = tuple(optimize.IMAGE_EXTENSIONS)
+
+    def image_supplied(name: str) -> tuple[str, Path] | bool:
+        low = name.lower()
+        if low in index["images"] or any(f"{low}.{e}" in shipped for e in images):
+            return True
+        return _beside(root, name, images) or False
+
+    for name in names:
+        low = name.lower()
+        allowed = _allowance(name, pkg, ignore)
+        if allowed is not None:
+            out["allowed"].append(allowed)
+            continue
+        if low in index["shaders"] or low in index["images"] or low in shipped:
+            out["supplied"].append({"name": name, "by": "the base game"})
+            continue
+        if low in own:
+            shader, script = own[low]
+            lost = []
+            for img in _runtime_images(shader):
+                got = image_supplied(img)
+                if got is False:
+                    lost.append(img)
+                elif got is not True:
+                    out["add"].append(got)
+            if lost:
+                out["missing"].append(f"{name} (its image {', '.join(lost)})")
+                continue
+            out["add"].append((script, root / script))
+            out["supplied"].append({"name": name, "by": f"{script} beside the map"})
+            continue
+        got = _beside(root, name, () if "." in name.rsplit("/", 1)[-1] else images)
+        if got:
+            out["add"].append(got)
+            out["supplied"].append({"name": name, "by": "a file beside the map"})
+            continue
+        out["missing"].append(name)
+    return out
+
+
+def _script_sounds(
+    bsp: Path, profile_id: str | None, basegame: Path | None
+) -> tuple[list[tuple[str, Path]], list[tuple[str, str]]]:
+    """Sound files the map's speaker script, sound scripts and map script name, which the
+    packer never reads: those beside the map to pack, and those nothing supplies."""
+    if not profile_id:
+        return [], []
+    from . import soundscript  # noqa: PLC0415
+
+    try:
+        named = soundscript.sound_files(profile_id, bsp)
+    except profiles.ProfileError as e:
+        raise PackError(str(e)) from e
+    if not named:
+        return [], []
+    shipped = basegame_entries(basegame) if basegame else set()
+    root = _map_root(bsp)
+    add: list[tuple[str, Path]] = []
+    missing: list[tuple[str, str]] = []
+    for name, where in named.items():
+        if name.lower() in shipped:
+            continue
+        got = _beside(root, name)
+        if got:
+            add.append(got)
+        elif basegame is not None:
+            missing.append((name, where))
+    return add, missing
 
 
 def _packaging(profile_id: str | None) -> dict:
@@ -296,9 +483,15 @@ def _basegame_digests(
 
 
 def _fix_up(
-    produced: Path, dest: Path, bsp: Path, pkg: dict, basegame: Path | None
+    produced: Path,
+    dest: Path,
+    bsp: Path,
+    pkg: dict,
+    basegame: Path | None,
+    extra: list[tuple[str, Path]] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Rewrite the packer's archive at `dest`: companions in, base-game duplicates out."""
+    """Rewrite the packer's archive at `dest`: companions and `extra` (archive path, file) in,
+    base-game duplicates out."""
     root = _map_root(bsp)
     added: list[str] = []
     dropped: list[str] = []
@@ -334,6 +527,11 @@ def _fix_up(
                     present.add(o.lower())
                     added.append(o)
                     break
+        for name, f in extra or []:
+            if name.lower() not in present and f.is_file():
+                out.write(f, name)
+                present.add(name.lower())
+                added.append(name)
     tmp.replace(dest)
     return added, dropped
 

@@ -294,8 +294,14 @@ def leak_trace(lin_path: str | None = None) -> dict:
     """Read a leak pointfile and report the path out of the map.
 
     q3map2 writes a `.lin` beside the map when the world is not sealed. The path runs from the
-    entity that leaked to the void, so the first point is inside the map and the last is outside;
-    the gap is somewhere along it.
+    void inwards: the first point is outside the map, the last is the origin of the entity that
+    leaked (leakfile.cpp:80-107), and the hull is open where the path crosses it.
+
+    With a map open and the active profile describing what seals (`sealing:`), the findings also
+    name likely causes on the path: a brush that looks solid but has a side whose shader is
+    translucent to the compiler (`alphashadow`, `trans`, clip and the like make the whole brush
+    detail and non-opaque), detail brushes, and model entities, which never seal. Shaders are
+    looked up in the base game (with the game path set) and the map's own scripts.
 
     Defaults to the most recent session build's `.lin`, with that build's revision.
     Without a session build, checks beside the open map. Explicit paths remain supported.
@@ -322,8 +328,15 @@ def leak_trace(lin_path: str | None = None) -> dict:
             "error": f"{p} does not exist",
             "hint": "a pointfile only exists when the last compile leaked; a sealed map has none",
         }
+    pid = active_profile() or None
+    base = _basegame_dir(os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH"), pid)
     try:
-        report = optmod.leak_trace(p, source)
+        report = optmod.leak_trace(
+            p,
+            source,
+            profile_id=pid,
+            basegame_dirs=[base] if base and Path(base).is_dir() else None,
+        )
         if build:
             report["revision"] = build["revision"]
             report["stale"] = build["revision"] != SESSION.receipt()

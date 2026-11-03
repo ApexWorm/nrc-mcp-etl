@@ -67,6 +67,9 @@ profile:
       path: "etmain/pak0.pk3:scripts/common.shader"
       bytes: 14977
       note: "the base game's common shaders, from an installed ET: Legacy; source for clip shader names"
+    - id: q3map2_source
+      path: "vendor/netradiant-custom tools/quake3/q3map2/"
+      note: "the compiler this project drives; cited as file:line for what it does with a brush"
 
 # Editor/engine facts from games/et.game (verbatim attribute values).
 editor:
@@ -3992,6 +3995,93 @@ mapscript:
 
 
 # ---------------------------------------------------------------------------
+# sound - speaker scripts, sound scripts, and what in a map names them (nrc_mcp.soundscript)
+# ---------------------------------------------------------------------------
+# Two files, read by different parsers. Checked by validate_profile; packed by pack_pk3.
+sound:
+  confidence: verified
+  source: etlegacy_source
+  # A name ending in one of these is a sound file; any other name is a sound script's name
+  # (cgame/cg_event.c:1983, cgame/cg_main.c:830). Files are loaded by exact name: the codec
+  # adds no other extension (client/snd_codec.c:148-164).
+  file_extensions: [wav, ogg]
+  # A name starting with this is a per-player custom sound, not a file (cgame/cg_main.c:826).
+  custom_prefix: "*"
+  # The speaker script: the map's ambient speakers, placed with the in-game speaker editor.
+  # Loaded by the server and the client alike (game/g_main.c:1854, cgame/cg_main.c:754) through
+  # the bot-library tokenizer. A mistake prints an error and stops loading the file; the
+  # speakers read before it stay. Nothing stops the game.
+  speaker_script:
+    path: "sound/maps/{map}.sps"
+    root: speakerScript            # game/bg_sscript.c:333
+    entry: speakerDef              # game/bg_sscript.c:353
+    max_entries: 256               # MAX_SCRIPTSPEAKERS, game/bg_sscript.c:38
+    sound_key: noise               # registered as a file (cgame/cg_main.c:759)
+    name_key: targetname
+    # Each key and the value the engine parses (game/bg_sscript.c:157-298).
+    keys:
+      noise: {type: string}
+      origin: {type: vec3}
+      targetname: {type: string, max_length: 31}   # char targetname[32], game/bg_public.h:2987
+      looped: {type: enum, values: ["no", "on", "off"]}
+      broadcast: {type: enum, values: ["no", global, nopvs]}
+      wait: {type: int, min: 0}
+      random: {type: int, min: 0}
+      volume: {type: int, min: 0, max: 65535}
+      range: {type: int, min: 0}
+    locus: "game/bg_sscript.c:136-371"
+  # Sound scripts: named groups of sound files. The client loads every file filelist.txt names
+  # plus the map's own, and nothing else (cgame/cg_sound.c:396-468), so a name defined only in
+  # another map's file does not resolve. A mistake here is CG_Error: the client stops.
+  sound_scripts:
+    directory: sound/scripts
+    file_list: sound/scripts/filelist.txt
+    map_file: "sound/scripts/{map}.sounds"
+    sound_directive: sound         # cgame/cg_sound.c:404-424
+    max_sounds_per_block: 16       # MAX_SOUNDSCRIPT_SOUNDS, cgame/cg_local.h:1044
+    locus: "cgame/cg_sound.c:278-427"
+  # Where a map names a sound file or a sound script.
+  references:
+    entity_keys:
+      - {classname: target_speaker, key: noise, locus: "game/g_target.c:306-322"}
+    # playsound: g_script_actions.c:1859-1909; the voice announcements: :3644-3784
+    script_actions:
+      - {action: playsound, arg: 0}
+      - {action: wm_teamvoiceannounce, arg: 1}
+      - {action: wm_addteamvoiceannounce, arg: 1}
+      - {action: wm_removeteamvoiceannounce, arg: 1}
+    # Script actions that name a speaker of the speaker script by its targetname. The engine
+    # compares with Q_stricmp, and a name that matches nothing does nothing, silently
+    # (game/g_script_actions.c:2301-2410).
+    speaker_locus: "game/g_script_actions.c:2301-2410"
+    speaker_actions:
+      - {action: togglespeaker, arg: 0}
+      - {action: disablespeaker, arg: 0}
+      - {action: enablespeaker, arg: 0}
+
+
+# ---------------------------------------------------------------------------
+# sealing - what the compiler (q3map2 -game et) lets close the hull, for leak_trace
+# ---------------------------------------------------------------------------
+sealing:
+  confidence: verified
+  source: q3map2_source
+  # A brush with any side whose shader carries one of these surfaceparms is translucent to the
+  # compiler. The flags of all sides are OR-ed, so one such side makes the whole brush detail
+  # and non-opaque (map.cpp:517-537), and a non-opaque brush never stops the outside flood.
+  # The list is every C_TRANSLUCENT surfaceparm of the base game table (games.cpp:142-171) and
+  # of the Wolfenstein table that et extends (games.cpp:361-387, :401).
+  translucent_surfaceparms: [origin, areaportal, trans, alphashadow, lightfilter, trigger,
+                             water, slime, lava, playerclip, monsterclip, nodrop,
+                             clusterportal, donotenter, botclip, slag, clipmissile, clipshot,
+                             donotenterlarge, ai_nosight, ai_nopass, ai_nopasslarge]
+  # Model entities whose geometry the compiler bakes in: the clip brushes it builds from a
+  # model are always detail (model.cpp:445, :489), so a model never seals, present or missing.
+  model_entities: [misc_model]
+  model_key: model
+
+
+# ---------------------------------------------------------------------------
 # engine - how to load a packed map in the game itself (nrc_mcp.engine, `mise run game:smoke`)
 # ---------------------------------------------------------------------------
 # Every line below was checked by loading maps in ET: Legacy v2.86.2 under Linux.
@@ -4208,6 +4298,38 @@ packaging:
     - {path: "maps/{map}_loc.dat", confidence: verified, role: location names, required: false, locus: "cgame/cg_locations.c:526"}
     - {path: "levelshots/{map}.tga", any_extension: [png, tga, jpg, jpeg], confidence: verified, role: levelshot, required: false, locus: "cgame/cg_loadpanel.c:449"}
     - {path: "scripts/levelshots_{map}.shader", confidence: verified, role: command map shaders, required: false, locus: "cgame/cg_commandmap.c:1572-1589"}
+    - {path: "sound/maps/{map}.sps", confidence: verified, role: speaker script, required: false, locus: "game/g_main.c:1854, cgame/cg_main.c:754"}
+    - {path: "sound/scripts/{map}.sounds", confidence: verified, role: sound scripts, required: false, locus: "cgame/cg_sound.c:447"}
+  # Resources the stock maps reference that the base game itself never shipped. pack_pk3 lets
+  # each be missing, and says so, rather than failing the pack; anything else missing still
+  # fails it. Each entry names where it is referenced and what the game does without it.
+  allowed_missing:
+    - path: sound/world/brickfall.wav
+      confidence: verified
+      referenced_by: "the shipped maps/oasis.bsp (pak0.pk3): a func_explosive's noise key"
+      reason: >-
+        no archive of the base game ships it; func_explosive registers its noise as the sound it
+        plays on breaking (game/g_mover.c:4747-4758), and a sound that cannot be loaded
+        registers as handle 0 (client/snd_dma.c:470-473), so in the original game too that wall
+        breaks without a sound
+    - path: sound/vo/fueldump/allies/hq_reptank.wav
+      confidence: verified
+      referenced_by: "pak0.pk3 sound/scripts/fueldump.sounds line 127, in a sound script a copy of it carries"
+      reason: >-
+        no archive of the base game ships it; a sound script's file that cannot be loaded
+        registers as handle 0 (client/snd_dma.c:470-473) and plays nothing
+    - path: sound/vo/fueldump/axis/hq_tanktunnel.wav
+      confidence: verified
+      referenced_by: "pak0.pk3 sound/scripts/fueldump.sounds line 235, in a sound script a copy of it carries"
+      reason: >-
+        no archive of the base game ships it (pak0.pk3 has hq_tanktunnels.wav); a sound that
+        cannot be loaded registers as handle 0 (client/snd_dma.c:470-473) and plays nothing
+    - path: sound/world/wolf.wav
+      confidence: verified
+      referenced_by: "pak0.pk3 sound/maps/radar.sps line 2091, in a speaker script a copy of it carries"
+      reason: >-
+        no archive of the base game ships it; the speaker registers it as handle 0
+        (cgame/cg_main.c:759, client/snd_dma.c:470-473) and plays nothing
   reserved_shader_prefixes: [common/, sfx/, gfx/, models/]
   size_budget_bytes: 52428800
   size_budget_confidence: unverified
