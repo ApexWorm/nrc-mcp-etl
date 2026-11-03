@@ -303,6 +303,166 @@ def test_spacing_must_cover_a_cell(tmp_path):
 
 
 # --------------------------------------------------------------------------------------
+# Doors, walls and constructibles
+# --------------------------------------------------------------------------------------
+
+_SPAWNS = [
+    point_entity("team_CTF_redspawn", (96, 128, 24)),
+    point_entity("team_CTF_bluespawn", (928, 128, 24)),
+]
+# A partition at x 480..496 whose only gap is y 96..160 under a lintel at 128.
+_PARTITION = [
+    box((480, 16, 0), (496, 96, 256)),
+    box((480, 160, 0), (496, 240, 256)),
+    box((480, 96, 128), (496, 160, 256)),
+]
+
+
+def _door_map(tmp_path, classname="func_door", **keys):
+    door = _brush_entity(classname, box((484, 96, 0), (492, 160, 128)), **keys)
+    return write_map(tmp_path, [*room(0, 0, 1024, 256), *_PARTITION], [*_SPAWNS, door])
+
+
+def _crossings(wf, x):
+    return [
+        (w, wf.waypoints[t])
+        for w in wf.waypoints
+        for t in w.connections
+        if (w.position[0] < x) != (wf.waypoints[t].position[0] < x)
+    ]
+
+
+def test_a_door_gets_a_doorway_waypoint_that_opens_it(tmp_path):
+    # A door is solid to a grid, so without this no waypoint ever passed a doorway.
+    wf, report = _seed(_door_map(tmp_path), spacing=64)
+    flags = spec()["flags"]
+    doorway = [w for w in wf.waypoints if w.flags & flags["DOOR"]]
+    assert doorway and all(476 <= w.position[0] <= 500 for w in doorway)
+    assert all(not w.flags & (flags["TEAMONLY"] | flags["BLOCKWALL"]) for w in doorway)
+    assert report["components"]["count"] == 1
+    assert report["doors"] == [{"entity": 3, "flags": ["DOOR"]}]
+    # Every way through ends at a waypoint that presses the use key.
+    crossings = _crossings(wf, 488)
+    assert crossings and all((a.flags | b.flags) & flags["DOOR"] for a, b in crossings)
+
+
+@pytest.mark.parametrize(
+    "allowteams,team", [("axis,cvops", "AXIS"), ("allies", "ALLIES"), ("Axis Allies", None)]
+)
+def test_a_team_door_keeps_its_doorway_to_that_team(tmp_path, allowteams, team):
+    wf, _report = _seed(_door_map(tmp_path, allowteams=allowteams), spacing=64)
+    flags = spec()["flags"]
+    want = flags["DOOR"] | (flags[team] | flags["TEAMONLY"] if team else 0)
+    doorway = [w for w in wf.waypoints if w.flags & flags["DOOR"]]
+    assert doorway and {w.flags for w in doorway} == {want}
+    # The other team cannot route around the doorway waypoint.
+    for a, b in _crossings(wf, 488):
+        assert want in (a.flags, b.flags)
+
+
+def test_a_touch_door_opens_for_everyone(tmp_path):
+    path = _door_map(tmp_path, allowteams="axis", spawnflags=8)
+    _wf, report = _seed(path, spacing=64)
+    assert report["doors"] == [{"entity": 3, "flags": ["DOOR"]}]
+
+
+@pytest.mark.parametrize("keys", [{"key": -1}, {"targetname": "gate"}])
+def test_a_door_no_player_opens_is_seeded_as_a_wall(tmp_path, keys):
+    door = _brush_entity("func_door", box((484, 96, 0), (492, 160, 128)), **keys)
+    opener = point_entity("target_relay", (64, 64, 64), target="gate")
+    path = write_map(tmp_path, [*room(0, 0, 1024, 256), *_PARTITION], [*_SPAWNS, door, opener])
+    wf, report = _seed(path, spacing=64)
+    flags = spec()["flags"]
+    assert report["locked_doors"] == [3] and report["doors"] == []
+    assert not any(w.flags & flags["DOOR"] for w in wf.waypoints)
+    crossings = _crossings(wf, 488)
+    assert crossings
+    assert all(a.flags & flags["BLOCKWALL"] and b.flags & flags["BLOCKWALL"] for a, b in crossings)
+
+
+def _trench_map(tmp_path, **keys):
+    # Banks at floor 0 either side of a trench x 384..640, 208 deep; a constructible deck
+    # (allies, unbuilt unless keys say so) spans it at y 96..160.
+    brushes = [
+        box((0, 0, -224), (1024, 256, -208)),
+        box((0, 0, -208), (384, 256, 0)),
+        box((640, 0, -208), (1024, 256, 0)),
+        box((0, 0, 256), (1024, 256, 272)),
+        box((0, 0, -208), (16, 256, 256)),
+        box((1008, 0, -208), (1024, 256, 256)),
+        box((0, 0, -208), (1024, 16, 256)),
+        box((0, 240, -208), (1024, 256, 256)),
+    ]
+    deck = _brush_entity(
+        "func_constructible", box((384, 96, -16), (640, 160, 0)), **{"spawnflags": 8, **keys}
+    )
+    return write_map(tmp_path, brushes, [*_SPAWNS, deck])
+
+
+@pytest.mark.parametrize("spacing", [64, 128])
+def test_an_unbuilt_bridge_is_crossed_only_through_blockbridge_links(tmp_path, spacing):
+    wf, report = _seed(_trench_map(tmp_path), spacing=spacing)
+    flags = spec()["flags"]
+    bridge = flags["BLOCKBRIDGE"]
+    depth = spec()["bridge_trace_depth"]
+    assert report["constructibles"] == {"unbuilt": [3], "built_at_start": []}
+    assert report["deck_cells"] > 0 and report["bridge_waypoints"] > 0
+    # Spanned lip to lip, as stock files do.
+    spans = [
+        (w, wf.waypoints[t])
+        for w in wf.waypoints
+        for t in w.connections
+        if w.position[0] < 384 and wf.waypoints[t].position[0] > 640
+    ]
+    assert spans and all(a.flags & bridge and b.flags & bridge for a, b in spans)
+    assert report["components"]["count"] == 1
+
+    def on_deck(x, y):
+        return 384 <= x <= 640 and 96 <= y <= 160
+
+    def side(w):
+        return "trench" if w.position[2] < 0 else "west" if w.position[0] < 512 else "east"
+
+    for w in wf.waypoints:
+        # Nothing stands on the deck or over the trench: the add-on would make a deck
+        # waypoint the constructible's goal, unreachable until it is built.
+        assert not (384 < w.position[0] < 640 and side(w) != "trench"), w.position
+        for t in w.connections:
+            o = wf.waypoints[t]
+            if "trench" in (side(w), side(o)):
+                continue  # falling in (the deck's sides) is the trench floor's business
+            touches = on_deck(*w.position[:2]) or on_deck(*o.position[:2])
+            if not touches and side(w) == side(o):
+                continue
+            # A link onto, off or across the deck is one the add-on tests: both ends flagged,
+            # and its middle is over the deck within the trace's reach, so it is closed while
+            # the deck is missing and open once it is built.
+            assert w.flags & bridge and o.flags & bridge, (w.position, o.position)
+            mx, my = (w.position[0] + o.position[0]) / 2, (w.position[1] + o.position[1]) / 2
+            mz = (w.position[2] + o.position[2]) / 2
+            assert on_deck(mx, my) and mz - depth <= 0 <= mz, (w.position, o.position)
+
+
+def test_a_bridge_built_at_start_is_still_gated(tmp_path):
+    # It can be blown up, and then the deck is gone.
+    wf, report = _seed(_trench_map(tmp_path, spawnflags=9), spacing=128)
+    assert report["constructibles"] == {"unbuilt": [], "built_at_start": [3]}
+    assert any(w.flags & spec()["flags"]["BLOCKBRIDGE"] for w in wf.waypoints)
+
+
+def test_a_constructible_barrier_is_a_wall_once_built(tmp_path):
+    # Unbuilt it is no obstacle; built, it shuts the gap, so links through it are blockable.
+    barrier = _brush_entity("func_constructible", box((480, 96, 0), (496, 160, 128)), spawnflags=4)
+    path = write_map(tmp_path, [*room(0, 0, 1024, 256), *_PARTITION], [*_SPAWNS, barrier])
+    wf, report = _seed(path, spacing=64)
+    flags = spec()["flags"]
+    crossings = _crossings(wf, 488)
+    assert report["components"]["count"] == 1 and crossings
+    assert all(a.flags & flags["BLOCKWALL"] and b.flags & flags["BLOCKWALL"] for a, b in crossings)
+    assert not any(w.flags & flags["BLOCKBRIDGE"] for w in wf.waypoints)
+
+
+# --------------------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------------------
 

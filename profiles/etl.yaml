@@ -4428,6 +4428,7 @@ bots:
     DOOR: 128
     PRONE: 1048576     # 1<<20
     BLOCKWALL: 137438953472  # F_ET_NAV_WALL = F_NAV_NEXT<<5 = 1<<37
+    BLOCKBRIDGE: 274877906944  # F_ET_NAV_BRIDGE = F_NAV_NEXT<<6 = 1<<38
   # A bot heading for a waypoint presses prone or crouch while that waypoint carries the flag
   # (BotBaseStates.cpp:744-747), and path costs weight such waypoints x3.8 / x3.2
   # (PathPlannerWaypoint.cpp:826-827). So the flag goes on every waypoint whose cells need the
@@ -4440,6 +4441,53 @@ bots:
   # add-on traces a connection into a BLOCKWALL waypoint and closes it while the trace hits
   # solid (ET_Game.cpp:738-761), so the bots wait for the wall instead of running into it.
   blockable_flags: [BLOCKWALL]
+  # Brushes whose state the seeding follows, beyond the profile's roles.state_changing
+  # (blown walls). The graph is seeded over the map in every state at once, then gated:
+  #   - a door a player opens with the use key is passable, with a waypoint in the doorway;
+  #   - a wall or a door no player opens (locked, scripted, shot open) gets BLOCKWALL on
+  #     connections through it;
+  #   - floor only a built constructible gives (a bridge deck) gets BLOCKBRIDGE on
+  #     connections across it, and is no floor at round start.
+  doors:
+    classnames: [func_door, func_door_rotating]
+    # A bot presses the use key, 3 frames in 4, while heading for a DOOR waypoint
+    # (BotBaseStates.cpp:615-616), and looks along its path instead of around
+    # (BotBaseStates.cpp:1225-1226). The use key traces 96 units ahead of the eye
+    # (game/g_cmds.c:4357-4380, CH_ACTIVATE_DIST bg_public.h:3162) and opens a door through
+    # G_TryDoor (g_cmds.c:4172-4179); pressing it again while the door is open does nothing,
+    # as the door stays active until it is shut (g_mover.c:2333-2337, :864-868). Stock files
+    # put DOOR on the waypoints either side of a door (oasis 107/153, battery 56/458).
+    flags: [DOOR]
+    # allowteams (g_spawn.c:814-831), matched as the game does: lowercased, substring.
+    # G_TryDoor refuses a team it does not name (g_mover.c:2337, g_utils.c:607-638). The
+    # planner skips a TEAMONLY waypoint without the bot's team flag (PathPlannerWaypoint.cpp:
+    # 805-807; team flags ET_Client.cpp:252-264), as stock team doors are flagged (oasis 107).
+    team_key: allowteams
+    team_flags: {axis: [AXIS, TEAMONLY], allies: [ALLIES, TEAMONLY]}
+    # A func_door with TOUCH and no targetname opens for whoever walks into it, allowteams or
+    # not (g_mover.c:2242-2250, :2110-2125): no team flags.
+    touch: {classnames: [func_door], spawnflag: 8, unless_key: targetname}
+    # Locked to the use key: a negative key (G_TryDoor refuses key < 0, g_mover.c:2337), or no
+    # key and a targetname some entity other than these targets (key -2 becomes -1,
+    # g_mover.c:2195-2233; SP_func_door sets -2 when the key is unset, :2455-2463). Only a
+    # script or that entity opens it, so it is seeded as a wall: BLOCKWALL.
+    key: key
+    targeters_that_leave_it_open: [trigger_aidoor, func_invisible_user]
+  # func_constructible starts unlinked unless START_BUILT (g_mover.c:5442-5480), so its brushes
+  # are no floor and no wall at round start; built, they are solid. func_brushmodel holds the
+  # stage models of a staged constructible and is freed on the fourth frame
+  # (g_mover.c:5681-5697): its brushes count as built-only too.
+  constructibles:
+    classnames: [func_constructible]
+    parts: [func_brushmodel]
+    start_built: {key: spawnflags, bit: 1}
+  # The add-on traces straight down from the middle of a connection whose two ends both carry
+  # BLOCKBRIDGE, and closes it while the trace meets nothing within 48 units
+  # (ET_Game.cpp:763-775), so a connection only gates the bridge when its midpoint is over
+  # the deck. Stock files span a bridge with one connection between waypoints on the two
+  # banks (battery 18-30, both BLOCKBRIDGE).
+  bridge_flags: [BLOCKBRIDGE]
+  bridge_trace_depth: 48
   names:
     spawn: "{team} spawn"
     objective: "{label}"
