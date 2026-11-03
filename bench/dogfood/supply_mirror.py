@@ -222,7 +222,7 @@ async def main(args):
             run.artifact("result", result)
 
         if args.objectives:
-            generated = await run.call("objective_playtests")
+            generated = await run.call("objective_playtests", cell=args.cell)
             result["objective_tests"] = {
                 "tests": [{"objective": t["objective"], "kind": t["kind"]} for t in generated["tests"]],
                 "skipped": generated["skipped"],
@@ -254,7 +254,7 @@ async def main(args):
                 run.artifact("result", result)
 
         if args.bots:
-            seeded = await run.call("bot_waypoints_write")
+            seeded = await run.call("bot_waypoints_write", cell=args.cell)
             way = seeded.get("staged") or seeded.get("file") or seeded.get("path")
             ours = await run.call(
                 "bot_playtest",
@@ -294,6 +294,9 @@ if __name__ == "__main__":
     p.add_argument("--no-objectives", dest="objectives", action="store_false")
     p.add_argument("--no-bots", dest="bots", action="store_false")
     p.add_argument("--bot-seconds", type=float, default=300)
+    # The grids cover the whole map, sky and clip ceiling included (6912 x 6912 x 3456): 24
+    # is the finest cell under the analysis cap.
+    p.add_argument("--cell", type=float, default=24)
     p.add_argument("--bot-count", type=int, default=8)
     p.add_argument(
         "--stock-way",
