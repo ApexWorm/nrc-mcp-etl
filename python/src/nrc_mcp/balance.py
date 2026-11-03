@@ -104,6 +104,18 @@ def _waves(data: dict, game_map, text: str | None) -> tuple[dict, list[str]]:
     return waves, notes
 
 
+#: The reinforcement model's fixed caveats, the same on every call. A summary leaves these
+#: out (`nrc_mcp.detail`) and keeps the notes that are specific to the map and script.
+MODEL_NOTES = (
+    "Travel is distance / constant speed over approximate voxel routes, not an engine measurement. Acceleration, sprint stamina, combat and pauses are not modelled.",
+    "Arrival ranges add zero to one reinforcement interval; death phase and wave offset are unknown. They do not predict which team wins.",
+    "All stages use the same geometry snapshot; selecting entities does not open doors, build bridges or execute scripts. Measure changed geometry separately.",
+    "Spawn capacity counts static slots and overlapping player boxes, not engine spawn selection or live player occupancy. A group's team-size shortfall assumes the entire team chooses that group.",
+    "Routes start at the selected spawn nearest its group's centroid, not an average over every slot. The representative entity is included with each route.",
+    "Uniquely linked objective entities declared by the profile share the describing marker's approach area and team. Routes list every represented entity; stages may select either member. Ambiguous links remain separate.",
+)
+
+
 def _indices(value: Any, known: set[int], name: str) -> set[int]:
     if not isinstance(value, list) or any(
         isinstance(i, bool) or not isinstance(i, int) for i in value
@@ -351,12 +363,7 @@ def enrich(
         },
         "stages": stage_rows,
         "notes": [
-            "Travel is distance / constant speed over approximate voxel routes, not an engine measurement. Acceleration, sprint stamina, combat and pauses are not modelled.",
-            "Arrival ranges add zero to one reinforcement interval; death phase and wave offset are unknown. They do not predict which team wins.",
-            "All stages use the same geometry snapshot; selecting entities does not open doors, build bridges or execute scripts. Measure changed geometry separately.",
-            "Spawn capacity counts static slots and overlapping player boxes, not engine spawn selection or live player occupancy. A group's team-size shortfall assumes the entire team chooses that group.",
-            "Routes start at the selected spawn nearest its group's centroid, not an average over every slot. The representative entity is included with each route.",
-            "Uniquely linked objective entities declared by the profile share the describing marker's approach area and team. Routes list every represented entity; stages may select either member. Ambiguous links remain separate.",
+            *MODEL_NOTES,
             str(spec.get("note", "")),
             *notes,
         ],

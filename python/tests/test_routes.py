@@ -214,7 +214,12 @@ def test_snapshot_revision_and_render_remain_current_without_saving(tmp_path):
     before = gameplay.route_report(**kwargs)
     image, text = gameplay.route_render(**kwargs, width=640, height=480)
     rendered = json.loads(text)
-    assert rendered["path"] == before["path"]
+    # The default summary keeps `segments` (the same vertices, grouped by stance) and drops
+    # the per-vertex `path`; `detail="full"` restores it.
+    assert rendered["segments"] == before["segments"] and "path" not in rendered
+    full = gameplay.route_report(**kwargs, detail="full")
+    vertices = {tuple(p["position"]) for p in full["path"]}
+    assert vertices == {tuple(q) for s in before["segments"] for q in s["points"]}
     assert rendered["revision"]["sha256"] == before["revision"]["sha256"]
     assert image.data.startswith(b"\x89PNG")
     server.solid_commit(

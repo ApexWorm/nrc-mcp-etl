@@ -24,8 +24,7 @@ def bench_run() -> dict:
     they cannot justify.
 
     Also reports whether the protected paths are unchanged. If they are not, treat every score as
-    meaningless — §11.4 names editing the ruler as the most likely failure mode of any
-    optimization loop.
+    meaningless: the ruler itself was edited.
     """
     r = run_mise_task("bench")
     root = repo_root()
@@ -59,7 +58,7 @@ def upstream_diff() -> dict:
     Hashes the individual declarations in `include/` the plugin binds to, rather than whole files,
     so it fires when something the plugin calls has actually moved instead of on every comment
     change. Also reports new or removed compiler flags, because each new flag is a potential
-    optimizer capability (§6) — that feed pays for itself even if the pull request never happens.
+    optimizer capability.
 
     Reads what is already on disk. `upstream_fetch` is the one that goes to the network.
     """
@@ -83,9 +82,8 @@ def pr_plan_status() -> dict:
     """Regenerate and summarize the upstream contribution plan.
 
     Every number is measured, not asserted. The three criteria that cannot be met from here — never
-    compiled, no usage telemetry, no maintainer asked — are reported as unmet rather than glossed,
-    and the telemetry one matters most: §10.1's rule is that any RPC method with zero real-session
-    usage is cut before submission, so inventing those numbers would defeat the feed's purpose.
+    compiled, no usage telemetry, no maintainer asked — are reported as unmet rather than glossed.
+    Never invent the telemetry: an RPC method with no real-session usage is cut before submission.
     """
     r = run_mise_task("pr:report")
     plan = repo_root() / "docs" / "pr-plan.md"
@@ -102,8 +100,7 @@ def selfdev_protected() -> dict:
     """List the paths self-modification may never touch, and verify their hash pins.
 
     Read-only, and available whether or not self-dev is enabled: knowing what is frozen is useful
-    on its own. §11.4 calls this mechanism "the only thing standing between self-improving and
-    self-congratulating".
+    on its own.
     """
     r = run_mise_task("selfdev:status")
     return {"ok": r["ok"], "status": r["stdout"] or r["stderr"]}

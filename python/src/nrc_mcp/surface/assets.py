@@ -115,8 +115,7 @@ def blender_brief(
     material names, UV density, export axes and the collision decision are all decided here. A
     brief that says "make it crate-sized" gets a crate of the wrong size.
 
-    The unit scale comes from the profile, not from this code — §7.4 names that constant
-    specifically as a place game specifics leak in.
+    The unit scale comes from the profile.
     """
     pid = _require_profile(profile_id)
     try:
@@ -239,10 +238,8 @@ def model_make_clip(
     """Fit a convex collision hull to a mesh, returned as Solid IR.
 
     The hull is a k-DOP: the tightest intersection of half-spaces with `k` fixed normals that
-    contains every vertex, pushed outward to the grid so it never cuts into the visual. That is a
-    deliberate choice, not a shortcut — §5.4 argues that for a competitive shooter snappy,
-    predictable collision beats accurate collision, and a 14-plane hull is something a player can
-    read while sliding along it.
+    contains every vertex, pushed outward to the grid so it never cuts into the visual: simple,
+    predictable collision rather than an exact fit.
 
     `kind` selects the clip shader from the profile: `player` for movement only, `weapon` to stop
     bullets where the visual has gaps, `both` for solid.

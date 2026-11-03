@@ -16,9 +16,11 @@ from mcp.server.mcpserver import Image as _Image
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import bsp as bspmod
+from .. import detail as detailmod
 from .. import optimize as optmod
 from .. import playtest as playtestmod
 from .. import profiles
+from ..detail import Detail
 from ..engine import EngineError
 from ..kernel import repo_root, run_mise_task
 from ..runtime import (
@@ -36,6 +38,7 @@ def engine_playtest(
     profile_id: str | None = None,
     timeout_seconds: float = 180,
     include_images: bool = True,
+    detail: Detail = "summary",
 ) -> list:
     """Exercise a packaged map with real player controls and fresh state assertions.
 
@@ -54,7 +57,10 @@ def engine_playtest(
 
     Returns the JSON receipt and, by default, the last three screenshot image blocks.
     `include_images=false` returns just the JSON receipt; all image paths remain recorded.
+    `detail="summary"` (default) gives passing steps as verdicts and failed steps in full;
+    `"full"` adds every observation, the scenario echo and the command line.
     """
+    full = detailmod.wants_full(detail)
     path = Path(pk3)
     if not path.is_absolute():
         path = repo_root() / path
@@ -65,7 +71,7 @@ def engine_playtest(
         report = playtestmod.run(path, pid, scenario, timeout_seconds=timeout_seconds)
     except (EngineError, profiles.ProfileError, OSError, ValueError) as e:
         raise ToolError(str(e)) from e
-    content = [json.dumps(report)]
+    content = [json.dumps(report if full else detailmod.engine_playtest(report))]
     if include_images:
         content.extend(
             _Image(data=Path(p).read_bytes(), format="jpeg") for p in report["screenshots"][-3:]
@@ -271,8 +277,7 @@ def hint_suggest(prt_path: str, limit: int = 10) -> dict:
     Needs a `.prt`, which `-vis -saveprt` writes: compile with the `final` preset, or run
     `task_run("compile:final", [map])`.
 
-    §6.1 calls this "tedious, high-skill, high-payoff work that almost nobody does properly by
-    hand". Each suggestion names the leaf, its portal count and a proposed splitting plane, with a
+    Each suggestion names the leaf, its portal count and a proposed splitting plane, with a
     predicted before/after — predicted, because confirming it needs another `-vis` run.
     """
     p = Path(prt_path)
