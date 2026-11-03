@@ -237,9 +237,20 @@ to reach them. `bot_playtest` then runs the packed map on a dedicated server wit
 nothing else in the add-on's nav folder, adds bots and reports what they did. On the dogfood
 maps (see `bench/dogfood/README.md`) the add-on loaded every seeded file, bots walked them,
 crawled the prone vent and crouched through the tunnel, planted, built, captured and stole
-the objectives, and escorted the convoy truck to its gate. Seeded graphs carry no jump, ladder,
-door-use, sniping or camping spots, no bridge flags and no map script; hand-tune those in
-Omni-bot's own editor.
+the objectives, and escorted the convoy truck to its gate.
+
+Beside the `.way` the same call writes `<map>_goals.gm` (map goals) and `<map>.gm` (the map
+script), which the add-on runs at every map load. Defend spots are chosen per objective part
+a team holds (the thing to blow up, a held flag, an item and its delivery place): standing
+waypoints that see where the other team uses it, ranked by how much of that team's shortest
+routes in they see, facing them. Snipe spots per team see the most of the enemy's routes at
+long range from the team's own side. Pass `spots` for your own (DEFEND, ATTACK, CAMP, SNIPE,
+MOBILEMG42, MOBILEMORTAR). The script hooks each objective's events by the trigger names the
+game sends (its "Planted at <track>." popups and the map script's own `wm_announce` texts) and
+switches spots per team: defenders of a destroyed objective stand down, a built one is
+defended, a captured flag changes hands, a stolen item's defenders move to its delivery place.
+Seeded graphs carry no jump, ladder, door-use or bridge flags; hand-tune those in Omni-bot's
+own editor.
 
 ## Connect an MCP client
 
@@ -545,7 +556,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | --- | --- |
 | `compile_map` | Run q3map2 with a named preset. |
 | `engine_playtest` | Run bounded gameplay actions with state assertions; retain logs and return screenshots. |
-| `bot_playtest` | Run the packed map on a dedicated server with the bot add-on and its seeded waypoints only (a throwaway copy of the add-on folder), add bots, and report what the add-on loaded, how far each bot travelled along the waypoints, the stances seen, and the game's objective events. |
+| `bot_playtest` | Run the packed map on a dedicated server with the bot add-on and its seeded waypoints only (a throwaway copy of the add-on folder), add bots, and report what the add-on loaded, how far each bot travelled along the waypoints, the stances seen, and the game's objective events. With the staged map goals and map script: goals loaded, script errors, the script's messages with the goals each switched, and when bots of each spot's team stood on it. |
 | `bsp_report` · `bsp_entity_diff` | Read a compiled BSP; compare its entities to the source. |
 | `structural_audit` | Brushes marked structural that need not be. |
 | `hint_suggest` | Hint brush planes, proposed from a portal file. |
@@ -586,7 +597,7 @@ The overlay uses the same map snapshot and marks stand/crouch/prone, endpoints a
 | `arena_write` · `objdata_write` | The arena file (the map in the menu: name, briefing, gametypes) and the limbo objective descriptions. |
 | `commandmap_make` · `levelshot_make` | The command map - map coordinates on the worldspawn, a top-down section image and its shaders - and the loading-screen levelshot. |
 | `pack_pk3` | Build the release archive. Names the packer misses but the base game or the map supplies do not fail it; `ignore` lets named resources be missing. |
-| `bot_waypoints_write` | Seed the bot add-on's waypoint file (for ET: Legacy an Omni-bot `.way`) from the stand/crouch/prone grids: connected waypoints, crouch/prone and blockable flags, named spawn and objective waypoints, and whether each objective is reached from each team's spawns. Staged beside the map's folder for the server's `omnibot_path`; the add-on never reads it from the pk3. |
+| `bot_waypoints_write` | Seed the bot add-on's waypoint file (for ET: Legacy an Omni-bot `.way`) from the stand/crouch/prone grids: connected waypoints, crouch/prone and blockable flags, named spawn and objective waypoints, and whether each objective is reached from each team's spawns. Also writes the map goals (defend spots per held objective part, snipe spots per team, chosen by line of sight over the teams' shortest routes; plus caller `spots`) and a map script that switches them on the game's objective triggers. Staged beside the map's folder for the server's `omnibot_path`; the add-on never reads them from the pk3. |
 | `repack_analyze` | Every resource the BSP references, and which of them nothing supplies (what fails a pack). |
 
 **The toolchain itself**
