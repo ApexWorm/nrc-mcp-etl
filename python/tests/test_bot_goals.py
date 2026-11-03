@@ -189,7 +189,9 @@ def test_script_reader_rejects_what_the_writer_never_makes():
     with pytest.raises(botgoals.BotGoalsError, match="unbalanced|unclosed"):
         botgoals.read_script("global OnMapLoad = function() { x = { 1, };", sections()[1])
     with pytest.raises(botgoals.BotGoalsError, match="does not define"):
-        botgoals.read_script('global OnMapLoad = function() { OnTrigger( "a", Map.nope ); };', sections()[1])
+        botgoals.read_script(
+            'global OnMapLoad = function() { OnTrigger( "a", Map.nope ); };', sections()[1]
+        )
     with pytest.raises(botgoals.BotGoalsError):
         botgoals.read_goals("global _MG = { A = Vec3(1, 2), };", sections()[0])
 
@@ -204,7 +206,9 @@ def test_written_scripts_compile_with_the_addon_script_engine(tmp_path):
     goals, script, _ = sections()
     spots = _spots()
     (tmp_path / "m_goals.gm").write_text(botgoals.goals_text(spots, goals, "t"))
-    (tmp_path / "m.gm").write_text(botgoals.script_text_for(_hooks(), spots, goals, script, "nrc: ", "t"))
+    (tmp_path / "m.gm").write_text(
+        botgoals.script_text_for(_hooks(), spots, goals, script, "nrc: ", "t")
+    )
     run = subprocess.run([GMCHECK, "--run", str(tmp_path / "m_goals.gm")], capture_output=True)
     assert run.returncode == 0, run.stderr
     assert b"_MG entries: 4" in run.stdout
@@ -390,7 +394,9 @@ def test_script_report_reads_the_logs_and_spot_occupancy(tmp_path):
     hooks = [
         botgoals.Hook("gate", "dynamite", "destroyed", "Down!", "map", off=[("anchor", "axis")])
     ]
-    (tmp_path / "m.gm").write_text(botgoals.script_text_for(hooks, spots, goals, script, "nrc: ", "t"))
+    (tmp_path / "m.gm").write_text(
+        botgoals.script_text_for(hooks, spots, goals, script, "nrc: ", "t")
+    )
     sample = (
         '{t:>8} NRC_BOTS tok {{"time":{t},"bots":[{{"client":1,"team":"red","dead":false,'
         '"stance":"stand","position":[{x},-20.0,24.0]}}]}}'

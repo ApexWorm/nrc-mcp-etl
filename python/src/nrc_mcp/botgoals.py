@@ -1043,9 +1043,7 @@ def read_script(text: str, script_spec: dict) -> dict:
                 j += 1
             on = toks[j + 1][1]
             if toks[j + 2][1] != "," or toks[j + 3][1] != "{":
-                raise BotGoalsError(
-                    f"{available} takes a team, true/false and a name table"
-                )
+                raise BotGoalsError(f"{available} takes a team, true/false and a name table")
             names = []
             k = j + 4
             while toks[k][1] != "}":
