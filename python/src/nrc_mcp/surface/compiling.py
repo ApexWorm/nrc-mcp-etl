@@ -39,6 +39,7 @@ def engine_playtest(
     profile_id: str | None = None,
     timeout_seconds: float = 180,
     include_images: bool = True,
+    depends: list[str] | None = None,
     detail: Detail = "summary",
 ) -> list:
     """Exercise a packaged map with real player controls and fresh state assertions.
@@ -61,6 +62,9 @@ def engine_playtest(
 
     Returns the JSON receipt and, by default, the last three screenshot image blocks.
     `include_images=false` returns just the JSON receipt; all image paths remain recorded.
+    `depends` lists other archives the map needs loaded with it (a map built on another
+    map's textures and models, packed with `pack_pk3(depends=...)`).
+
     `detail="summary"` (default) gives passing steps as verdicts and failed steps in full;
     `"full"` adds every observation, the scenario echo and the command line.
     """
@@ -72,7 +76,13 @@ def engine_playtest(
     if not pid:
         raise ToolError("select a profile or pass profile_id")
     try:
-        report = playtestmod.run(path, pid, scenario, timeout_seconds=timeout_seconds)
+        report = playtestmod.run(
+            path,
+            pid,
+            scenario,
+            timeout_seconds=timeout_seconds,
+            depends=[_resolve(d) for d in depends or []],
+        )
     except (EngineError, profiles.ProfileError, OSError, ValueError) as e:
         raise ToolError(str(e)) from e
     content = [json.dumps(report if full else detailmod.engine_playtest(report))]
@@ -93,6 +103,7 @@ def bot_playtest(
     port: int = 0,
     profile_id: str | None = None,
     keep: bool = False,
+    depends: list[str] | None = None,
     detail: Detail = "summary",
 ) -> dict:
     """Load a packaged map with its bot waypoints on a dedicated server, add bots, watch them.
@@ -112,6 +123,7 @@ def bot_playtest(
     moved along the waypoints. Whether bots attempt an objective in a given run depends on
     the add-on's goal choices and the fight; read `events`, and run longer for more.
     `keep=true` retains the folders and names the logs. Needs the engine and game data.
+    `depends` lists other archives the map needs loaded with it, as for `engine_playtest`.
 
     `detail="summary"` (default) leaves out the per-bot rows when more than 12 bots ran;
     `"full"` always returns them.
@@ -149,6 +161,7 @@ def bot_playtest(
             addon_dir=addon_dir,
             port=port,
             keep=keep,
+            depends=[_resolve(d) for d in depends or []],
         )
     except (EngineError, botnav.BotNavError, profiles.ProfileError, OSError, ValueError) as e:
         raise ToolError(str(e)) from e
@@ -156,6 +169,11 @@ def bot_playtest(
         report["bots"] = report["bots"][:12]
         report["omitted"] = {"bots": 'rows past the first 12; detail="full" returns all'}
     return report
+
+
+def _resolve(path: str) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else repo_root() / p
 
 
 @tool("compiling", "Compile with q3map2", writes=True)

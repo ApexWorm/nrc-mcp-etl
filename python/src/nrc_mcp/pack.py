@@ -310,7 +310,7 @@ def _account_for(
         except (optimize.OptimizeError, OSError):
             continue
     images = tuple(optimize.IMAGE_EXTENSIONS)
-    others = {a: archive_entries(a) for a in depends or []}
+    others = {a: archive_entries(a) | _archive_shaders(a) for a in depends or []}
 
     def depended_on(low: str) -> Path | None:
         for a, held in others.items():
@@ -446,6 +446,26 @@ def archive_entries(archive: Path) -> set[str]:
             return {n.lower() for n in z.namelist() if not n.endswith("/")}
     except (OSError, zipfile.BadZipFile):
         return set()
+
+
+def _archive_shaders(archive: Path) -> set[str]:
+    """The names of the shaders an archive's own scripts define, lowercased."""
+    from . import optimize  # noqa: PLC0415
+
+    names: set[str] = set()
+    try:
+        with zipfile.ZipFile(archive) as z:
+            for member in z.namelist():
+                if not member.lower().endswith(".shader"):
+                    continue
+                text = z.read(member).decode("utf-8", errors="replace")
+                try:
+                    names.update(s["name"].lower() for s in optimize.parse_shader_text(text, member))
+                except optimize.OptimizeError:
+                    continue
+    except (OSError, zipfile.BadZipFile):
+        pass
+    return names
 
 
 def _archive_digests(archives: list[Path], wanted: set[str]) -> dict[str, set[bytes]]:

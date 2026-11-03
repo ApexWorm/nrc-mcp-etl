@@ -93,6 +93,7 @@ def run(
     port: int = 0,
     interval_ms: int = 2000,
     keep: bool = False,
+    depends: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     pk3 = Path(pk3)
     if not pk3.is_file():
@@ -144,6 +145,11 @@ def run(
         gamedir = home / str(pkg.get("basegame") or eng.get("gamedir") or "")
         gamedir.mkdir(parents=True, exist_ok=True)
         shutil.copy(pk3, gamedir / pk3.name)
+        for other in depends or []:
+            other = Path(other).resolve()
+            if not other.is_file():
+                raise engine.EngineError(f"{other} does not exist")
+            (gamedir / other.name).symlink_to(other)
         token = secrets.token_hex(6)
         observer = profiles.profiles_dir() / str(play["observer"])
         target = home / str(play["observer_target"])
