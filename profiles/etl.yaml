@@ -4374,6 +4374,13 @@ bots:
   confidence: verified
   source: omnibot_source
   addon: Omni-bot
+  # Loaded in ET: Legacy 2.86.2 with the bundled 0.93 library and the 0.92 release library:
+  # seeded files load ("N Waypoints Loaded"), bots walk them, take the CROUCH/PRONE stance in
+  # flagged passages, and plant, defuse, build, capture, steal and escort on the dogfood maps
+  # (bench/dogfood/README.md). BLOCKWALL is written as the source says the add-on reads it,
+  # but no dogfood map has a blown wall between areas, so its runtime effect is unverified.
+  engine_verified: [load, movement, stance_flags, objectives]
+  engine_unverified: [blockable_flags]
   # Where the add-on looks, relative to omnibot_path; and where bot_waypoints_write stages
   # the file, relative to the folder holding maps/ (mirrors the omnibot_path layout, so the
   # staged tree can be copied over the server's Omni-bot folder). pack_pk3 never packs it.

@@ -282,13 +282,15 @@ class Seed:
 class _Graph:
     """The union of the stance grids, as one directed cell graph with a stance per cell."""
 
-    def __init__(self, grids: dict[str, analysis.NavGrid]):
+    def __init__(self, grids: dict[str, analysis.NavGrid], exclude: frozenset = frozenset()):
         self.grids = grids
+        self.exclude = exclude
         self.order = [s for s in STANCES if s in grids]
         self.rank: dict[tuple[int, int, int], int] = {}
         for r, stance in enumerate(self.order):
             for c in grids[stance].walkable_cells():
-                self.rank.setdefault(c, r)
+                if c not in exclude:
+                    self.rank.setdefault(c, r)
         self._nb: dict[tuple[int, tuple[int, int, int]], frozenset] = {}
 
     def nb(self, r: int, cell) -> frozenset:
@@ -298,8 +300,8 @@ class _Graph:
         if hit is None:
             grid = self.grids[self.order[r]]
             hit = (
-                frozenset(d for d, _ in grid.neighbours(cell))
-                if grid.is_walkable(cell)
+                frozenset(d for d, _ in grid.neighbours(cell) if d not in self.exclude)
+                if grid.is_walkable(cell) and cell not in self.exclude
                 else frozenset()
             )
             self._nb[key] = hit
@@ -312,7 +314,11 @@ class _Graph:
         return frozenset().union(*(self.nb(rr, cell) for rr in range(r + 1)))
 
     def straight(self, r: int, a, b) -> bool:
-        """Whether a body allowed stances up to rank `r` walks the straight XY line a -> b.
+        return self.walk(r, a, b) is not None
+
+    def walk(self, r: int, a, b) -> list | None:
+        """The cells a body allowed stances up to rank `r` crosses walking the straight XY
+        line a -> b, or None where it cannot.
 
         Steps column by column along the line through directed grid moves only, changing
         stance only where both bodies fit, as route_report does. A riser can clear the cells
@@ -320,7 +326,7 @@ class _Graph:
         little further along the line are tried, as the grid's own longer step moves do.
         """
         if a == b:
-            return True
+            return [a]
         span = max(abs(b[0] - a[0]), abs(b[1] - a[1]))
         line: list[tuple[int, int]] = []
         for i in range(1, 2 * span + 1):
@@ -330,7 +336,7 @@ class _Graph:
             )
             if col != (a[0], a[1]) and (not line or line[-1] != col):
                 line.append(col)
-        cur, i = a, 0
+        cur, i, cells = a, 0, [a]
         while i < len(line):
             moves = self.moves(r, cur)
             found = None
@@ -341,9 +347,10 @@ class _Graph:
                     found = (ahead, min(options, key=lambda d: (abs(d[2] - want), d)))
                     break
             if found is None:
-                return False
+                return None
             i, cur = found[0] + 1, found[1]
-        return cur == b
+            cells.append(cur)
+        return cells if cur == b else None
 
 
 def seed(
@@ -352,7 +359,8 @@ def seed(
     *,
     spacing: float,
     pins: list[dict] | None = None,
-    closed: dict[str, analysis.NavGrid] | None = None,
+    openings: frozenset = frozenset(),
+    exclude: frozenset = frozenset(),
 ) -> Seed:
     """Sample the walkable cells into waypoints about `spacing` apart and connect them.
 
@@ -364,11 +372,12 @@ def seed(
     the two waypoints is walkable by directed moves in the stricter of their two stances:
     the add-on steers in a straight line between waypoints.
 
-    `closed`, the same grids with state-changing brushes solid, marks connections that only
-    exist once something is blown open: both ends get the profile's blockable flags, which the
-    add-on re-tests at runtime by tracing between them.
+    `openings` are cells walkable only once a state-changing brush is gone (a blown wall):
+    a connection walking through one gets the profile's blockable flags on both ends, which
+    the add-on re-tests at runtime by tracing between them. `exclude` cells get no waypoint
+    and are never walked through (a breakable objective's own volume).
     """
-    g = _Graph(grids)
+    g = _Graph(grids, exclude)
     if not g.rank:
         raise BotNavError("the grids hold no walkable cell")
     cell = next(iter(grids.values())).cell
@@ -443,16 +452,11 @@ def seed(
     edges: dict[int, set[int]] = {}
     rejected = 0
     blockable: set[int] = set()
-    closed_graph = _Graph(closed) if closed else None
     node_rank = list(piece_rank)
 
     def link(x: int, y: int, r: int) -> None:
         edges.setdefault(x, set()).add(y)
-        if closed_graph is not None and not (
-            reps[x] in closed_graph.rank
-            and reps[y] in closed_graph.rank
-            and closed_graph.straight(r, reps[x], reps[y])
-        ):
+        if openings and any(c in openings for c in g.walk(r, reps[x], reps[y]) or ()):
             blockable.update((x, y))
 
     portal_at: dict[tuple[int, int, int], int] = {}
@@ -696,6 +700,18 @@ def build(
         else None
     )
 
+    exclude = _enclosed_openings(grids, closed) if closed else frozenset()
+    openings = (
+        frozenset(
+            {c for g in grids.values() for c in g.walkable_cells()}
+            - {c for g in closed.values() for c in g.walkable_cells()}
+            - exclude
+        )
+        if closed
+        else frozenset()
+    )
+    # Spawns and objectives are pinned where players stand when the round starts.
+    start = closed or grids
     names = bots.get("names") or {}
     teams = _team_names(profile_id)
     by_index = {int(e["index"]): e for e in entities}
@@ -711,7 +727,7 @@ def build(
         label = _label(by_index[marker.entity], list(names.get("objective_keys") or []))
         # One pin per approach point (a brush objective's footprint centre and each side):
         # which of them a team can reach is the graph's to say, as it is balance_report's.
-        hits = [h for h in (_pin_cell(grids, (p,), radius) for p in points) if h is not None]
+        hits = [h for h in (_pin_cell(start, (p,), radius) for p in points) if h is not None]
         kept: dict[tuple, float] = {}
         for c, distance in sorted(hits, key=lambda h: (h[1], h[0])):
             kept.setdefault(c, distance)
@@ -730,7 +746,7 @@ def build(
                 }
             )
     for marker in spawns:
-        hit = _pin_cell(grids, (marker.origin,), radius)
+        hit = _pin_cell(start, (marker.origin,), radius)
         pins.append(
             {
                 "kind": "spawn",
@@ -746,7 +762,7 @@ def build(
             }
         )
 
-    seeded = seed(grids, bots, spacing=spacing, pins=pins, closed=closed)
+    seeded = seed(grids, bots, spacing=spacing, pins=pins, openings=openings, exclude=exclude)
     for pin in pins:
         pin["waypoint"] = seeded.piece_of.get(pin["cell"]) if pin["cell"] is not None else None
     # Waypoints no spawn connects to in either direction (a ledge on a decorative pipe, a
@@ -823,6 +839,7 @@ def build(
         "pruned_unconnected_to_spawns": pruned,
         "stances": list(stances),
         "state_changing_entities": changing,
+        "state_changing_cells_skipped": len(exclude),
         "pins": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in p.items()} for p in pins],
         "objectives": list(coverage.values()),
         "spawn_waypoints": {t: sorted(v) for t, v in sorted(spawn_wps.items())},
@@ -831,6 +848,42 @@ def build(
         },
     }
     return wf, report
+
+
+def _enclosed_openings(grids: dict, closed: dict) -> frozenset:
+    """Cells walkable only once state-changing brushes are gone, that join nothing.
+
+    A blown wall or door opens a way between places that were apart: its cells stay, and
+    connections through it are flagged blockable. A breakable objective (a radio, a crate)
+    opens nothing; its volume would only add waypoints inside a solid box that the add-on
+    then picks as the nearest waypoint to the objective. Each connected patch of open-only
+    cells is kept when its rim touches two or more pieces of the start-of-round space.
+    """
+    labels = next(iter(closed.values())).components()
+    first = next(iter(closed.values()))
+    union = {c for g in closed.values() for c in g.walkable_cells()}
+    opened = {c for g in grids.values() for c in g.walkable_cells()} - union
+    graph = _Graph(grids)
+    out: set = set()
+    seen: set = set()
+    for start in sorted(opened):
+        if start in seen:
+            continue
+        patch, rim, todo = [], set(), [start]
+        seen.add(start)
+        while todo:
+            c = todo.pop()
+            patch.append(c)
+            for r in range(len(graph.order)):
+                for d in graph.nb(r, c):
+                    if d in opened and d not in seen:
+                        seen.add(d)
+                        todo.append(d)
+                    elif d in union:
+                        rim.add(labels.get(d, -1) if first.is_walkable(d) else -1)
+        if len(rim - {-1}) < 2:
+            out.update(patch)
+    return frozenset(out)
 
 
 def install_path(bots: dict[str, Any], mapname: str) -> Path:

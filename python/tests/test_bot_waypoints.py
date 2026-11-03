@@ -264,6 +264,25 @@ def test_blown_wall_connections_are_blockable(tmp_path):
                 assert w.flags & blockable and wf.waypoints[t].flags & blockable
 
 
+def test_a_breakable_objective_gets_no_waypoint_inside_it(tmp_path):
+    # A crate to blow up in the middle of a room opens no way anywhere: waypoints inside it
+    # would be the add-on's nearest waypoint to the objective, unreachable until it is gone.
+    path = write_map(
+        tmp_path,
+        room(0, 0, 768, 512),
+        [
+            point_entity("team_CTF_redspawn", (96, 256, 24)),
+            point_entity("team_CTF_bluespawn", (672, 256, 24)),
+            _brush_entity("func_explosive", box((352, 224, 0), (416, 288, 96))),
+        ],
+    )
+    wf, report = _seed(path, spacing=64)
+    assert report["state_changing_cells_skipped"] > 0
+    assert not any(w.flags for w in wf.waypoints)
+    assert not [w for w in wf.waypoints if 352 < w.position[0] < 416 and 224 < w.position[1] < 288]
+    assert report["components"]["count"] == 1
+
+
 def test_waypoints_no_spawn_connects_to_are_dropped(tmp_path):
     # A sealed box beside the room: walkable, but nobody can get there.
     path = write_map(

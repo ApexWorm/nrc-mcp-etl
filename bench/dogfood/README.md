@@ -144,3 +144,33 @@ mise run bench:dogfood -- engine /absolute/path/nrc_movement_autopacked.pk3 \
 Inspect `result.json` and screenshots together. Failed attempts remain on disk with the same
 evidence as successful attempts. Native previews show geometry; engine screenshots are needed
 to assess actual materials, lighting and player interactions.
+
+## Bot waypoints in the engine
+
+`bot_waypoints_write` then `bot_playtest` (8 bots, 300 s, ET: Legacy 2.86.2 with its bundled
+Omni-bot 0.93, cell 16, spacing 128) on each example, driven through the tool functions. Every
+run's add-on log said `N Waypoints Loaded from file nav/<map>.way` at each map load, with no
+load error, and every bot moved along the graph:
+
+| Example | Waypoints | Flags | Bots travelled (units) | Waypoints passed per bot | Objective events (game log) |
+| --- | --- | --- | --- | --- | --- |
+| depot | 291 | - | 23,600-35,800 | 72-122 | Allies planted the relay transmitter 3 times, Axis defused once |
+| workshop | 201 | 3 CROUCH | 14,100-17,900 | 60-93 | none in this run; an earlier 300 s run: "The Allies built the workshop bridge!", round won |
+| frontline | 194 | - | 42,500-58,400 | 43-83 | the forward bunker captured 40 times, both teams |
+| convoy | 150 | - | 22,500-27,700 | 43-64 | orders stolen and returned; "The Supply Truck has reached the Axis gate!", round won at 61 s |
+| movement | 126 | 16 CROUCH, 23 PRONE | 19,500-30,700 | 51-83 | Axis planted the radio 6 times, Allies defused 5 |
+
+On the movement map the observer saw bots in the crouch tunnel 51 times and in the prone vent
+50 times, every sample crouched and prone respectively: the flags make the add-on take the
+stance on the way in. Without a waypoint file the add-on loads, logs `Waypoint <map>.way not
+found in file or archives` and adds no bot at all. The same seeded files load in the 0.92
+Linux release library.
+
+What is not seeded, so not tested: door use (a `func_door` is solid to the grids, so the
+frontline Axis door carries no waypoint), jumps, ladders, and map scripts for goal
+priorities. Constructibles are as solid to the grids as any brush, so waypoints are seeded on
+the workshop bridge's deck before it is built; they are not flagged with Omni-bot's
+`BLOCKBRIDGE` (which would close those links while no floor is under them). Blown walls are
+handled: a state-changing brush that separates two areas keeps its cells, and connections
+through it get `BLOCKWALL`; one that separates nothing (the depot transmitter, the movement
+radio) gets no waypoint inside it.

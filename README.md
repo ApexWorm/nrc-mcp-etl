@@ -226,6 +226,21 @@ and seen to the end of its path; a stolen item is picked up and delivered; and w
 script ends the round, the test waits for intermission and the winner it sets.
 `mise run bench:dogfood -- objectives <example>` generates and runs them for an example map.
 
+**Bots.** ET: Legacy servers fill teams with Omni-bot, and Omni-bot adds no bot at all to a map
+it has no waypoints for. `bot_waypoints_write` seeds the open map's `.way` file from the
+stand/crouch/prone grids and stages it at `omni-bot/et/nav/<map>.way` beside the map's folder:
+copy that `et/` into the server's Omni-bot folder (the `omnibot_path` cvar; ET: Legacy's
+`etlded_bot.x86_64.sh` uses `./legacy/omni-bot`), or pass `omnibot_path` to write it there.
+Omni-bot reads waypoints only from its own folder, never from the map's pk3. Objective goals
+(dynamite, construction, flags, checkpoints) come from the game itself; the waypoints only have
+to reach them. `bot_playtest` then runs the packed map on a dedicated server with that file and
+nothing else in the add-on's nav folder, adds bots and reports what they did. On the dogfood
+maps (see `bench/dogfood/README.md`) the add-on loaded every seeded file, bots walked them,
+crawled the prone vent and crouched through the tunnel, planted, built, captured and stole
+the objectives, and escorted the convoy truck to its gate. Seeded graphs carry no jump, ladder,
+door-use, sniping or camping spots, no bridge flags and no map script; hand-tune those in
+Omni-bot's own editor.
+
 ## Connect an MCP client
 
 The server speaks JSON-RPC on stdio.
