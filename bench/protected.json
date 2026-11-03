@@ -13,7 +13,7 @@
   },
   "note": "Hash pins for paths self-dev may not modify (\u00a711.4). Re-pinned only by a human who has reviewed the change; the loop cannot call --repin.",
   "profiles": {
-    "etl.yaml": "2c969d09dcba5faa39e2caf2d8e783481d38aef90d0fc94283e33d1052d7d4f6",
+    "etl.yaml": "66d3fcfce95292ec3b5951e048ecbc2e14de5d2924420a068cd4fe86b5a6c284",
     "urt43.yaml": "daeaa63df42c1bd37fc12f6827fdd63a75365decc83e3a6514a0af87b785c9b6"
   },
   "trees": {
