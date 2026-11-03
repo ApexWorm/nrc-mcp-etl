@@ -13,8 +13,13 @@ format family (`packed_waypoints`: a fixed header, then per waypoint a field mas
 position, varint-packed optional fields and relative-index connections); the profile states
 which version it is and cites the add-on's source for every field.
 
-What a seeded graph is not: a hand-tuned waypoint file. It carries no jump, ladder, door,
-sniper or camp spots, and no map script; the add-on's goals come from the game itself
+Jumps and ladders, which the walk grids cannot express, are added after seeding
+(`add_traversals`): a ledge within the jump's rise or a gap the player box's arc clears gets
+take-off, landing and one-way jump links, and a ladder brush gets climb waypoints at its foot
+and top.
+
+What a seeded graph is not: a hand-tuned waypoint file. It carries no door, sniper or camp
+spots, and no map script; the add-on's goals come from the game itself
 (objective entities the game reports to it), and they need only reachable waypoints near
 them.
 """
@@ -620,6 +625,550 @@ def reachable(waypoints: list[Waypoint], start: int) -> set[int]:
 
 
 # --------------------------------------------------------------------------------------
+# Jumps and ladders: the links the walk grids cannot make
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Physics:
+    """The movement figures a jump needs, all from the profile's movement section."""
+
+    jump_velocity: float
+    gravity: float
+    speeds: tuple[float, ...]  # horizontal take-off speeds every gap arc must work at
+    separation: float
+    safe_drop: float
+    step: float
+    width: float
+
+    @property
+    def apex(self) -> float:
+        return self.jump_velocity**2 / (2 * self.gravity)
+
+    def rise(self, t: float) -> float:
+        return self.jump_velocity * t - 0.5 * self.gravity * t * t
+
+
+def _physics(profile_id: str, jumps: dict) -> _Physics | None:
+    """None when the profile lacks a figure: no jump is then guessed at."""
+    section = profiles.movement(profile_id).get("movement") or {}
+
+    def number(key: str, attr: str) -> float | None:
+        row = section.get(key)
+        v = row.get(attr) if isinstance(row, dict) else None
+        ok = isinstance(v, int | float) and math.isfinite(v) and v > 0
+        return float(v) if ok else None
+
+    jump = number("jump_velocity", "value")
+    gravity = number("gravity", "default")
+    run = number("run_speed", "value")
+    mv = analysis.movement_constants(profile_id)
+    if None in (jump, gravity, run) or mv.player_width is None:
+        return None
+    scales = [float(s) for s in jumps.get("speed_scales") or [] if float(s) > 0]
+    if not scales:
+        return None
+    return _Physics(
+        jump_velocity=jump,
+        gravity=gravity,
+        speeds=tuple(sorted(run * s for s in scales)),
+        separation=mv.floor_separation.value if mv.floor_separation else 0.0,
+        safe_drop=mv.fall_no_damage.value if mv.fall_no_damage else mv.step_height.value,
+        step=mv.step_height.value,
+        width=mv.player_width.value,
+    )
+
+
+def _floor(grid: analysis.NavGrid, cell, x: float | None = None, y: float | None = None) -> float:
+    """The exact top of the floor under a walkable cell (at its centre, or at x, y)."""
+    cx, cy, cz = grid.centre(cell)
+    x = cx if x is None else x
+    y = cy if y is None else y
+    intervals = analysis.column_intervals(grid.solids, grid.index, x, y)
+    found, _ = analysis.floor_and_ceiling(intervals, cz + grid.cell / 2)
+    return cz if found is None else found
+
+
+def _swept(grid: analysis.NavGrid, points: list[tuple[float, float, float]]) -> bool:
+    """The standing box, feet at each point in turn, meets nothing along the polyline."""
+    return all(
+        analysis.segment_clear(grid.clearance_solids, grid.clearance_index, a, b)
+        for a, b in zip(points, points[1:], strict=False)
+        if a != b
+    )
+
+
+def _arc(
+    grid: analysis.NavGrid,
+    phys: _Physics,
+    start: tuple[float, float, float],
+    direction: tuple[float, float],
+    speed: float,
+    lowest: float,
+    dt: float = 0.02,
+):
+    """Sweep the standing box along a jump's ballistic arc from `start` (feet).
+
+    Returns (landing cell, feet point) where the arc first comes down onto a walkable floor
+    with the box's centre over it, or None when it strikes anything on the way up, hits a
+    wall or edge coming down, or falls below `lowest`.
+    """
+    sx, sy, sz = start
+    p = start
+    t = 0.0
+    while True:
+        t += dt
+        q = (
+            sx + direction[0] * speed * t,
+            sy + direction[1] * speed * t,
+            sz + phys.rise(t),
+        )
+        if q[2] < lowest:
+            return None
+        if analysis.segment_clear(grid.clearance_solids, grid.clearance_index, p, q):
+            p = q
+            continue
+        if phys.jump_velocity - phys.gravity * t >= 0:
+            return None  # struck something while still rising
+        intervals = analysis.column_intervals(grid.solids, grid.index, p[0], p[1])
+        floor, _ = analysis.floor_and_ceiling(intervals, p[2] + 0.5)
+        if floor is None or floor < q[2] - 0.5:
+            return None  # the box met an edge or a wall, not a floor under its centre
+        ix, iy, _ = grid.cell_at((p[0], p[1], floor))
+        for iz in grid.columns.get((ix, iy), ()):
+            if abs(grid.centre((ix, iy, iz))[2] - floor) <= grid.cell / 2 + 1e-6:
+                return (ix, iy, iz), (p[0], p[1], floor + phys.separation)
+        return None
+
+
+class _Extend:
+    """Appends waypoints and connections to a seeded graph, keeping its lists in step."""
+
+    def __init__(self, seeded: Seed, grid: analysis.NavGrid, graph: _Graph, floor_offset: float):
+        self.s = seeded
+        self.grid = grid
+        self.g = graph
+        self.floor_offset = floor_offset
+        self.turns: dict[tuple[int, int, int], int] = {}
+        self.members: dict[int, set] = {}
+        for c, label in seeded.piece_of.items():
+            self.members.setdefault(label, set()).add(c)
+
+    def node(self, cell, *, floor: float | None = None, flags: int = 0, radius=None) -> int:
+        x, y, z = self.grid.centre(cell)
+        index = len(self.s.waypoints)
+        self.s.waypoints.append(
+            Waypoint(
+                position=(x, y, (z if floor is None else floor) + self.floor_offset),
+                uid=index + 1,
+                flags=flags,
+                radius=radius,
+            )
+        )
+        self.s.stance_of.append("stand")
+        self.s.cells.append(cell)
+        return index
+
+    def link(self, a: int, b: int) -> None:
+        conns = self.s.waypoints[a].connections
+        if a != b and b not in conns:
+            conns.append(b)
+            conns.sort()
+
+    def legs(self, a, b, allowed) -> list | None:
+        if a == b:
+            return [a]
+        if self.g.straight(0, a, b):
+            return [a, b]
+        return _taut_path(self.g, 0, a, b, allowed)
+
+    def walk(self, a: int, b: int) -> bool:
+        """Join waypoint a to b by straight standing walks inside a's piece (or b's), adding
+        a plain waypoint at each turn."""
+        ca, cb = self.s.cells[a], self.s.cells[b]
+        piece = self.s.piece_of.get(ca, self.s.piece_of.get(cb))
+        allowed = self.members.get(piece, set()) | {ca, cb}
+        legs = self.legs(ca, cb, allowed)
+        if legs is None:
+            return False
+        nodes = [a]
+        for turn in legs[1:-1]:
+            if turn not in self.turns:
+                self.turns[turn] = self.node(turn)
+            nodes.append(self.turns[turn])
+        nodes.append(b)
+        for x, y in zip(nodes, nodes[1:], strict=False):
+            self.link(x, y)
+        return True
+
+    def attach(self, index: int) -> bool:
+        """Walk both ways between a new waypoint and its own piece's waypoint."""
+        piece = self.s.piece_of.get(self.s.cells[index])
+        if piece is None:
+            return False
+        return self.walk(piece, index) and self.walk(index, piece)
+
+
+def _distances(waypoints: list[Waypoint], start: int) -> dict[int, float]:
+    """Shortest directed travel from `start` over the connections, in world units."""
+    import heapq  # noqa: PLC0415
+
+    best = {start: 0.0}
+    todo = [(0.0, start)]
+    while todo:
+        d, n = heapq.heappop(todo)
+        if d > best.get(n, math.inf):
+            continue
+        for m in waypoints[n].connections:
+            nd = d + math.dist(waypoints[n].position, waypoints[m].position)
+            if nd < best.get(m, math.inf):
+                best[m] = nd
+                heapq.heappush(todo, (nd, m))
+    return best
+
+
+def _jump_candidates(grid: analysis.NavGrid, piece_of: dict, phys: _Physics, margin: float):
+    """(take-off cell, landing cell, direction, columns apart) for every brink of the
+    standing grid: a cell whose next column offers no walk at its level, scanned along the
+    direction for the first walkable floor of each other piece within jump reach."""
+    cell = grid.cell
+    rise_cells = math.ceil((phys.apex - margin) / cell)
+    drop_cells = max(0, math.floor((phys.safe_drop - phys.apex) / cell))
+    reach = max(phys.speeds) * 2 * phys.jump_velocity / phys.gravity + phys.width
+    k_max = max(2, math.ceil(reach / cell))
+    headroom = grid.headroom_cells
+    for a in grid.walkable_cells():
+        pa = piece_of.get(a)
+        if pa is None:
+            continue
+        ix, iy, iz = a
+        for ux, uy in analysis._NEIGHBOURS:
+            nxt = grid.columns.get((ix + ux, iy + uy), ())
+            if any(abs(z - iz) <= grid.step_up_cells for z in nxt):
+                continue
+            seen = {pa}
+            for k in range(2, k_max + 1):
+                cx, cy = ix + ux * k, iy + uy * k
+                for z in grid.columns.get((cx, cy), ()):
+                    c = (cx, cy, z)
+                    pc = piece_of.get(c)
+                    if pc is None or pc in seen or not -drop_cells <= z - iz <= rise_cells:
+                        continue
+                    seen.add(pc)
+                    yield a, c, (ux, uy), k
+                # A wall above jump height, or a ceiling in the way: nothing beyond counts.
+                if any(
+                    grid.is_solid(cx, cy, z)
+                    for z in range(iz + rise_cells + 1, iz + rise_cells + headroom)
+                ):
+                    break
+
+
+def _jump(ext: _Extend, phys: _Physics, cfg: dict, a, c, d, k) -> dict | None:
+    """Test one brink: as a ledge (climb its face) or as a gap (the arc). None if neither."""
+    grid = ext.grid
+    norm = math.hypot(*d)
+    unit = (d[0] / norm, d[1] / norm)
+    margin = float(cfg.get("margin", 0))
+    radius = float(cfg.get("radius", 16))
+    fa = _floor(grid, a)
+    fc = _floor(grid, c)
+    pa = grid.centre(a)
+    pc = grid.centre(c)
+    feet_a = (pa[0], pa[1], fa + phys.separation)
+    feet_c = (pc[0], pc[1], fc + phys.separation)
+    rise = fc - fa
+    # Ledge: the floor runs up to a riser (or the riser starts right away) and its top is
+    # within the jump's rise: the body slides up the face and steps across.
+    floor_runs = all(
+        grid.is_solid(a[0] + d[0] * i, a[1] + d[1] * i, a[2] - 1)
+        or grid.is_solid(a[0] + d[0] * i, a[1] + d[1] * i, a[2])
+        for i in range(1, k)
+    )
+    kind = landing = None
+    near = math.dist(pa[:2], pc[:2]) <= phys.width + 2 * grid.cell
+    if floor_runs and near and phys.step < rise <= phys.apex - margin:
+        top = fc + phys.separation + 1.0
+        if _swept(grid, [feet_a, (pa[0], pa[1], top), (pc[0], pc[1], top), feet_c]):
+            kind, landing = "ledge", (c, fc)
+    if kind is None:
+        # Gap: every take-off point within the radius, at every speed, lands in one piece.
+        lowest = fa - (phys.safe_drop - phys.apex)
+        landings = []
+        for offset in (radius, radius / 2, 0.0):
+            sx, sy = pa[0] - unit[0] * offset, pa[1] - unit[1] * offset
+            if abs(_floor(grid, a, sx, sy) - fa) > 0.5:
+                return None
+            for speed in phys.speeds:
+                hit = _arc(grid, phys, (sx, sy, fa + phys.separation), unit, speed, lowest)
+                if hit is None:
+                    return None
+                landings.append(hit)
+        far = max(landings, key=lambda h: (h[1][0] - pa[0]) * unit[0] + (h[1][1] - pa[1]) * unit[1])
+        # The landing waypoint is the farthest touch-down; the shorter ones walk on to it.
+        pieces = {ext.s.piece_of.get(h[0]) for h in landings}
+        if None in pieces or ext.s.piece_of[a] in pieces:
+            return None
+        if not all(ext.g.straight(0, h[0], far[0]) for h in landings):
+            return None
+        kind, landing = "gap", (far[0], far[1][2] - phys.separation)
+        rise = landing[1] - fa
+    # A run-up in line with the jump, so the bot takes off moving the right way.
+    runup = None
+    for m in range(max(1, math.ceil(float(cfg.get("runup", 0)) / (grid.cell * norm))), 0, -1):
+        r = (a[0] - d[0] * m, a[1] - d[1] * m, a[2])
+        if grid.is_walkable(r) and r in ext.s.piece_of and ext.g.straight(0, r, a):
+            runup = r
+            break
+    return {
+        "kind": kind,
+        "takeoff": a,
+        "takeoff_floor": fa,
+        "landing": landing[0],
+        "landing_floor": landing[1],
+        "runup": runup,
+        "rise": round(rise, 2),
+        "distance": round(math.dist(pa[:2], grid.centre(landing[0])[:2]), 2),
+    }
+
+
+def _ladder_boxes(grid: analysis.NavGrid, parms: dict, names: set[str]) -> list[tuple]:
+    """Bounds of each ladder: brushes with a ladder surfaceparm face, touching ones merged."""
+    from .optimize import SHADER_NAME_PREFIX  # noqa: PLC0415
+
+    boxes = []
+    for s in grid.solids:
+        if s.patch:
+            continue
+        if any(set(parms.get((SHADER_NAME_PREFIX + sh).lower(), ())) & names for sh in s.shaders):
+            boxes.append([list(s.mins), list(s.maxs)])
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                a, b = boxes[i], boxes[j]
+                if all(a[0][n] <= b[1][n] + 1 and b[0][n] <= a[1][n] + 1 for n in range(3)):
+                    boxes[i] = [
+                        [min(a[0][n], b[0][n]) for n in range(3)],
+                        [max(a[1][n], b[1][n]) for n in range(3)],
+                    ]
+                    del boxes[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    return [(tuple(lo), tuple(hi)) for lo, hi in sorted(boxes)]
+
+
+def _cells_in(grid: analysis.NavGrid, lo: tuple[float, float], hi: tuple[float, float]):
+    x0, y0, _ = grid.cell_at((lo[0], lo[1], 0))
+    x1, y1, _ = grid.cell_at((hi[0], hi[1], 0))
+    for ix in range(x0, x1 + 1):
+        for iy in range(y0, y1 + 1):
+            for iz in grid.columns.get((ix, iy), ()):
+                yield (ix, iy, iz)
+
+
+def _ladder(ext: _Extend, phys: _Physics, cfg: dict, box) -> dict:
+    """The foot and top waypoints of one ladder, or why there are none."""
+    grid = ext.grid
+    mins, maxs = box
+    thin = 0 if maxs[0] - mins[0] <= maxs[1] - mins[1] else 1
+    wide = 1 - thin
+    half = phys.width / 2
+    reach = float(cfg.get("reach", 64))
+    window = float(cfg.get("top_window", 48))
+    headroom = grid.movement.headroom_stand.value
+    row = {"mins": list(mins), "maxs": list(maxs)}
+    for sign in (1, -1):
+        face = maxs[thin] if sign > 0 else mins[thin]
+        span = (mins[wide] - grid.cell / 2, maxs[wide] + grid.cell / 2)
+        mid = (mins[wide] + maxs[wide]) / 2
+
+        def region(near: float, far: float, face=face, sign=sign, span=span):
+            lo, hi = [0.0, 0.0], [0.0, 0.0]
+            lo[thin], hi[thin] = sorted((face + sign * near, face + sign * far))
+            lo[wide], hi[wide] = span
+            return _cells_in(grid, tuple(lo), tuple(hi))
+
+        feet = []
+        for c in region(0, half + reach):
+            centre = grid.centre(c)
+            f = _floor(grid, c)
+            if mins[2] <= f + headroom / 2 and maxs[2] >= f + phys.step + 1:
+                feet.append(((centre[thin] - face) * sign, abs(centre[wide] - mid), c, f))
+        for _dist, _off, foot, ffoot in sorted(feet):
+            tops = []
+            for c in region(-reach, grid.cell / 2):
+                f = _floor(grid, c)
+                if not maxs[2] - window <= f <= maxs[2] + phys.step or f <= ffoot + phys.step:
+                    continue
+                if ext.s.piece_of.get(c) in (None, ext.s.piece_of.get(foot)):
+                    continue
+                back = (face - grid.centre(c)[thin]) * sign
+                tops.append((back < half, abs(back - half), abs(grid.centre(c)[wide] - mid), c, f))
+            for *_rank, top, ftop in sorted(tops):
+                pf, pt = grid.centre(foot), grid.centre(top)
+                at_face = [0.0, 0.0]
+                at_face[thin] = face + sign * (half + 0.5)
+                at_face[wide] = min(max(pf[wide], mins[wide]), maxs[wide])
+                over = max(ftop, maxs[2]) + phys.separation + 0.5
+                if over - ftop > phys.safe_drop:
+                    continue
+                path = [
+                    (pf[0], pf[1], ffoot + phys.separation),
+                    (at_face[0], at_face[1], ffoot + phys.separation),
+                    (at_face[0], at_face[1], over),
+                    (pt[0], pt[1], over),
+                    (pt[0], pt[1], ftop + phys.separation),
+                ]
+                if _swept(grid, path):
+                    return {**row, "foot": foot, "foot_floor": ffoot, "top": top, "top_floor": ftop}
+        if feet:
+            row.setdefault("reason", "no top floor the standing box reaches up the face")
+    row.setdefault("reason", "no walkable floor in front of a face")
+    return row
+
+
+def add_traversals(
+    seeded: Seed,
+    grids: dict[str, analysis.NavGrid],
+    bots: dict[str, Any],
+    profile_id: str,
+    map_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Add the jump and ladder links the walk grids cannot make, in place.
+
+    Jumps (profile `bots.jumps`): every brink of the standing grid is scanned for a floor of
+    another area within jump reach; a pair of areas whose walking route is missing or a long
+    detour gets its first brink that passes as a ledge (rise within the jump, the box sweeps
+    up the face and across) or as a gap (the box's ballistic arc lands in the far area from
+    every take-off point and at every speed). It becomes a run-up waypoint, a take-off
+    waypoint flagged to jump, and a one-way link to a landing waypoint.
+
+    Ladders (profile `bots.ladders`): brushes with a ladder surfaceparm get a foot waypoint
+    in front of the climbing face and a top waypoint on the floor at its top, flagged and
+    linked both ways, when the box sweeps from the foot up the face onto that floor.
+    """
+    out: dict[str, Any] = {"jumps": [], "ladders": []}
+    grid = grids.get("stand")
+    jumps_cfg = bots.get("jumps")
+    ladders_cfg = bots.get("ladders")
+    if grid is None or grid.clearance_index is None or grid.index is None:
+        return out
+    phys = _physics(profile_id, jumps_cfg or {"speed_scales": [1]})
+    if phys is None:
+        out["skipped"] = (
+            "the profile's movement section lacks a jump, gravity, speed or width figure"
+        )
+        return out
+    flags = {str(n): int(v) for n, v in bots["flags"].items()}
+
+    def bits(names) -> int:
+        value = 0
+        for name in names or []:
+            value |= flags[str(name)]
+        return value
+
+    graph = _Graph({"stand": grid})
+    ext = _Extend(seeded, grid, graph, float(bots["floor_offset"]))
+
+    if isinstance(jumps_cfg, dict):
+        margin = float(jumps_cfg.get("margin", 0))
+        detour = float(jumps_cfg.get("detour", 4))
+        tries = int(jumps_cfg.get("tries", 8))
+        radius = float(jumps_cfg.get("radius", 16))
+        takeoff_flags = bits(jumps_cfg.get("takeoff_flags"))
+        landing_flags = jumps_cfg.get("landing_flags") or {}
+        pairs: dict[tuple[int, int], list] = {}
+        for a, c, d, k in _jump_candidates(grid, seeded.piece_of, phys, margin):
+            key = (seeded.piece_of[a], seeded.piece_of[c])
+            home = seeded.cells[key[0]]
+            pairs.setdefault(key, []).append(
+                (k * math.hypot(*d), abs(d[0]) + abs(d[1]), math.dist(a, home), a, c, d, k)
+            )
+        # Detours are judged on the graph as it grows: once one jump serves a stretch of
+        # ledge, its neighbours walk to it rather than getting their own.
+        for (pa, _pc), cands in sorted(pairs.items()):
+            for *_rank, a, c, d, k in sorted(cands)[:tries]:
+                found = _jump(ext, phys, jumps_cfg, a, c, d, k)
+                if found is None:
+                    continue
+                pb = seeded.piece_of[found["landing"]]
+                w = seeded.waypoints
+                straight = math.dist(w[pa].position, w[pb].position)
+                if _distances(w, pa).get(pb, math.inf) <= detour * straight:
+                    break
+                takeoff = ext.node(
+                    a, floor=found["takeoff_floor"], flags=takeoff_flags, radius=radius
+                )
+                landing = ext.node(
+                    found["landing"],
+                    floor=found["landing_floor"],
+                    flags=bits(landing_flags.get(found["kind"])),
+                    radius=radius,
+                )
+                ok = ext.attach(landing)
+                if found["runup"] is not None:
+                    runup = ext.node(found["runup"])
+                    ok = ok and ext.attach(runup)
+                    ext.link(runup, takeoff)
+                    ext.link(takeoff, runup)
+                else:
+                    ok = ok and ext.attach(takeoff)
+                ext.link(takeoff, landing)
+                out["jumps"].append(
+                    {
+                        "kind": found["kind"],
+                        "takeoff": [round(v, 1) for v in seeded.waypoints[takeoff].position],
+                        "landing": [round(v, 1) for v in seeded.waypoints[landing].position],
+                        "rise": found["rise"],
+                        "distance": found["distance"],
+                        "waypoints": {"takeoff": takeoff, "landing": landing},
+                        **({} if ok else {"note": "a walk to or from it was not found"}),
+                    }
+                )
+                break
+
+    if isinstance(ladders_cfg, dict):
+        names = {str(n).lower() for n in ladders_cfg.get("surfaceparms") or []}
+        parms = analysis.shader_contents(profile_id, map_path).parms if names else {}
+        climb = bits(ladders_cfg.get("flags"))
+        for box in _ladder_boxes(grid, parms, names) if names else []:
+            row = _ladder(ext, phys, ladders_cfg, box)
+            if "foot" in row:
+                foot = ext.node(row.pop("foot"), floor=row.pop("foot_floor"), flags=climb)
+                top = ext.node(row.pop("top"), floor=row.pop("top_floor"), flags=climb)
+                ext.link(foot, top)
+                ext.link(top, foot)
+                ok = ext.attach(foot) and ext.attach(top)
+                row.update(
+                    foot=[round(v, 1) for v in seeded.waypoints[foot].position],
+                    top=[round(v, 1) for v in seeded.waypoints[top].position],
+                    waypoints={"foot": foot, "top": top},
+                )
+                if not ok:
+                    row["note"] = "a walk to or from it was not found"
+            out["ladders"].append(row)
+
+    waypoints = seeded.waypoints
+    seeded.report.update(
+        waypoints=len(waypoints),
+        connections=sum(len(w.connections) for w in waypoints),
+        one_way_connections=sum(
+            1
+            for i, w in enumerate(waypoints)
+            for t in w.connections
+            if i not in waypoints[t].connections
+        ),
+        by_stance={s: seeded.stance_of.count(s) for s in dict.fromkeys(seeded.stance_of)},
+        components=components(waypoints),
+    )
+    return out
+
+
+# --------------------------------------------------------------------------------------
 # A whole map: grids, pins at spawns and objectives, the graph, and its own check
 # --------------------------------------------------------------------------------------
 
@@ -763,6 +1312,7 @@ def build(
         )
 
     seeded = seed(grids, bots, spacing=spacing, pins=pins, openings=openings, exclude=exclude)
+    traversals = add_traversals(seeded, grids, bots, profile_id, map_path)
     for pin in pins:
         pin["waypoint"] = seeded.piece_of.get(pin["cell"]) if pin["cell"] is not None else None
     # Waypoints no spawn connects to in either direction (a ledge on a decorative pipe, a
@@ -786,6 +1336,15 @@ def build(
             for pin in pins:
                 if pin["waypoint"] is not None:
                     pin["waypoint"] = remap.get(pin["waypoint"])
+            for key in ("jumps", "ladders"):
+                rows = []
+                for row in traversals[key]:
+                    if "waypoints" in row:
+                        row["waypoints"] = {k: remap.get(v) for k, v in row["waypoints"].items()}
+                        if None in row["waypoints"].values():
+                            continue  # in a part of the map no spawn connects to
+                    rows.append(row)
+                traversals[key] = rows
             seeded.report.update(
                 waypoints=len(kept),
                 connections=sum(len(w.connections) for w in kept),
@@ -846,6 +1405,7 @@ def build(
         "flag_counts": {
             name: sum(1 for w in waypoints if w.flags & bit) for name, bit in flags.items()
         },
+        **traversals,
     }
     return wf, report
 

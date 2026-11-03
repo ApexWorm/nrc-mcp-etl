@@ -303,6 +303,169 @@ def test_spacing_must_cover_a_cell(tmp_path):
 
 
 # --------------------------------------------------------------------------------------
+# Jumps and ladders
+# --------------------------------------------------------------------------------------
+
+
+def _links(wf, test):
+    """Connections (i, j) whose endpoints pass `test(from_position, to_position)`."""
+    w = wf.waypoints
+    return [
+        (i, t) for i, a in enumerate(w) for t in a.connections if test(a.position, w[t].position)
+    ]
+
+
+def _ledge_map(tmp_path, height, extra=()):
+    return write_map(
+        tmp_path,
+        [*room(0, 0, 1024, 256), box((512, 16, 0), (1008, 240, height)), *extra],
+        [
+            point_entity("team_CTF_redspawn", (96, 128, 24)),
+            point_entity("team_CTF_bluespawn", (900, 128, height + 24)),
+        ],
+    )
+
+
+def test_a_ledge_within_the_jump_gets_a_one_way_jump_and_drops_stay_one_way(tmp_path):
+    flags = spec()["flags"]
+    jumps = spec()["jumps"]
+    wf, report = _seed(_ledge_map(tmp_path, 40), spacing=128)
+    (jump,) = report["jumps"]
+    assert jump["kind"] == "ledge" and jump["rise"] == 40
+    takeoff = wf.waypoints[jump["waypoints"]["takeoff"]]
+    landing = wf.waypoints[jump["waypoints"]["landing"]]
+    assert takeoff.flags == flags["JUMP"] and landing.flags == flags["JUMPLOW"]
+    assert takeoff.radius == landing.radius == jumps["radius"]
+    # Feet on the exact floors: 0 below, the ledge's top at 40 above.
+    assert takeoff.position[2] == 24 and landing.position[2] == 64
+    assert takeoff.position[0] < 512 < landing.position[0]
+    # Up: only the jump. Down: walking off, one way, never flagged.
+    up = _links(wf, lambda a, b: b[2] - a[2] > 18)
+    assert up == [(jump["waypoints"]["takeoff"], jump["waypoints"]["landing"])]
+    down = _links(wf, lambda a, b: a[2] - b[2] > 18)
+    assert down and all(i not in wf.waypoints[t].connections for i, t in down)
+    assert all(not wf.waypoints[i].flags & flags["JUMP"] for i, _ in down)
+    # Nothing leads through the take-off but the jump and the walk back to its run-up.
+    into = [i for i, w in enumerate(wf.waypoints) if jump["waypoints"]["takeoff"] in w.connections]
+    assert len(into) == 1
+    (blue,) = report["spawn_waypoints"]["blue"]
+    (red,) = report["spawn_waypoints"]["red"]
+    assert blue in botnav.reachable(wf.waypoints, red)
+    assert report["one_way_connections"] >= len(down) + 1
+
+
+def test_a_ledge_above_the_jump_gets_no_link(tmp_path):
+    # 44 > 45.56 (270^2 / 1600) less the 4-unit margin.
+    wf, report = _seed(_ledge_map(tmp_path, 44), spacing=128)
+    assert report["jumps"] == []
+    assert not any(w.flags for w in wf.waypoints)
+    (blue,) = report["spawn_waypoints"]["blue"]
+    (red,) = report["spawn_waypoints"]["red"]
+    assert blue not in botnav.reachable(wf.waypoints, red)
+    assert red in botnav.reachable(wf.waypoints, blue)
+
+
+def test_a_ledge_with_stairs_beside_it_is_walked_not_jumped(tmp_path):
+    # Two 16-unit steps up the ledge's side: the walk is short, so no jump is added.
+    stairs = [box((448, 16, 0), (512, 80, 16)), box((480, 16, 16), (512, 80, 32))]
+    _wf, report = _seed(_ledge_map(tmp_path, 40, stairs), spacing=128)
+    assert report["jumps"] == []
+
+
+def _gap_map(tmp_path, width, ceiling=None):
+    brushes = [
+        *room(0, 0, 1024, 256, floor_top=-512, height=768),
+        box((16, 16, -496), (480, 240, 0)),
+        box((480 + width, 16, -496), (1008, 240, 0)),
+    ]
+    if ceiling is not None:
+        brushes.append(box((432, 16, ceiling), (480 + width + 48, 240, ceiling + 16)))
+    return write_map(
+        tmp_path,
+        brushes,
+        [
+            point_entity("team_CTF_redspawn", (96, 128, 24)),
+            point_entity("team_CTF_bluespawn", (900, 128, 24)),
+        ],
+    )
+
+
+def test_a_gap_within_every_arc_gets_jumps_both_ways(tmp_path):
+    flags = spec()["flags"]
+    wf, report = _seed(_gap_map(tmp_path, 48), spacing=128)
+    assert {j["kind"] for j in report["jumps"]} == {"gap"}
+    across = {(j["takeoff"][0] < 480, j["landing"][0] > 528) for j in report["jumps"]}
+    assert (True, True) in across and (False, False) in across
+    for jump in report["jumps"]:
+        takeoff = wf.waypoints[jump["waypoints"]["takeoff"]]
+        landing = wf.waypoints[jump["waypoints"]["landing"]]
+        assert takeoff.flags == flags["JUMP"] and landing.flags == 0
+        assert jump["waypoints"]["landing"] in takeoff.connections
+        assert jump["waypoints"]["takeoff"] not in landing.connections
+    assert report["components"]["count"] == 1
+    (blue,) = report["spawn_waypoints"]["blue"]
+    (red,) = report["spawn_waypoints"]["red"]
+    assert blue in botnav.reachable(wf.waypoints, red)
+    assert red in botnav.reachable(wf.waypoints, blue)
+
+
+def test_a_gap_too_wide_for_the_slowest_runner_gets_no_jump(tmp_path):
+    # 64 units: a heavy-weapon carrier at 0.4 x 320 = 128 units/s lands short.
+    _wf, report = _seed(_gap_map(tmp_path, 64), spacing=128)
+    assert report["jumps"] == [] and report["components"]["count"] == 2
+
+
+def test_a_low_ceiling_over_a_gap_stops_the_arc(tmp_path):
+    # 96 above the floor: the box (72 tall) hits it on the way up.
+    _wf, report = _seed(_gap_map(tmp_path, 48, ceiling=96), spacing=128)
+    assert report["jumps"] == []
+
+
+def _ladder_map(tmp_path, shader="t/ladder", parms="surfaceparm ladder\n\tsurfaceparm playerclip"):
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts" / "t.shader").write_text(
+        f"textures/{shader}\n{{\n\t{parms}\n\tsurfaceparm nodraw\n}}\n"
+    )
+    return write_map(
+        tmp_path,
+        [
+            *room(0, 0, 1024, 256, height=384),
+            box((512, 16, 0), (1008, 240, 192)),
+            box((496, 96, 0), (512, 160, 192), shader),
+        ],
+        [
+            point_entity("team_CTF_redspawn", (96, 128, 24)),
+            point_entity("team_CTF_bluespawn", (900, 128, 216)),
+        ],
+    )
+
+
+def test_a_ladder_gets_a_climb_waypoint_at_its_foot_and_top_linked_both_ways(tmp_path):
+    climb = spec()["flags"]["CLIMB"]
+    wf, report = _seed(_ladder_map(tmp_path), spacing=128)
+    (ladder,) = report["ladders"]
+    foot = wf.waypoints[ladder["waypoints"]["foot"]]
+    top = wf.waypoints[ladder["waypoints"]["top"]]
+    assert foot.flags == top.flags == climb
+    assert ladder["waypoints"]["top"] in foot.connections
+    assert ladder["waypoints"]["foot"] in top.connections
+    # The foot stands in front of the face (x 496), the body's half width clear of it; the
+    # top stands on the upper floor behind it.
+    assert 496 - 18 - 32 <= foot.position[0] <= 496 - 18 and 96 <= foot.position[1] <= 160
+    assert foot.position[2] == 24 and top.position[2] == 216 and top.position[0] > 512
+    assert [w for w in wf.waypoints if w.flags & climb] == [foot, top]
+    (blue,) = report["spawn_waypoints"]["blue"]
+    (red,) = report["spawn_waypoints"]["red"]
+    assert blue in botnav.reachable(wf.waypoints, red)
+
+
+def test_a_brush_without_the_ladder_surfaceparm_is_no_ladder(tmp_path):
+    wf, report = _seed(_ladder_map(tmp_path, parms="surfaceparm playerclip"), spacing=128)
+    assert report["ladders"] == []
+    assert not any(w.flags for w in wf.waypoints)
+
+
+# --------------------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------------------
 

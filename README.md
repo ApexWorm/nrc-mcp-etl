@@ -237,9 +237,13 @@ to reach them. `bot_playtest` then runs the packed map on a dedicated server wit
 nothing else in the add-on's nav folder, adds bots and reports what they did. On the dogfood
 maps (see `bench/dogfood/README.md`) the add-on loaded every seeded file, bots walked them,
 crawled the prone vent and crouched through the tunnel, planted, built, captured and stole
-the objectives, and escorted the convoy truck to its gate. Seeded graphs carry no jump, ladder,
-door-use, sniping or camping spots, no bridge flags and no map script; hand-tune those in
-Omni-bot's own editor.
+the objectives, and escorted the convoy truck to its gate. Jumps and ladders are seeded too: a
+ledge within the jump's rise or a gap the player box's arc clears (at the slowest and fastest
+run speeds) gets a take-off waypoint flagged `JUMP` and a one-way link to its landing, and a
+`surfaceparm ladder` brush gets `CLIMB` waypoints at its foot and top; on the traversal course
+Axis bots jumped the ledge and the gap, climbed the ladder and planted the radio. Seeded graphs
+carry no door-use, sniping or camping spots, no bridge flags and no map script; hand-tune those
+in Omni-bot's own editor.
 
 ## Connect an MCP client
 
@@ -586,7 +590,7 @@ The overlay uses the same map snapshot and marks stand/crouch/prone, endpoints a
 | `arena_write` · `objdata_write` | The arena file (the map in the menu: name, briefing, gametypes) and the limbo objective descriptions. |
 | `commandmap_make` · `levelshot_make` | The command map - map coordinates on the worldspawn, a top-down section image and its shaders - and the loading-screen levelshot. |
 | `pack_pk3` | Build the release archive. Names the packer misses but the base game or the map supplies do not fail it; `ignore` lets named resources be missing. |
-| `bot_waypoints_write` | Seed the bot add-on's waypoint file (for ET: Legacy an Omni-bot `.way`) from the stand/crouch/prone grids: connected waypoints, crouch/prone and blockable flags, named spawn and objective waypoints, and whether each objective is reached from each team's spawns. Staged beside the map's folder for the server's `omnibot_path`; the add-on never reads it from the pk3. |
+| `bot_waypoints_write` | Seed the bot add-on's waypoint file (for ET: Legacy an Omni-bot `.way`) from the stand/crouch/prone grids: connected waypoints (walking off a ledge one way), crouch/prone and blockable flags, one-way jump links up ledges and across gaps the player box's arc clears (`JUMP` take-off, listed in `jumps`), `CLIMB` foot and top waypoints on ladder brushes (`ladders`), named spawn and objective waypoints, and whether each objective is reached from each team's spawns. Staged beside the map's folder for the server's `omnibot_path`; the add-on never reads it from the pk3. |
 | `repack_analyze` | Every resource the BSP references, and which of them nothing supplies (what fails a pack). |
 
 **The toolchain itself**

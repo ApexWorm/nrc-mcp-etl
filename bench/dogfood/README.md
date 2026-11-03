@@ -166,9 +166,39 @@ stance on the way in. Without a waypoint file the add-on loads, logs `Waypoint <
 found in file or archives` and adds no bot at all. The same seeded files load in the 0.92
 Linux release library.
 
+### Jumps and ladders
+
+`mise run bench:dogfood -- traversal` builds a course on which walking alone reaches nothing
+past the start (its `balance_report` route is asserted unreachable): a 40-unit ledge, a 48-unit
+gap over a 568-unit shaft that kills, and a 192-unit wall with a `common/ladder` brush, with
+the Axis spawn at the bottom and the Allies spawn and the radio at the top. `bot_waypoints_write`
+(cell 16) seeds 77 waypoints: 3 ledge jumps and 3 gap jumps (two forward, one back), each a
+run-up, a `JUMP` take-off (radius 16) and a one-way link to its landing (`JUMPLOW` on a ledge's),
+and the ladder's `CLIMB` foot and top linked both ways; the script asserts all of that, and
+`--bots PORT` adds a `bot_playtest` run (it loaded 77 waypoints twice, no error, 8 of 8 bots
+moving, in a 180 s run over MCP).
+
+A 240 s run of the same file (8 bots, Omni-bot 0.93, observer sampling every 0.5 s through
+`botplay.run`) shows the bots using all three. Counting changes of grounded zone between a
+bot's samples within one life:
+
+| Traversal | Axis (spawn at the bottom) | Allies (spawn at the top) |
+| --- | --- | --- |
+| up the ledge (start floor -> ledge top) | 71, plus 91 samples in the air rising at the ledge | 5 |
+| across the gap, outward (ledge top -> far side) | 53, plus 49 samples in the air over the shaft | 17 |
+| back across the gap (far side -> ledge top) | 8 | 64, plus 89 samples over the shaft |
+| up the ladder (far side -> ladder, ladder -> top floor) | 35 onto it, 7 off at the top; 82 samples on its face, every 40-unit band from 72 to 248 | 6 onto it, 3 off at the top |
+| down from the top floor | - | 17 via the ladder, 66 dropping straight to the far side |
+
+Axis planted the radio once (`axis planted "Course Radio"`, Allies defused it): the radio is
+reachable from the Axis spawn only through the ledge jump, the gap jump and the ladder. One bot
+fell into the shaft in 240 s. Not measured: how many ladder climbs fail (22 Axis samples went
+from the ladder back to its foot, which is either a bot slipping off or one turning back), and
+the jump distance limits themselves (the course's ledge and gap sit inside them; the limits
+come from the arc model, not from the engine).
+
 What is not seeded, so not tested: door use (a `func_door` is solid to the grids, so the
-frontline Axis door carries no waypoint), jumps, ladders, and map scripts for goal
-priorities. Constructibles are as solid to the grids as any brush, so waypoints are seeded on
+frontline Axis door carries no waypoint), and map scripts for goal priorities. Constructibles are as solid to the grids as any brush, so waypoints are seeded on
 the workshop bridge's deck before it is built; they are not flagged with Omni-bot's
 `BLOCKBRIDGE` (which would close those links while no floor is under them). Blown walls are
 handled: a state-changing brush that separates two areas keeps its cells, and connections

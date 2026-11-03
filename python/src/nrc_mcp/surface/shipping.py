@@ -330,7 +330,18 @@ def bot_waypoints_write(
     need crouch or prone carry that flag (bots press it while heading there); connections
     that exist only once a state-changing brush is blown carry the blockable flag the
     add-on re-tests at runtime. Team spawns and every objective approach area get a named
-    waypoint; parts of the map no spawn connects to are dropped.
+    waypoint; parts of the map no spawn connects to are dropped. Walking off a ledge is a
+    one-way connection.
+
+    Jumps and ladders (the profile's `bots.jumps` / `bots.ladders`): where walking between
+    two areas is impossible or a long detour, a ledge whose top is within the jump's rise
+    (swept with the standing box up its face) or a gap the box's ballistic arc clears from
+    every take-off point and at every speed the profile lists, gets a run-up waypoint, a
+    take-off waypoint flagged to jump (for ET: Legacy `JUMP`, small radius) and a ONE-WAY
+    connection to a landing waypoint (`JUMPLOW` on a ledge's). A brush whose shader has the
+    ladder surfaceparm gets a foot waypoint in front of its face and a top waypoint on the
+    floor at its top, both `CLIMB`, connected both ways. `jumps` and `ladders` list them
+    (a ladder without a reachable foot or top says why).
 
     The add-on reads waypoints from its own folder, never from the map's pk3, so the file
     is staged beside the map's folder under the profile's add-on layout (for ET: Legacy
@@ -339,7 +350,7 @@ def bot_waypoints_write(
 
     `objectives` says, per objective, whether the graph reaches it from each team's spawn
     waypoints. Objective goals themselves come from the game, not this file. Not seeded:
-    jump, ladder, door-use, sniping or camping spots, or a map script.
+    door-use, sniping or camping spots, or a map script.
     `bot_playtest` loads the file in the engine with bots and reports what they did.
 
     `detail="summary"` (default) leaves out the per-pin rows; `"full"` returns them.
