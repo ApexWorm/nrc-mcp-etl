@@ -358,6 +358,59 @@ objectives:
     builder_flag: {axis: "4", allies: "8"}    # AXIS/ALLIED_CONSTRUCTIBLE, g_local.h:2637-2638
     script_team: {axis: "0", allies: "1"}     # the team number scripts use, g_script_actions.c:3560
 
+# ---------------------------------------------------------------------------
+# spawn_cluster - what spawn_cluster writes for a group of team spawns and its region marker
+# ---------------------------------------------------------------------------
+# Teams are named by the labels in `teams.sides` (red/blue), or their names (Axis/Allies).
+# Positions are found by the tool from the movement constants (player width, standing
+# height, step) and the map's own collision brushes; nothing here is a position.
+spawn_cluster:
+  confidence: verified
+  source: etlegacy_source
+  spawn:
+    classname: {red: team_CTF_redspawn, blue: team_CTF_bluespawn}
+    classname_locus: "game/g_team.c:469 (TEAM_AXIS), :473 (TEAM_ALLIES)"
+    # INVULNERABLE|STARTACTIVE. Selection skips a spawn without STARTACTIVE (2); the six
+    # shipped maps set INVULNERABLE (1) on their team spawns too (corpus/real, e.g.
+    # oasis_final.map "oldcityspawns"), so an inactive spawn keeps 1.
+    spawnflags: {active: 3, inactive: 1}
+    spawnflags_locus: "game/g_team.c:496 (skips spawns without flag 2); gamepack et_entities.ent INVULNERABLE/STARTACTIVE"
+    # F_ANGLEHACK: a yaw in degrees.
+    facing_key: angle
+    facing_locus: "game/g_spawn.c:179"
+    # The player box spans -24..48 about its origin, so an origin standing on a floor is 24
+    # above it. The spawn drops to the floor itself (DropToFloor), but only from a start
+    # outside solid (g_props.c:63-74), so the origin is written at standing height.
+    origin_height: 24
+    origin_height_locus: "game/g_client.c:53-54 playerMins z -24; game/g_team.c:824, :864 DropToFloor (g_props.c:63-85)"
+    # A player standing on one spawn makes a neighbour within the player box "occupied":
+    # SpotWouldTelefrag tests playerMins..playerMaxs about the spot. Spacing must exceed the
+    # player width (units.player.bounding_box) so every spawn in a cluster stays usable.
+    occupancy_locus: "game/g_client.c:230-251 SpotWouldTelefrag; game/g_team.c:508-516"
+    # Script use toggles STARTACTIVE on every entity with this targetname: alertentity uses
+    # each match (g_script_actions.c:2242-2290), Use_Team_Spawnpoint flips flag 2
+    # (g_team.c:770-784, assigned at :819 and :859).
+    group_keys: {targetname: "{group}"}
+  marker:
+    classname: team_WOLF_objective
+    # DEFAULT_AXIS / DEFAULT_ALLIES: who owns the spawn region at the start.
+    spawnflags: {red: 1, blue: 2}
+    spawnflags_locus: "game/g_team.c:952-958"
+    label_key: description
+    label_locus: "game/g_team.c:942 (shown in the limbo spawn list)"
+    # alertentity on the marker swaps its owner (team_wolf_objective_use, g_team.c:888-901,
+    # assigned at :920). oasis_final.map's forward marker carries the same name as targetname
+    # and scriptname ("old_city_wobj").
+    group_keys: {targetname: "{group}_wobj", scriptname: "{group}_wobj"}
+  # How a script toggles a group, for the caller to put in its own events. alertentity stops
+  # the game when no entity has the name (g_script_actions.c:2262).
+  toggle_action: "alertentity {name}"
+  toggle_key: targetname   # G_FindByTargetnameFast, g_script_actions.c:2257
+  toggle_locus: "game/g_script_actions.c:2242-2290"
+  # A convention, not an engine rule: oasis_final.map's forward spawns sit 60-64 units apart.
+  default_spacing: 64
+  default_spacing_source: "corpus/real oasis_final.map entities 283-290"
+
 # What a category cannot say. Read by analysis.roles.
 roles:
   # An objective volume. Categorized `trigger` so its brushes are not collision, but it is

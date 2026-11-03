@@ -186,8 +186,9 @@ Add {gametype} support to the open map.
 
 1. `profile_summary` — the classnames, keys and counts are all profile data, never guessed.
 2. `query_entities` — see what is already there before adding anything.
-3. Place spawns and objectives with `entity_place`, key them with `entity_set_keys`, then
-   `validate_profile` to check arrangement and counts.
+3. Place team spawns with `spawn_cluster` where the game has a recipe for them, other
+   entities with `entities_place` (one call for many), key them with `entity_set_keys`,
+   then `validate_profile` to check arrangement and counts.
 4. `spawn_safety` and `balance_report` — a spawn with one exit can be held, and an
    asymmetric walk to the objective is a design problem the geometry will not reveal.
 5. `playable_space_diff` before `map_save`.
@@ -231,6 +232,7 @@ TOOL_NAMES = (
     "map_restore",
     "query_entities",
     "entity_place",
+    "entities_place",
     "entity_set_keys",
     "entity_remove_keys",
     "brush_geometry",
@@ -257,6 +259,7 @@ TOOL_NAMES = (
     "solid_compile",
     "solid_preview",
     "solid_commit",
+    "solids_commit",
     "brush_set_detail",
     "patch_commit",
     "solid_inspect",
@@ -283,6 +286,7 @@ TOOL_NAMES = (
     "sightline_report",
     "movement_check",
     "spawn_safety",
+    "spawn_cluster",
     "lighting_report",
     "playable_space_diff",
     "bench_run",

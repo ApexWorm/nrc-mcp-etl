@@ -143,6 +143,8 @@ def solid_commit(
     shape can be re-parameterized later with `solid_edit_param` — "make that corridor 32 units
     wider" instead of moving faces by hand. The `.map` stays canonical; the sidecar is
     advisory and re-derivable.
+
+    To commit several solids, use `solids_commit`: one call, all or none.
     """
     m = SESSION.require()
     k = _kernel()
@@ -180,6 +182,121 @@ def solid_commit(
     SESSION.map = candidate
     result["next"] = "call map_save to write the map, or render_contact_sheet to look at it"
     return result
+
+
+#: The fields one `solids_commit` item may carry: `solid_commit`'s own, minus the shared ones.
+_ITEM_FIELDS = {"ir", "label", "textures", "target_classname", "new_entity", "target_entity"}
+
+#: The sidecar module, under a name `solids_commit`'s `solids` argument does not shadow.
+_sidecar = solids
+
+
+@tool("sculpt", "Commit several solids to map", writes=True)
+def solids_commit(
+    solids: list[dict[str, Any]],
+    textures: dict | None = None,
+    grid: int | None = None,
+    remember: bool = True,
+) -> dict:
+    """Commit many Solid IR trees in one call, all or none: crates, pillars, a row of rooms.
+
+    Each item is what `solid_commit` takes for one solid: `{"ir": ..., "label": ...}` plus,
+    optionally, `textures`, `target_classname`, `new_entity` and `target_entity`. The
+    top-level `textures` applies to every item that gives none of its own.
+
+    Items are compiled in order onto a copy of the map, and the copy replaces the map only
+    if every one succeeds: a refusal names the item (`solids[2] (label 'crate_2'): ...`) and
+    changes nothing, sidecar included. Labels must be new and distinct. With `remember`, each
+    tree is staged in the sidecar under its label, so `solid_edit_param` can re-shape any of
+    them later.
+
+    The reply is compact: per item its label, brush count and entity, plus totals, and any
+    compiler warnings tagged with their label. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    k = _kernel()
+    g = grid if grid is not None else SESSION.grid
+    if not solids:
+        raise ToolError("no solids given; pass a list of {ir, label, ...}")
+    store = _store() if remember else None
+    seen: set[str] = set()
+    for i, item in enumerate(solids):
+        where = f"solids[{i}]"
+        if not isinstance(item, dict):
+            raise ToolError(f"{where}: each item is an object {{ir, label, ...}}")
+        extra = sorted(set(item) - _ITEM_FIELDS)
+        if extra:
+            raise ToolError(
+                f"{where}: unknown field(s) {extra}; an item takes {sorted(_ITEM_FIELDS)}"
+            )
+        label = item.get("label")
+        if not isinstance(label, str) or not label:
+            raise ToolError(f"{where}: label must be a non-empty string")
+        if not isinstance(item.get("ir"), dict):
+            raise ToolError(f"{where} (label {label!r}): ir must be a Solid IR tree")
+        if label in seen:
+            raise ToolError(f"{where}: label {label!r} is used twice in this call")
+        seen.add(label)
+        if store is not None:
+            if label in store["solids"] or _generated(m, label):
+                raise ToolError(
+                    f"{where}: solid {label!r} already exists; use solid_edit_param or a new label"
+                )
+            try:
+                _sidecar.record({"solids": {}}, label, item["ir"])
+            except _sidecar.SolidStoreError as e:
+                raise ToolError(f"{where}: {e}") from e
+
+    candidate = m.copy()
+    made: list[dict[str, Any]] = []
+    warnings: list[dict[str, str]] = []
+    totals = {"brushes_created": 0, "faces": 0, "off_grid_vertices": 0}
+    result: dict[str, Any] = {}
+    for i, item in enumerate(solids):
+        label = item["label"]
+        tex = item.get("textures", textures)
+        try:
+            result = k.solid_commit(
+                candidate,
+                item["ir"],
+                tex,
+                g,
+                item.get("target_classname", "worldspawn"),
+                False,
+                label,
+                bool(item.get("new_entity", False)),
+                item.get("target_entity"),
+            )
+        except ValueError as e:
+            raise ToolError(f"solids[{i}] (label {label!r}): {e}; nothing was committed") from e
+        for key in totals:
+            totals[key] += int(result.get(key) or 0)
+        warnings += [{"label": label, "warning": w} for w in result.get("warnings") or []]
+        made.append(
+            {"label": label, "brushes": result["brushes_created"], "entity": result["entity"]}
+        )
+        if store is not None:
+            _sidecar.record(
+                store,
+                label,
+                item["ir"],
+                brushes=result["brushes_created"],
+                textures=tex,
+                grid=g,
+                provenance=_fingerprints(_generated(candidate, label)),
+            )
+
+    out: dict[str, Any] = {"committed": len(made), "solids": made, **totals}
+    if warnings:
+        out["warnings"] = warnings
+    out["map_brushes_now"] = result.get("map_brushes_now")
+    if store is not None:
+        sidecar = _sidecar.sidecar_path(SESSION.path)
+        SESSION.stage_file(sidecar, _sidecar.encode(store))
+        out["sidecar"] = str(sidecar)
+    SESSION.map = candidate
+    out["next"] = "call map_save to write the map, or render_contact_sheet to look at it"
+    return out
 
 
 @tool("sculpt", "Add a curved surface", writes=True)
