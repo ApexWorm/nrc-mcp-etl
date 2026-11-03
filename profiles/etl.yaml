@@ -346,6 +346,29 @@ objectives:
         game/g_trigger.c:1612-1678 (trigger links to its target), game/g_weapon.c:1980-2020
         (dynamite must sit in an enemy objective trigger), game/g_missile.c:395-447 (blows it up
         when its weapon class is at least 1; constructible_class 3 gives 2, g_mover.c:4672-4689)
+      # The test objective_playtests generates: the other team's engineer stands in the trigger,
+      # plants dynamite, arms it with pliers (aimed at the charge where it landed) and sees the
+      # explosive freed. Pliers reach 64 units (CH_BREAKABLE_DIST, bg_public.h:3160) along the
+      # view (g_weapon.c:2430-2545), so the charge is thrown steeply down to land within reach.
+      playtest:
+        find:
+          anchor: {classname: func_explosive, name_key: targetname}
+          parts:
+            trigger: {classname: trigger_objective_info, key: target, value: "{name}"}
+          team: {part: trigger, key: spawnflags, value: owner_flag}
+        actor: {team: "{other}", role: engineer}
+        watch: ["{name}"]
+        proves: the other team's dynamite, armed in the trigger, destroys it
+        steps:
+          - {macro: stand, in: trigger, clear_of: anchor, face: anchor, pitch: 65, label: "stand in the objective trigger, facing it"}
+          - {action: weapon, name: dynamite}
+          - {action: hold, controls: [attack], seconds: 0.25, timeout: 5, label: "plant the dynamite"}
+          - {action: wait, timeout: 5, label: "a charge lies in the world", until: [{scope: game, field: charge_count, op: gte, value: 1}]}
+          - {action: aim, at: {scope: game, field: charge_position, offset: [0, 0, 4]}, label: "look at the charge"}
+          - {action: weapon, name: pliers}
+          - {action: hold, controls: [attack], timeout: 15, label: "arm it", until: [{scope: game, field: armed_charges, op: gte, value: 1}]}
+          - {action: wait, timeout: 45, label: "the charge destroys the objective", until: [{scope: entity, name: "{name}", field: present, value: false}]}
+          - {macro: round_end, events: [{block: "{anchor.scriptname}", event: death}]}
     constructible:
       description: >-
         Something {team}'s engineers build, and the other team can destroy with dynamite once
@@ -367,6 +390,23 @@ objectives:
         game/g_mover.c:5614-5653 (team flag and constructible_class), game/g_trigger.c:1698-1706
         (trigger links to it), game/g_weapon.c:1068-1247 (buildstart/built events name a
         stage, here final), game/g_mover.c:5272-5313 (decayed)
+      # The builder team's engineer stands in the trigger, clear of the brushes it builds (a
+      # player inside them blocks construction), and holds pliers until it is built. Pliers
+      # build the trigger the player touches whatever they aim at, g_weapon.c:2455-2542.
+      playtest:
+        find:
+          anchor: {classname: func_constructible, name_key: targetname}
+          parts:
+            trigger: {classname: trigger_objective_info, key: target, value: "{name}"}
+          team: {part: anchor, key: spawnflags, value: builder_flag}
+        actor: {team: "{team}", role: engineer}
+        watch: ["{name}"]
+        proves: the builder team's engineer builds it with pliers
+        steps:
+          - {macro: stand, in: trigger, clear_of: anchor, face: anchor, pitch: 30, label: "stand in the objective trigger, clear of what it builds"}
+          - {action: weapon, name: pliers}
+          - {action: hold, controls: [attack], timeout: 60, label: "build it", until: [{scope: entity, name: "{name}", field: built, value: true}]}
+          - {macro: round_end, events: [{block: "{anchor.scriptname}", event: built, params: [final]}]}
     # The stock command post (battery, goldrush, railgun: neutral; fueldump, oasis: one
     # team's). One objective trigger with the command-post icon targets one func_constructible
     # per team that may build it, under one targetname; the engine lets only one stand at a
@@ -450,6 +490,23 @@ objectives:
         game/g_script_actions.c:4152-4192 and game/g_active.c:1621-1639 (sethqstatus: the team
         is told of enemy landmines near it), game/g_mover.c:5585-5589 (class 2: weapon class 1,
         satchel or dynamite); stock railgun_final.script, fueldump_final.script
+      # A team that may build it (Allies for a neutral one) builds its own constructible. The
+      # pair share a targetname, so the test watches the builder's by its scriptname.
+      playtest:
+        find:
+          anchor: {classname: trigger_objective_info, name_key: target}
+          parts:
+            objective: {classname: func_constructible, key: targetname, value: "{name}",
+                        flags: {key: spawnflags, value: builder_bit}}
+          team: {part: anchor, key: spawnflags, value: command_post_flags}
+        actor: {team: "{builder}", role: engineer}
+        watch: ["{objective.scriptname}"]
+        proves: an engineer of a team that may build it builds that team's command post
+        steps:
+          - {macro: stand, in: anchor, clear_of: objective, face: objective, pitch: 30, label: "stand in the command post's trigger"}
+          - {action: weapon, name: pliers}
+          - {action: hold, controls: [attack], timeout: 60, label: "build the command post", until: [{scope: entity, name: "{objective.scriptname}", field: built, value: true}]}
+          - {macro: round_end, events: [{block: "{objective.scriptname}", event: built, params: [final]}]}
     # The stock forward spawn flag (oasis Old City, radar Forward Bunker). With SPAWNPOINT the
     # flag itself switches its targeted spawns: the capturing team's on, the other team's
     # off. The script keeps the spawn region marker's owner in step (alertentity on a
@@ -504,6 +561,26 @@ objectives:
         :952-958 (DEFAULT_AXIS / DEFAULT_ALLIES), :455-537 (spawns need STARTACTIVE and go
         nearest the marker); game/g_script_actions.c:176-217 (setautospawn finds the marker by
         description); stock oasis_final.script oldcityflag, radar_final.script roadbunker
+      # Nothing on the flag itself is observable, so a capture is proved where it matters: the
+      # attackers, made to respawn by switching team and back, reappear at the flag's spawns;
+      # after the holders touch it again they reappear at their own.
+      playtest:
+        find:
+          anchor: {classname: team_WOLF_checkpoint, name_key: targetname}
+          parts:
+            marker: {classname: team_WOLF_objective, key: targetname, value: "{name}_wobj"}
+            spawns: {classname: ["{team_spawn}", "{other_spawn}"], key: targetname, value: "{name}_spawns",
+                     many: true, optional: true}
+          team: {part: marker, key: spawnflags, value: owner_flag}
+        actor: {team: "{other}", role: engineer}
+        proves: the other team captures it and spawns at its spawns; the holders take it back
+        steps:
+          - {macro: spawned_at, at: base, label: "the attackers start at their own spawns"}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the attackers touch the flag"}
+          - {macro: spawned_at, at: spawns, label: "the capture handed the flag's spawns to the attackers"}
+          - {action: join, team: "{team}", role: engineer}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the holders take the flag back"}
+          - {macro: spawned_at, team: "{other}", at: base, label: "the attackers spawn at their own spawns again"}
     # SPAWNPOINT plus the AXIS_ONLY / ALLIED_ONLY bit of the team that does not hold it. Only
     # checkpoint_spawntouch reads those bits: the holder touching the raised flag lowers it
     # (WCP_ANIM_*_FALLING) rather than raising its own, and still runs its capture event and
@@ -527,6 +604,25 @@ objectives:
       script: *checkpoint_script
       links: *checkpoint_links
       locus: *checkpoint_locus
+      playtest:
+        find:
+          anchor: {classname: team_WOLF_checkpoint, name_key: targetname}
+          parts:
+            marker: {classname: team_WOLF_objective, key: targetname, value: "{name}_wobj"}
+            spawns: {classname: ["{team_spawn}", "{other_spawn}"], key: targetname, value: "{name}_spawns",
+                     many: true, optional: true}
+          team: {part: anchor, key: spawnflags, value: one_way_flag}
+        actor: {team: "{other}", role: engineer}
+        proves: the holders cannot raise it; the other team captures it; the holders lower it and take the spawns back
+        steps:
+          - {action: join, team: "{team}", role: engineer}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the holders touch the flag they hold"}
+          - {macro: spawned_at, team: "{other}", at: base, label: "it did not change hands: the attackers still spawn at their own spawns"}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the attackers raise the flag"}
+          - {macro: spawned_at, at: spawns, label: "the capture handed the flag's spawns to the attackers"}
+          - {action: join, team: "{team}", role: engineer}
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], seconds: 1.5, label: "the holders lower the flag"}
+          - {macro: spawned_at, team: "{other}", at: base, label: "the attackers spawn at their own spawns again"}
     # A vehicle {team} escorts along a path made with path_place. Modelled on the goldrush and
     # fueldump tanks, minus their damage/repair: it moves while {team} players stand in the
     # escort volume and stops, at the next path point, a couple of seconds after they leave.
@@ -607,6 +703,29 @@ objectives:
         game/g_trigger.c:1180-1201 (func_timer START_ON), game/g_target.c:1276-1303
         (target_script_trigger runs trigger <target> in its block), q3map2 map.cpp:1640-1644 (the
         origin brush makes the brushes relative to the entity origin, which the spline moves)
+      # The escort stands beside the vehicle, inside its escort volume, at one path point after
+      # another, and waits for it to pass the next; once it stands back and checks that the
+      # vehicle stops. The path, speed and stop delay are read from the vehicle's script.
+      playtest:
+        find:
+          anchor: {classname: script_mover, name_key: targetname}
+          parts:
+            trigger: {classname: trigger_multiple, key: scriptname, value: "{name}_escort"}
+          team: {part: trigger, key: spawnflags, value: escort_flag}
+        actor: {team: "{team}", role: soldier}
+        watch: ["{name}"]
+        proves: the vehicle moves while escorted, stops without its escort, and reaches the end of its path
+        steps:
+          - macro: follow_path
+            vehicle: anchor
+            volume: trigger
+            path: {block: "{anchor.scriptname}", event: trigger, params: [run_0], action: followspline, arg: 1}
+            speed: {block: "{anchor.scriptname}", event: trigger, params: [run_0], action: followspline, arg: 2}
+            stop_after: {block: "{anchor.scriptname}", event: trigger, params: [stopcheck], action: accum,
+                         args_equal: {1: abort_if_less_than}, arg: 2}
+            # Escort touches count every 0.5 s (wait) and the idle count rises once a second.
+            stop_slack: 2
+          - {macro: round_end, events: [{block: "{anchor.scriptname}", event: trigger, params: [arrived]}]}
     # Carriable documents and the place they are delivered: the radar parts, goldrush gold.
     steal:
       description: >-
@@ -644,6 +763,20 @@ objectives:
         from the carrier, run death on the trigger and trigger captured on the item),
         game/g_items.c:991-994,1091-1094 (model is what is drawn; the item has no world model,
         game/bg_misc.c:2362-2410)
+      # The thief walks onto the item, which only the other team can pick up while the game is
+      # playing (g_team.c:375-406), and carries it into the delivery volume, which takes it from
+      # the carrier (g_trigger.c:1335-1395).
+      playtest:
+        find:
+          anchor: {classname: "{carry_class}", name_key: scriptname}
+          parts:
+            trigger: {classname: trigger_flagonly_multiple, key: scriptname, value: "{name}_deliver"}
+        actor: {team: "{other}", role: covertops}
+        proves: the other team picks it up and delivers it
+        steps:
+          - {macro: walk_to, target: anchor, distance: 80, controls: [forward], timeout: 6, label: "walk onto the item", until: [{scope: player, field: carrying, value: true}]}
+          - {macro: walk_to, target: trigger, distance: 80, controls: [forward], timeout: 8, label: "carry it into the delivery volume", until: [{scope: player, field: carrying, value: false}, {scope: player, field: alive, value: true}]}
+          - {macro: round_end, events: [{block: "{trigger.scriptname}", event: death}]}
   team_values:
     owner_flag: {axis: "1", allies: "2"}      # AXIS_OBJECTIVE / ALLIED_OBJECTIVE, g_local.h:2631-2632
     builder_flag: {axis: "4", allies: "8"}    # AXIS/ALLIED_CONSTRUCTIBLE, g_local.h:2637-2638
@@ -658,10 +791,35 @@ objectives:
     escort_flag: {axis: "1", allies: "2"}     # trigger_multiple AXIS_ONLY / ALLIED_ONLY, g_trigger.c:165-180
     carry_class: {axis: team_CTF_redflag, allies: team_CTF_blueflag}   # g_team.c:385-392
     carry_flag: {axis: "1", allies: "2"}      # RED_FLAG / BLUE_FLAG on the delivery trigger, g_trigger.c:1234-1235
+    # Who plays each objective's test (objectives.playtest): the other team, and who builds a
+    # command post (Allies for a neutral one) with that team's constructible flag.
+    other: {axis: allies, allies: axis}
+    builder: {neutral: allies, axis: axis, allies: allies}
+    builder_bit: {neutral: "8", axis: "4", allies: "8"}
   # Point a brush entity's brushes are relative to. The spline moves this point, so a mover
   # without one is carried off by its own world position (q3map2 map.cpp:1640-1644 adjusts
   # brushes only for an origin brush).
   origin_brush: {texture: common/origin, half_size: 8}
+  # How objective_playtests turns each kind's `playtest:` template into engine_playtest steps.
+  # A kind is recognised in any map by `find`: an `anchor` entity whose `name_key` names the
+  # objective, `parts` linked to it by a key holding a value made from {name}, and `team`, the
+  # team_values entry whose bits its spawnflags carry. An entity one kind claims is not offered
+  # to the kinds after it in `order`.
+  playtest:
+    order: [command_post, checkpoint_one_way, checkpoint, constructible, dynamite, escort, steal]
+    # A standing player's origin above the floor: playerMins z is -24, g_client.c:53-54.
+    stand_height: 24
+    spawns:
+      classname: {red: team_CTF_redspawn, blue: team_CTF_bluespawn}   # g_team.c:469-473
+      active: {key: spawnflags, bit: 2}                                # STARTACTIVE, g_team.c:496
+    script:
+      # Followed from an objective's events to see whether it ends the round, and for whom.
+      call: {action: trigger, block_arg: 0, label_arg: 1, event: trigger, self_names: [self]}
+      winner: {action: wm_setwinner, arg: 0, teams: {"0": red, "1": blue}}   # g_script_actions.c:3577-3600
+      end_round: {action: wm_endround}                                       # g_script_actions.c:3487-3510
+    # Classes that make up objectives: one that no kind recognises is reported as untested.
+    classnames: [trigger_objective_info, func_explosive, func_constructible, team_WOLF_checkpoint,
+                 team_CTF_redflag, team_CTF_blueflag, trigger_flagonly_multiple]
 
 # ---------------------------------------------------------------------------
 # spawn_cluster - what spawn_cluster writes for a group of team spawns and its region marker
@@ -4135,6 +4293,9 @@ engine:
       screenshot: "screenshotJPEG {name}"
       sync: "nrc_playtest_sync {sequence}"
       quit: quit
+    # `aim` with `at` looks from the eye: the player's position raised by this player field
+    # (ps.viewheight; the pliers trace starts there, g_weapon.c:2432-2434).
+    eye_height: view_height
     teams: {red: axis, blue: allies}
     roles: {soldier: 0, medic: 1, engineer: 2, fieldops: 3, covertops: 4}
     weapons:
@@ -4156,8 +4317,11 @@ engine:
       activate: {press: "+activate", release: "-activate"}
     fields:
       player: [connected, team, role, alive, health, stance, weapon, weapon_id, speed,
-               position.0, position.1, position.2, angles.0, angles.1, angles.2]
-      game: [phase, winner, charge_count, armed_charges]
+               position.0, position.1, position.2, angles.0, angles.1, angles.2,
+               view_height, carrying]
+      # charge_position: where a dynamite charge lies (the first one found).
+      game: [phase, winner, charge_count, armed_charges,
+             charge_position.0, charge_position.1, charge_position.2]
       entity: [present, seen, count, health, state, classname, progress, built,
                position.0, position.1, position.2]
     example:

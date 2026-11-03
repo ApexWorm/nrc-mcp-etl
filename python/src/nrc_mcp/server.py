@@ -290,6 +290,7 @@ TOOL_NAMES = (
     "spawn_cluster",
     "lighting_report",
     "playable_space_diff",
+    "objective_playtests",
     "bench_run",
     "upstream_diff",
     "upstream_fetch",
