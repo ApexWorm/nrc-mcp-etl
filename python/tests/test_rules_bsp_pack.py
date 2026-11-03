@@ -1176,3 +1176,79 @@ def test_pack_pk3_moves_a_failed_package_out_across_devices_and_fixes_it_up(pack
     (failed,) = r["failed_packages"]
     assert "maps/nrcroom.script" in names(failed), "fixed up like a good package"
     assert not list(install.glob("*.pk3")), "nothing left in the install"
+
+
+def test_key_forbidden_reports_a_key_even_when_empty_and_honours_when_keys(monkeypatch):
+    rule = _rule("key_forbidden", classnames=["a", "b"], key="targetname")
+    assert run(rule, [ent(0, "a"), ent(1, "c", targetname="x")], monkeypatch) == []
+    (f,) = run(rule, [ent(0, "a", targetname=""), ent(1, "b", targetname="t")], monkeypatch)
+    assert f.entities == [0, 1]
+    gated = _rule("key_forbidden", classname="p", key="k5", when_keys=["k1", "k2"])
+    assert run(gated, [ent(0, "p", k1="a", k5="e")], monkeypatch) == []
+    assert run(gated, [ent(0, "p", k1="a", k2="b", k5="e")], monkeypatch)
+
+
+def test_classnames_count_entities_of_every_listed_class_together(monkeypatch):
+    rule = _rule("flag_count_min", classnames=["t1", "t2"], flag=1, count=1)
+    assert run(rule, [ent(0, "t2", spawnflags="1")], monkeypatch) == []
+    assert run(rule, [ent(0, "t1", spawnflags="2")], monkeypatch)
+    required = _rule("key_required", classnames=["t1", "t2"], key="scriptname")
+    (f,) = run(required, [ent(0, "t1", scriptname="s"), ent(1, "t2")], monkeypatch)
+    assert f.entities == [1]
+    flags = _rule("flags_any", classnames=["t1", "t2"], flags=[1, 2])
+    (f,) = run(flags, [ent(0, "t1", spawnflags="4"), ent(1, "t2", spawnflags="2")], monkeypatch)
+    assert f.entities == [0]
+
+
+def test_targets_resolve_can_demand_a_class_and_fold_case(monkeypatch):
+    rule = _rule(
+        "targets_resolve",
+        classname="pt",
+        keys=["target"],
+        target_classes=["pt"],
+        case_sensitive=False,
+    )
+    ok = [ent(0, "pt", targetname="A", target="b"), ent(1, "pt", targetname="B")]
+    assert run(rule, ok, monkeypatch) == []
+    wrong_class = [ent(0, "pt", targetname="a", target="b"), ent(1, "other", targetname="b")]
+    (f,) = run(rule, wrong_class, monkeypatch)
+    assert f.entities == [0]
+    strict = _rule("targets_resolve", keys=["target"])
+    assert run(strict, ok, monkeypatch), "names stay case-sensitive unless the rule says not"
+
+
+def test_the_etl_profile_knows_what_breaks_a_path_or_a_carried_objective():
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    world = ent(0, "worldspawn")
+
+    def found(*entities):
+        return {f.code: f.severity for f in rules.evaluate("etl", [world, *entities])}
+
+    assert found(ent(1, "script_mover"))["ETL_SCRIPT_MOVER_SCRIPTNAME"] == "error"
+    a = ent(1, "info_train_spline_main", targetname="p0", target="P1", control="c0")
+    b = ent(2, "info_train_spline_main", targetname="p1")
+    c = ent(3, "info_train_spline_control", targetname="C0")
+    clean = found(a, b, c)
+    assert not [k for k in clean if k.startswith("ETL_SPLINE") or k == "ETL_TARGETS_RESOLVE"]
+    broken = found(
+        ent(1, "info_train_spline_main", targetname="p0", target="x", control="y"),
+        ent(2, "light", targetname="x"),
+    )
+    assert broken["ETL_SPLINE_TARGET_CLASS"] == "warning"
+    assert broken["ETL_SPLINE_CONTROL_CLASS"] == "warning"
+    five = {f"control{i}" if i > 1 else "control": "c0" for i in range(1, 6)}
+    over = found(ent(1, "info_train_spline_main", targetname="p", **five), c)
+    assert over["ETL_SPLINE_CONTROL_LIMIT"] == "error"
+
+    docs = ent(1, "team_CTF_redflag", scriptname="docs", targetname="docs", model="m.md3")
+    codes = found(docs)
+    assert codes["ETL_CARRY_TARGETNAME"] == "warning"
+    assert codes["ETL_CARRY_DELIVERY_RED"] == "warning"
+    assert "ETL_CARRY_DELIVERY_BLUE" not in codes
+    wrong_team = ent(2, "trigger_flagonly_multiple", scriptname="d", spawnflags="2")
+    assert "ETL_CARRY_DELIVERY_RED" in found(docs, wrong_team)
+    right = ent(2, "trigger_flagonly_multiple", scriptname="d", spawnflags="1")
+    assert "ETL_CARRY_DELIVERY_RED" not in found(docs, right)
+    codes = found(ent(1, "team_CTF_blueflag", scriptname="d"), ent(2, "trigger_flagonly"))
+    assert {"ETL_CARRY_MODEL", "ETL_FLAGONLY_TEAM", "ETL_FLAGONLY_SCRIPTNAME"} <= set(codes)

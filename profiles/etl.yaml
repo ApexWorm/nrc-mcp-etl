@@ -513,6 +513,123 @@ objectives:
       script: *checkpoint_script
       links: *checkpoint_links
       locus: *checkpoint_locus
+    # A vehicle {team} escorts along a path made with path_place. Modelled on the goldrush and
+    # fueldump tanks, minus their damage/repair: it moves while {team} players stand in the
+    # escort volume and stops, at the next path point, a couple of seconds after they leave.
+    escort:
+      description: >-
+        A vehicle {team} escorts along a path: a solid script_mover that follows the path
+        (path_place) segment by segment while {team} players are in the escort volume around
+        it, and stops at the next path point when they leave. `objective` is the vehicle as it
+        stands at the path's first point, `trigger` the escort volume around it. Both turn to
+        face along each segment. Not damageable. Ends with `trigger arrived` on {name}, which
+        is the place for the win (script_set_event).
+      # The path is a chain of path points; each segment is named by the point it leaves.
+      path:
+        # 196 events per block and actions per event (G_MAX_SCRIPT_STACK_ITEMS,
+        # game/g_local.h:147; G_Error at game/g_script.c:440-443 and :583-586); the vehicle
+        # block holds one event per segment plus ten.
+        max_segments: 186
+      options:
+        speed:
+          default: "64"
+          pattern: "[1-9][0-9]*(\\.[0-9]+)?"   # 0 would divide by zero, g_script_actions.c:923
+          description: "units per second along the path (followspline scales it by g_moverScale)"
+        stop_after:
+          default: "2"
+          pattern: "[1-9][0-9]?"
+          description: "seconds without an escort before the vehicle stops at its next path point"
+      entities:
+        - role: objective
+          classname: script_mover
+          # SOLID (2): players collide with it, and one it is pushed into is crushed
+          # (script_mover_blocked, game/g_script.c:1082-1104).
+          keys: {targetname: "{name}", scriptname: "{name}", spawnflags: "2"}
+          origin_at: path_start
+        - role: trigger
+          classname: trigger_multiple
+          texture: common/trigger
+          keys: {scriptname: "{name}_escort", target: "{name}_enabler", spawnflags: "{escort_flag}", wait: "0.5"}
+          origin_at: path_start
+        - {role: enabler, point: true, at: trigger, classname: target_script_trigger,
+           keys: {targetname: "{name}_enabler", scriptname: "{name}_enabler", target: run}}
+        - {role: ticker, point: true, at: trigger, classname: func_timer,
+           keys: {spawnflags: "1", wait: "1", target: "{name}_disabler"}}
+        - {role: disabler, point: true, at: trigger, classname: target_script_trigger,
+           keys: {targetname: "{name}_disabler", scriptname: "{name}_disabler", target: run}}
+      # accum 0: next segment; 1: moving; 2: seconds since the last escort touch; 3: arrived.
+      script:
+        - {block: "{name}", event: spawn, actions: [accum 0 set 0, accum 1 set 0, accum 2 set 0, accum 3 set 0]}
+        - {block: "{name}", event: trigger, params: [escort],
+           actions: [accum 2 set 0, accum 1 abort_if_equal 1, accum 1 set 1, trigger self started, trigger self move]}
+        - {block: "{name}", event: trigger, params: [tick], actions: [accum 2 inc 1]}
+        - {block: "{name}", event: trigger, params: [move],
+           actions: [trigger self stopcheck, accum 1 abort_if_equal 0, trigger self dispatch]}
+        - {block: "{name}", event: trigger, params: [stopcheck],
+           actions: ["accum 2 abort_if_less_than {stop_after}", accum 1 set 0, trigger self stopped]}
+        - block: "{name}"
+          event: trigger
+          params: [dispatch]
+          actions:
+            - {each: segment, do: ["accum 0 trigger_if_equal {i} {name} run_{i}"]}
+            - "accum 0 trigger_if_equal {segments} {name} arrive"
+        - each: segment
+          do:
+            - {block: "{name}", event: trigger, params: ["run_{i}"],
+               actions: ["trigger {name}_escort run_{i}", "followspline 0 {segment} {speed} wait", accum 0 inc 1, trigger self move]}
+            - {block: "{name}_escort", event: trigger, params: ["run_{i}"], actions: ["followspline 0 {segment} {speed} wait"]}
+        - {block: "{name}", event: trigger, params: [arrive], actions: [accum 3 abort_if_equal 1, accum 3 set 1, trigger self arrived]}
+        - {block: "{name}", event: trigger, params: [started], actions: []}
+        - {block: "{name}", event: trigger, params: [stopped], actions: []}
+        - {block: "{name}", event: trigger, params: [arrived], actions: ['wm_announce "{track} has reached its destination!"']}
+        - {block: "{name}_enabler", event: trigger, params: [run], actions: ["trigger {name} escort"]}
+        - {block: "{name}_disabler", event: trigger, params: [run], actions: ["trigger {name} tick"]}
+      locus: >-
+        game/g_script_actions.c:722-913 (followspline moves along one spline segment, from the
+        named point to its target; with wait the event resumes when it ends), game/bg_misc.c:3140-3215
+        (the mover's origin follows the curve and its angles face along it), game/g_script.c:632-654
+        (an event that finishes at once hands control back, so escort/tick never interrupt a
+        move), game/g_trigger.c:80-125,155-200 (trigger_multiple team flags, wait),
+        game/g_trigger.c:1180-1201 (func_timer START_ON), game/g_target.c:1276-1303
+        (target_script_trigger runs trigger <target> in its block), q3map2 map.cpp:1640-1644 (the
+        origin brush makes the brushes relative to the entity origin, which the spline moves)
+    # Carriable documents and the place they are delivered: the radar parts, goldrush gold.
+    steal:
+      description: >-
+        Something the other team steals from {team} and delivers: a carriable objective item
+        ({carry_class}) and a delivery volume (trigger_flagonly_multiple) that takes it from the
+        carrier and runs `death` on {name}_deliver. `objective` is where the item lies, as a
+        point {"origin": [x, y, z]} or a box (its centre); the item falls to the floor below.
+        `trigger` is the delivery volume. Events: stolen, dropped, returned, captured on {name}.
+      options:
+        model:
+          default: models/multiplayer/secretdocs/secretdocs.md3
+          pattern: "[A-Za-z0-9_/.-]+"
+          description: "the model drawn where the item lies; the item itself has none"
+      entities:
+        - role: objective
+          point: true
+          classname: "{carry_class}"
+          # No targetname: a targeted item spawns hidden and untouchable (g_items.c:1040-1047).
+          keys: {scriptname: "{name}", message: "{track}", model: "{model}"}
+        - role: trigger
+          classname: trigger_flagonly_multiple
+          texture: common/trigger
+          keys: {scriptname: "{name}_deliver", spawnflags: "{carry_flag}"}
+      script:
+        - {block: "{name}", event: trigger, params: [stolen], actions: ['wm_announce "{track} has been stolen!"']}
+        - {block: "{name}", event: trigger, params: [dropped], actions: ['wm_announce "{track} has been dropped!"']}
+        - {block: "{name}", event: trigger, params: [returned], actions: ['wm_announce "{track} has been returned!"']}
+        - {block: "{name}", event: trigger, params: [captured], actions: []}
+        - {block: "{name}_deliver", event: death, actions: ['wm_announce "{track} has been delivered!"']}
+      locus: >-
+        game/g_team.c:375-406 (team_CTF_redflag belongs to Axis, blueflag to Allies; the other
+        team picks it up, only while the game is playing), game/g_team.c:281-308 (trigger stolen),
+        game/g_items.c:884-898 (trigger dropped), game/g_team.c:171-241 (trigger returned),
+        game/g_trigger.c:1335-1395 (trigger_flagonly_multiple: RED_FLAG 1 / BLUE_FLAG 2 take it
+        from the carrier, run death on the trigger and trigger captured on the item),
+        game/g_items.c:991-994,1091-1094 (model is what is drawn; the item has no world model,
+        game/bg_misc.c:2362-2410)
   team_values:
     owner_flag: {axis: "1", allies: "2"}      # AXIS_OBJECTIVE / ALLIED_OBJECTIVE, g_local.h:2631-2632
     builder_flag: {axis: "4", allies: "8"}    # AXIS/ALLIED_CONSTRUCTIBLE, g_local.h:2637-2638
@@ -524,6 +641,13 @@ objectives:
     other_spawn: {axis: team_CTF_bluespawn, allies: team_CTF_redspawn}
     # SPAWNPOINT (1) plus ALLIED_ONLY (8) when Axis hold it, AXIS_ONLY (4) when Allies do, g_team.c:963-966
     one_way_flag: {axis: "9", allies: "5"}
+    escort_flag: {axis: "1", allies: "2"}     # trigger_multiple AXIS_ONLY / ALLIED_ONLY, g_trigger.c:165-180
+    carry_class: {axis: team_CTF_redflag, allies: team_CTF_blueflag}   # g_team.c:385-392
+    carry_flag: {axis: "1", allies: "2"}      # RED_FLAG / BLUE_FLAG on the delivery trigger, g_trigger.c:1234-1235
+  # Point a brush entity's brushes are relative to. The spline moves this point, so a mover
+  # without one is carried off by its own world position (q3map2 map.cpp:1640-1644 adjusts
+  # brushes only for an origin brush).
+  origin_brush: {texture: common/origin, half_size: 8}
 
 # ---------------------------------------------------------------------------
 # spawn_cluster - what spawn_cluster writes for a group of team spawns and its region marker
@@ -577,6 +701,28 @@ spawn_cluster:
   # A convention, not an engine rule: oasis_final.map's forward spawns sit 60-64 units apart.
   default_spacing: 64
   default_spacing_source: "corpus/real oasis_final.map entities 283-290"
+
+# Paths movers follow, as path_place writes them: a chain of points, each naming the next, and
+# optional control points that bend the segment leaving a point into a curve. Read by
+# path_place and by objective_place for kinds that take a path.
+paths:
+  confidence: verified
+  source: etlegacy_source
+  point_class: info_train_spline_main
+  control_class: info_train_spline_control
+  name_key: targetname
+  next_key: target
+  # control, control2, control3, control4: read in that order until one is missing; a fifth
+  # stops the map loading (MAX_SPLINE_CONTROLS, bg_public.h:2723; bg_misc.c:3961-3966).
+  control_keys: [control, control2, control3, control4]
+  case_sensitive: false     # BG_Find_Spline / BG_Find_PathCorner use Q_stricmp, bg_misc.c:3871-3922
+  max_points: 512           # MAX_SPLINE_PATHS, bg_public.h:2722; Com_Error at bg_misc.c:3934-3937
+  max_controls: 512         # MAX_PATH_CORNERS, bg_public.h:2673; shared with path_corner_2
+  locus: >-
+    game/g_mover.c:3128-3175 (info_train_spline_main: targetname, target, control keys; freed
+    without a targetname), game/g_mover.c:3099-3126 (info_train_spline_control is spawned as
+    path_corner_2 and needs a targetname), game/bg_misc.c:4016-4069 (points are linked by target
+    after spawning; a missing target or control is only a console warning)
 
 # What a category cannot say. Read by analysis.roles.
 roles:
@@ -3165,7 +3311,8 @@ rules:
       separator: ";"
       # Its target is a script event label, checked by mapscript.entity_events instead.
       # An objective trigger's missing target stops the game: ETL_OBJECTIVE_INFO_TARGET.
-      exclude_classnames: [target_script_trigger, trigger_objective_info]
+      # A path point's target is looked up among path points: ETL_SPLINE_TARGET_CLASS.
+      exclude_classnames: [target_script_trigger, trigger_objective_info, info_train_spline_main]
 
   # --- objectives: each error below stops the game at load (G_Error), checked in etlded ---
 
@@ -3276,6 +3423,183 @@ rules:
       classname: func_constructible
       key: desstages
       pattern: "(?:[^;]+;)*"
+
+  # --- escort vehicles: script movers and the spline paths they follow ---
+
+  - id: ETL_SCRIPT_MOVER_SCRIPTNAME
+    check: key_required
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_script.c:1132-1135 (G_Error \"must have a scriptname\")"
+    message: "{found} script_mover(s) have no scriptname; the game stops at load"
+    fix_hint: "give the script_mover a scriptname and a block for it in the map script"
+    params:
+      classname: script_mover
+      key: scriptname
+
+  - id: ETL_SPLINE_POINT_TARGETNAME
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:3141-3146 (freed with only a console message)"
+    message: >-
+      {found} {classname}(s) have no targetname; the game drops them, so nothing can follow
+      or reach them
+    fix_hint: "name every path point; path_place does"
+    params:
+      classname: info_train_spline_main
+      key: targetname
+
+  - id: ETL_SPLINE_CONTROL_TARGETNAME
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_spawn.c:528 and game/g_mover.c:3108-3113 (spawned as path_corner_2, freed without a targetname)"
+    message: "{found} {classname}(s) have no targetname; the game drops them and no curve uses them"
+    fix_hint: "name the control point and list that name in a path point's control key"
+    params:
+      classname: info_train_spline_control
+      key: targetname
+
+  - id: ETL_SPLINE_TARGET_CLASS
+    check: targets_resolve
+    severity: warning
+    confidence: verified
+    rule_source: >-
+      etlegacy game/bg_misc.c:4044-4050 (a spline's target is looked up among spline points only;
+      a miss prints "Cant find target point" and leaves the segment without a length or an end)
+    message: >-
+      {found} path point target(s) name no info_train_spline_main ({detail}); a mover sent
+      along that segment does not travel it
+    fix_hint: "target the next info_train_spline_main, or leave the last point without a target"
+    params:
+      classname: info_train_spline_main
+      keys: [target]
+      target_classes: [info_train_spline_main]
+      case_sensitive: false
+
+  - id: ETL_SPLINE_CONTROL_CLASS
+    check: targets_resolve
+    severity: warning
+    confidence: verified
+    rule_source: >-
+      etlegacy game/bg_misc.c:4026-4041 (controls are looked up among path corners, which
+      info_train_spline_control and path_corner_2 make; a miss prints "Cant find control point"
+      and the curve ignores it)
+    message: "{found} spline control(s) name no control point ({detail}); the segment is not curved by them"
+    fix_hint: "name an info_train_spline_control (path_place makes them from `controls`)"
+    params:
+      classname: info_train_spline_main
+      keys: [control, control2, control3, control4]
+      target_classes: [info_train_spline_control, path_corner_2]
+      case_sensitive: false
+
+  - id: ETL_SPLINE_CONTROL_LIMIT
+    check: key_forbidden
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/g_mover.c:3160-3170 and game/bg_misc.c:3961-3966 (MAX_SPLINE_CONTROLS 4, bg_public.h:2723; Com_Error)"
+    message: >-
+      {found} path point(s) set control through control4 and also {key} ({detail}); the game
+      stops at load with "MAX SPLINE CONTROLS (4) hit"
+    fix_hint: "use at most four control points per segment, or add a path point"
+    params:
+      classname: info_train_spline_main
+      key: control5
+      when_keys: [control, control2, control3, control4]
+
+  - id: ETL_SPLINE_POINT_LIMIT
+    check: count_max
+    severity: error
+    confidence: verified
+    rule_source: "etlegacy game/bg_misc.c:3934-3937 (Com_Error \"MAX SPLINES (512) hit\"; MAX_SPLINE_PATHS bg_public.h:2722)"
+    message: "found {found} info_train_spline_main entities; the game stops at load above {expected}"
+    fix_hint: "use fewer, longer path segments (control points curve them)"
+    params:
+      classname: info_train_spline_main
+      count: 512
+
+  # --- carried objectives: team_CTF_redflag / blueflag and their delivery triggers ---
+
+  - id: ETL_CARRY_TARGETNAME
+    check: key_forbidden
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_items.c:1040-1047 (an item with a targetname spawns hidden and untouchable)"
+    message: >-
+      {found} carried objective(s) have a {key} ({detail}); the item is never shown and cannot
+      be picked up
+    fix_hint: "remove the targetname; scripts reach the item by its scriptname"
+    params:
+      classnames: [team_CTF_redflag, team_CTF_blueflag]
+      key: targetname
+
+  - id: ETL_CARRY_MODEL
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/bg_misc.c:2362-2410 (these items have no world model), game/g_items.c:991-994,1091-1094 (model is drawn)"
+    message: "{found} carried objective(s) have no model; the item lies there invisible"
+    fix_hint: "set model, e.g. models/multiplayer/secretdocs/secretdocs.md3"
+    params:
+      classnames: [team_CTF_redflag, team_CTF_blueflag]
+      key: model
+
+  - id: ETL_FLAGONLY_TEAM
+    check: flags_any
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1256,1291,1343,1373 (fires only for RED_FLAG 1 / BLUE_FLAG 2 carriers)"
+    message: >-
+      {found} delivery trigger(s) set neither RED_FLAG (1) nor BLUE_FLAG (2); nothing is ever
+      delivered there
+    fix_hint: "set spawnflag 1 for a team_CTF_redflag item, 2 for a team_CTF_blueflag item"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      flags: [1, 2]
+
+  - id: ETL_FLAGONLY_SCRIPTNAME
+    check: key_required
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1268-1272,1352-1356 (delivery runs death in the trigger's own script block, then the item's trigger captured)"
+    message: >-
+      {found} delivery trigger(s) have no scriptname; a delivery runs no death event, so no
+      objective completes
+    fix_hint: "give the trigger a scriptname and a death event (objective_place steal does both)"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      key: scriptname
+
+  - id: ETL_CARRY_DELIVERY_RED
+    check: flag_count_min
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1256,1343 (only a RED_FLAG trigger takes a team_CTF_redflag from its carrier)"
+    applies_when: {classname_present: team_CTF_redflag}
+    message: >-
+      a team_CTF_redflag can be stolen but no delivery trigger has RED_FLAG (1) set, so it can
+      never be delivered
+    fix_hint: "add a trigger_flagonly_multiple with spawnflags 1 where it is to be delivered"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      flag: 1
+      count: 1
+
+  - id: ETL_CARRY_DELIVERY_BLUE
+    check: flag_count_min
+    severity: warning
+    confidence: verified
+    rule_source: "etlegacy game/g_trigger.c:1291,1373 (only a BLUE_FLAG trigger takes a team_CTF_blueflag from its carrier)"
+    applies_when: {classname_present: team_CTF_blueflag}
+    message: >-
+      a team_CTF_blueflag can be stolen but no delivery trigger has BLUE_FLAG (2) set, so it
+      can never be delivered
+    fix_hint: "add a trigger_flagonly_multiple with spawnflags 2 where it is to be delivered"
+    params:
+      classnames: [trigger_flagonly, trigger_flagonly_multiple]
+      flag: 2
+      count: 1
 
   - id: ETL_CHECKPOINT_SCRIPTNAME
     check: key_required
@@ -3557,6 +3881,17 @@ mapscript:
       locus: "game/g_script_actions.c:3358-3405"
       # Every stock map passes an objective number here, the old syntax, which the engine
       # ignores on purpose "for old map scripts compatibility" (g_script_actions.c:3372-3386).
+      skip_numeric: true
+    - action: followspline
+      arg: 1
+      resolves:
+        - {key: targetname, classname: info_train_spline_main}
+      severity: error
+      case_insensitive: true   # BG_Find_Spline compares with Q_stricmp, game/bg_misc.c:3905-3919
+      describe: "an info_train_spline_main's targetname"
+      consequence: "the game stops with 'followspline: can't find spline' when it runs"
+      locus: "game/g_script_actions.c:826-836"
+      # `followspline accum <n> <name>` puts a buffer number here; that form is not checked.
       skip_numeric: true
   # Numeric arguments the engine refuses, with a G_Error, when the action runs.
   arg_ranges:

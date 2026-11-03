@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **75 tools, 7 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **76 tools, 7 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -405,7 +405,7 @@ The whole map can be made through tool calls, with nothing written by hand. With
 | Start the file | `map_new` |
 | Rooms, walls, trim | `solid_commit` (`textures` per face direction; `detail` for trim and props), `solids_commit` for many at once, `patch_commit` for columns, arches and bevels |
 | Spawns, markers, intermission, lights | `spawn_cluster` (a team's spawns at checked standing positions plus their `team_WOLF_objective` marker, optionally named for a script to toggle); `entities_place` for `script_multiplayer`, `info_player_intermission`, `light` and the rest in one call |
-| Objectives | `objective_place` (`dynamite`, `constructible`, `command_post`, `checkpoint`, `checkpoint_one_way`): trigger, objective, spawn flag, spawns, links and script events in one call |
+| Objectives | `objective_place` (`dynamite`, `constructible`, `command_post`, `checkpoint`, `checkpoint_one_way`, `escort`, `steal`): trigger, objective, spawn flag, spawns, links and script events in one call; `path_place` first lays the path an escorted vehicle follows |
 | The map script | `script_set_event` (respawn times, `wm_setwinner`, `setautospawn`, the objectives' events), `script_show` to read it back |
 | Check | `validate`, `validate_profile`, `spawn_safety`, `balance_report`, `lighting_report`, `structural_audit` then `brush_set_detail` |
 | Release files | `arena_write`, `objdata_write`, `commandmap_make`, `levelshot_make` |
@@ -441,7 +441,7 @@ receipt. Gameplay reports use the same in-memory revision even before saving.
 
 ## Tool reference
 
-75 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+76 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -467,7 +467,8 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `validate` | Geometry and file-format findings. |
 | `validate_profile` | Entities against the game profile's rules, and the map script where the game has one. |
 | `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
-| `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite`, `constructible`, a neutral or one team's `command_post`, and a forward spawn flag with its spawn region and spawns, `checkpoint` or `checkpoint_one_way`). Point entities go in `points` by role. Team-only doors are not a kind: give a door the `allowteams` key, which `validate_profile` checks. |
+| `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite`, `constructible`, a neutral or one team's `command_post`, and a forward spawn flag with its spawn region and spawns, `checkpoint` or `checkpoint_one_way`; and `escort` and `steal`). Point entities go in `points` by role. Team-only doors are not a kind: give a door the `allowteams` key, which `validate_profile` checks. |
+| `path_place` | Lay a path for a mover: a chain of linked path points, straight or curved by control points, with long straight legs optionally split. Its `start` is what `objective_place(kind="escort")` follows. |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
 **Seeing it**

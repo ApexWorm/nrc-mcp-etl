@@ -3,6 +3,7 @@ nrcroom fixture, which has been loaded and played in etlded."""
 
 from __future__ import annotations
 
+import math
 import shutil
 from pathlib import Path
 
@@ -168,3 +169,148 @@ def test_objective_place_refuses_before_changing_anything(nrcroom):
         with pytest.raises(ToolError, match=msg):
             srv.objective_place(**{**args, **kwargs})
     assert (len(srv.query_entities()["entities"]), nrcroom.read_text()) == before
+
+
+def _keys_of(index: int) -> dict:
+    return dict(srv.query_entities()["entities"][index]["keys"])
+
+
+def test_path_place_links_points_and_controls_as_the_engine_reads_them(nrcroom):
+    r = srv.path_place(
+        "rail",
+        [
+            [64, 64, 32],
+            {"at": [320, 64, 32], "controls": [[448, 64, 32], [448, 96, 32]]},
+            [448, 256, 32],
+        ],
+        max_segment=128,
+    )
+    assert r["start"] == "rail_0" and r["segments"] == 3, "the first straight leg splits in two"
+    names = [p["name"] for p in r["points"]]
+    assert names == ["rail_0", "rail_1", "rail_2", "rail_3"]
+    assert [p["origin"] for p in r["points"]][1] == [192.0, 64.0, 32.0]
+    first, bend, last = (_keys_of(r["points"][i]["entity"]) for i in (0, 2, 3))
+    assert first["classname"] == "info_train_spline_main" and first["target"] == "rail_1"
+    assert bend["control"] == "rail_2_c0" and bend["control2"] == "rail_2_c1"
+    assert "target" not in last, "the path ends"
+    controls = srv.query_entities(classname="info_train_spline_control")["entities"]
+    assert sorted(dict(e["keys"])["targetname"] for e in controls) == ["rail_2_c0", "rail_2_c1"]
+    assert r["points"][2]["segment_length"] > math.dist([320, 64], [448, 256])
+    assert not [f for f in r["findings"] if f["code"].startswith("ETL_SPLINE")]
+
+
+def test_path_place_refuses_before_changing_anything(nrcroom):
+    before = srv.SESSION.map.source()
+    srv.path_place("taken", [[0, 0, 0], [64, 0, 0]])
+    taken_source = srv.SESSION.map.source()
+    for points, kwargs, msg in [
+        ([[0, 0, 0]], {}, "at least two points"),
+        ([[0, 0, 0], {"at": [8, 0, 0], "controls": [[1, 1, 1]]}], {}, "last point"),
+        ([{"at": [0, 0, 0], "controls": [[1, 1, 1]] * 5}, [8, 0, 0]], {}, "at most 4"),
+        ([[0, 0], [8, 0, 0]], {}, "three finite numbers"),
+        ([[0, 0, 0], [8, 0, 0]], {"name": "taken"}, "already named 'taken_0'"),
+    ]:
+        with pytest.raises(ToolError, match=msg):
+            srv.path_place(kwargs.get("name", "fresh"), points)
+    assert srv.SESSION.map.source() == taken_source != before
+
+
+def test_escort_moves_a_vehicle_and_its_escort_volume_along_the_path(nrcroom):
+    path = srv.path_place("route", [[96, 96, 32], [352, 96, 32], [352, 352, 32]])
+    r = srv.objective_place(
+        "escort",
+        "truck",
+        "the Truck",
+        "allies",
+        objective={"min": [64, 72, 0], "max": [128, 120, 64]},
+        trigger={"min": [0, 0, 0], "max": [192, 192, 128]},
+        path=path["start"],
+        options={"speed": 80},
+    )
+    assert r["summary"]["error"] == 0 and r["summary"]["warning"] == 0, r["findings"]
+    made = {e["role"]: e for e in r["entities"]}
+    assert made["objective"]["classname"] == "script_mover"
+    assert made["objective"]["brushes"] == 1, "the origin brush comes on top"
+    for role in ("objective", "trigger"):
+        sources = [s for e, _p, s in srv.SESSION.map.brush_sources() if e == made[role]["entity"]]
+        assert any("common/origin" in s for s in sources), f"{role} turns about the path start"
+        origin_brush = next(s for s in sources if "common/origin" in s)
+        assert "( 88 104 40 )" in origin_brush and "( 104 88 24 )" in origin_brush
+    escort = _keys_of(made["trigger"]["entity"])
+    assert escort["classname"] == "trigger_multiple" and escort["spawnflags"] == "2"
+    assert escort["target"] == "truck_enabler"
+    assert _keys_of(made["ticker"]["entity"])["target"] == "truck_disabler"
+    text = srv.SESSION.read_file(nrcroom).decode()
+    assert "followspline 0 route_0 80 wait" in text and "followspline 0 route_1 80 wait" in text
+    assert "accum 0 trigger_if_equal 2 truck arrive" in text
+    assert "trigger truck_escort run_1" in text
+    blocks = {b["block"]: b for b in srv.script_show()["blocks"]}
+    assert all(blocks[b]["runs_for_entities"] for b in ("truck", "truck_escort", "truck_enabler"))
+
+
+def test_escort_refuses_without_a_path_or_with_a_bad_option(nrcroom):
+    path = srv.path_place("route", [[96, 96, 32], [352, 96, 32]])
+    args = {
+        "kind": "escort",
+        "name": "truck",
+        "track": "x",
+        "team": "axis",
+        "objective": {"min": [64, 64, 0], "max": [128, 128, 64]},
+        "trigger": {"min": [0, 0, 0], "max": [192, 192, 128]},
+        "path": path["start"],
+    }
+    before = (srv.SESSION.map.source(), nrcroom.read_text())
+    for kwargs, msg in [
+        ({"path": ""}, "follows a path"),
+        ({"path": "nowhere"}, "no info_train_spline_main is named 'nowhere'"),
+        ({"path": "route_1"}, "one point and no segment"),
+        ({"options": {"speed": "fast"}}, "option speed 'fast'"),
+        ({"options": {"colour": 1}}, "no option 'colour'"),
+        ({"kind": "dynamite"}, "does not follow a path"),
+        ({"name": "route_0"}, "already uses the name"),
+    ]:
+        with pytest.raises(ToolError, match=msg):
+            srv.objective_place(**{**args, **kwargs})
+    assert (srv.SESSION.map.source(), nrcroom.read_text()) == before
+
+
+@pytest.mark.parametrize(
+    "team,item,flag", [("axis", "team_CTF_redflag", "1"), ("allies", "team_CTF_blueflag", "2")]
+)
+def test_steal_lays_the_item_and_a_delivery_volume_for_the_other_team(nrcroom, team, item, flag):
+    r = srv.objective_place(
+        "steal",
+        "docs",
+        "the Documents",
+        team,
+        objective={"origin": [200, 200, 24]},
+        trigger={"min": [400, 400, 0], "max": [480, 480, 96]},
+    )
+    assert r["summary"]["error"] == 0 and r["summary"]["warning"] == 0, r["findings"]
+    made = {e["role"]: e for e in r["entities"]}
+    docs = _keys_of(made["objective"]["entity"])
+    assert docs["classname"] == item and docs["origin"] == "200 200 24"
+    assert "targetname" not in docs, "a targeted item never appears"
+    assert docs["model"].endswith(".md3") and docs["message"] == "the Documents"
+    deliver = _keys_of(made["trigger"]["entity"])
+    assert deliver["classname"] == "trigger_flagonly_multiple" and deliver["spawnflags"] == flag
+    text = srv.SESSION.read_file(nrcroom).decode()
+    assert "trigger stolen" in text and "trigger returned" in text
+    assert "docs_deliver\n{\n\tdeath" in text
+    with pytest.raises(ToolError, match="is a brush entity here"):
+        srv.objective_place(
+            "dynamite", "radio", "x", "axis", objective={"origin": [0, 0, 0]}, trigger=_box()
+        )
+
+
+def _box():
+    return {"min": [0, 0, 0], "max": [64, 64, 64]}
+
+
+def test_followspline_to_a_point_that_does_not_exist_is_an_error(nrcroom):
+    srv.path_place("route", [[96, 96, 32], [352, 96, 32]])
+    r = srv.script_set_event("gate", "trigger", ["followspline 0 ROUTE_0 50 wait"], params=["go"])
+    assert not [f for f in r["findings"] if f["code"] == "MAPSCRIPT_UNRESOLVED_REFERENCE"]
+    r = srv.script_set_event("gate", "trigger", ["followspline 0 route_9 50 wait"], params=["go"])
+    (f,) = [f for f in r["findings"] if f["code"] == "MAPSCRIPT_UNRESOLVED_REFERENCE"]
+    assert "route_9" in f["message"]

@@ -63,6 +63,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
         "entity_set_keys",
         "entity_remove_keys",
         "objective_place",
+        "path_place",
         "script_show",
         "script_set_event",
         "script_remove",

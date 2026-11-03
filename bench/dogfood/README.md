@@ -11,6 +11,7 @@ mise run bench:dogfood -- depot
 mise run bench:dogfood -- constructible
 mise run bench:dogfood -- movement
 mise run bench:dogfood -- frontline [--one-way]
+mise run bench:dogfood -- convoy
 ```
 
 | Scenario | Exercises |
@@ -19,6 +20,7 @@ mise run bench:dogfood -- frontline [--one-way]
 | `constructible` | Workshop pit, stairs, constructible bridge, horizontal pipe, parametric editing and checkpoint restoration |
 | `movement` | Standing stair/arch route, crouch tunnel, prone vent, route changes after lowering a ceiling and restoring it |
 | `frontline` | `objective_place` checkpoint (or `checkpoint_one_way`) with forward spawns, a neutral `command_post`, and an Axis-only door (`allowteams`) |
+| `convoy` | A truck the Allies escort along a path with a curved bend (`path_place`, `objective_place` escort), and Axis orders they steal and deliver (`objective_place` steal) |
 
 The depot once placed every brush and entity with its own call: 67 calls and 84,392 bytes of
 response text. Committing its 12 solids with one `solids_commit`, each team's spawns and region
@@ -51,6 +53,8 @@ mise run bench:dogfood -- playtest depot
 mise run bench:dogfood -- playtest movement
 mise run bench:dogfood -- playtest frontline --pk3 <frontline package>
 mise run bench:dogfood -- playtest frontline_one_way --pk3 <frontline --one-way package>
+mise run bench:dogfood -- playtest convoy_escort --pk3 /absolute/path/nrc_convoy_autopacked.pk3
+mise run bench:dogfood -- playtest convoy_steal --pk3 /absolute/path/nrc_convoy_autopacked.pk3
 ```
 
 `frontline` proves the flag by where players respawn: Allies touch the flag, switch team
@@ -62,8 +66,14 @@ Axis-only door stays shut for Allies and opens for Axis with the use key.
 that Axis lowering it takes the spawns back.
 
 These call `engine_playtest` over stdio MCP, retain its JSON receipt and returned images,
-and use the example packages recorded in `out/dogfood/report.json`. The scenarios live in
+and use the example packages recorded in `out/dogfood/report.json` (the convoy scenarios take
+the package `convoy` printed). The scenarios live in
 `bench/dogfood/scenarios/`; read `nrc://playtest/etl` for supported actions and conditions.
+
+`convoy_escort` stands an Allied player in the moving escort volume, leaves the truck to stop
+at a path point, catches up, follows it round the curved segment and sees `arrived` win the
+round. `convoy_steal` walks onto the orders (their `stolen` event hides a lamp the observer
+watches) and carries them into the delivery volume, whose `death` event wins the round.
 The older direct-engine probe below remains useful for reproducing the original experiments.
 
 The optional engine probe uses an isolated game home and records screenshots, engine logs

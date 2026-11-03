@@ -20,6 +20,8 @@ async def main(case: str, package: str | None):
             "movement": "Movement Bunker",
             "frontline": "Frontline Hall",
             "frontline_one_way": "Frontline Hall",
+            "convoy_escort": "Convoy Yard",
+            "convoy_steal": "Convoy Yard",
         }
         package = next(row["package"] for row in report["examples"] if row["name"] == names[case])
     async with DogfoodSession("playtest-" + case) as run:
@@ -49,7 +51,16 @@ async def main(case: str, package: str | None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument(
-        "case", choices=["workshop", "depot", "movement", "frontline", "frontline_one_way"]
+        "case",
+        choices=[
+            "workshop",
+            "depot",
+            "movement",
+            "frontline",
+            "frontline_one_way",
+            "convoy_escort",
+            "convoy_steal",
+        ],
     )
     parser.add_argument("--pk3", help="Override the package recorded in out/dogfood/report.json")
     args = parser.parse_args()
