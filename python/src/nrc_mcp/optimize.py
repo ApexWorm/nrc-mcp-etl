@@ -817,7 +817,184 @@ def parse_pointfile(lin_path: str | Path) -> dict[str, Any]:
     return {"path": str(path), "points": points, "count": len(points)}
 
 
-def leak_trace(lin_path: str | Path, map_path: str | Path | None = None) -> dict[str, Any]:
+def _segment_box_distance(
+    a: list[float], b: list[float], lo: list[float], hi: list[float]
+) -> float:
+    """Shortest distance from segment a-b to an axis-aligned box, by sampling the segment
+    finely enough for a leak path's portal-to-portal steps (one sample per 4 units)."""
+    steps = max(1, int(math.dist(a, b) / 4))
+    best = math.inf
+    for k in range(steps + 1):
+        t = k / steps
+        p = [a[i] + (b[i] - a[i]) * t for i in range(3)]
+        d = math.sqrt(sum(max(lo[i] - p[i], 0.0, p[i] - hi[i]) ** 2 for i in range(3)))
+        best = min(best, d)
+        if best == 0.0:
+            break
+    return best
+
+
+#: How close the leak path must come to a brush or model for it to be named as a likely cause.
+#: The path runs through portal centres, and the hole it crosses is a face it touches.
+LEAK_NEAR_BRUSH = 1.0
+LEAK_NEAR_MODEL = 128.0
+
+
+def _leak_causes(
+    points: list[list[float]],
+    map_path: str | Path,
+    profile_id: str | None,
+    basegame_dirs: list[str | Path] | None,
+) -> list[dict]:
+    """Things on the leak path that do not seal although they may look as if they should.
+
+    Two that the compiler's own rules make certain, from the profile's `sealing:` section:
+
+    - a brush the path passes through with a side whose shader carries a translucent
+      surfaceparm. The compiler ORs the flags of every side, so that one side makes the whole
+      brush detail and non-opaque: it never stops the outside flood, however structural the
+      rest of it looks. Shaders are looked up in the base game and in the map's own scripts.
+    - a model entity near the path. Its baked geometry and clip are detail, so it seals
+      nothing, present or missing.
+
+    An explicitly detail brush on the path is named as well: detail never seals.
+    """
+    if not profile_id:
+        return []
+    try:
+        seal = profiles.load(profile_id).get("sealing")
+    except profiles.ProfileError:
+        return []
+    if not isinstance(seal, dict):
+        return []
+    conf = str(seal.get("confidence", "unverified"))
+    src = f"profile {profile_id} sealing"
+    translucent = {str(s).lower() for s in seal.get("translucent_surfaceparms") or []}
+
+    parms: dict[str, list[str]] = {}
+    if basegame_dirs:
+        for name, sh in basegame_index(basegame_dirs).get("shaders", {}).items():
+            parms[name] = sh.get("surfaceparms") or []
+    root = Path(map_path).parent
+    root = root.parent if root.name.lower() == "maps" else root
+    for f in sorted((root / "scripts").glob("*.shader")):
+        try:
+            for sh in parse_shader_file(f):
+                parms[sh["name"].lower()] = sh.get("surfaceparms") or []
+        except (OptimizeError, OSError):
+            continue
+
+    segs = list(zip(points, points[1:], strict=False)) or [(points[0], points[0])]
+    lo = [min(p[i] for p in points) - LEAK_NEAR_MODEL for i in range(3)]
+    hi = [max(p[i] for p in points) + LEAK_NEAR_MODEL for i in range(3)]
+    mp = load_map(map_path)
+    ents = mp.entities(with_keys=True)
+    nonsealing: list[dict] = []
+    detail: list[dict] = []
+    for idx, info in enumerate(mp.entities(with_keys=False)):
+        for prim, g in _brushes(mp, idx, info):
+            ext = _extent(g.get("bounds"))
+            if ext is None:
+                continue
+            blo, bhi, _ = ext
+            if any(bhi[i] < lo[i] or blo[i] > hi[i] for i in range(3)):
+                continue
+            if min(_segment_box_distance(a, b, blo, bhi) for a, b in segs) > LEAK_NEAR_BRUSH:
+                continue
+            shaders = sorted({s for s in g.get("shaders") or [] if s != EMPTY_SHADER})
+            why = {
+                s: sorted(set(parms.get((SHADER_NAME_PREFIX + s).lower(), [])) & translucent)
+                for s in shaders
+            }
+            why = {s: p for s, p in why.items() if p}
+            row = {
+                "entity": idx,
+                "classname": ents[idx].get("classname"),
+                "brush": prim,
+                "mins": blo,
+                "maxs": bhi,
+                "marked_detail": bool(g.get("detail")),
+            }
+            if why:
+                nonsealing.append({**row, "translucent_shaders": why})
+            elif g.get("detail"):
+                detail.append(row)
+
+    out: list[dict] = []
+    if nonsealing:
+        look = [b for b in nonsealing if not b["marked_detail"]]
+        named = ", ".join(
+            f"entity {b['entity']} brush {b['brush']} ("
+            + "; ".join(f"{s}: {', '.join(p)}" for s, p in b["translucent_shaders"].items())
+            + ")"
+            for b in (look or nonsealing)[:4]
+        )
+        out.append(
+            _finding(
+                "LEAK_NONSEALING_BRUSH",
+                "warning",
+                f"the leak path passes through {len(nonsealing)} brush(es) with a side whose shader "
+                f"is translucent to the compiler, {len(look)} of them not marked detail: {named}. "
+                "One such side makes the whole brush detail and non-opaque, so it does not seal "
+                "the hull, however solid the rest of it looks",
+                conf,
+                source=f"{src} ({seal.get('source', '')}: map.cpp:517-537)",
+                fix_hint=(
+                    "back the brush with an opaque structural brush (caulk) where it closes the "
+                    "hull, or split the translucent face onto its own brush"
+                ),
+                detail={"brushes": nonsealing[:20]},
+            )
+        )
+    if detail:
+        out.append(
+            _finding(
+                "LEAK_DETAIL_ON_PATH",
+                "info",
+                f"the leak path passes through {len(detail)} detail brush(es) (first: entity "
+                f"{detail[0]['entity']} brush {detail[0]['brush']}); detail never seals, so if "
+                "one of them was meant to close the hull it needs a structural brush behind it",
+                conf,
+                source=src,
+                detail={"brushes": detail[:20]},
+            )
+        )
+    model_classes = {str(c) for c in seal.get("model_entities") or []}
+    key = str(seal.get("model_key", "model"))
+    models = []
+    for e in ents:
+        o = e.get("origin")
+        if e.get("classname") not in model_classes or not isinstance(o, (list, tuple)):
+            continue
+        o = [float(v) for v in o]
+        d = min(_segment_box_distance(a, b, o, o) for a, b in segs)
+        if d <= LEAK_NEAR_MODEL:
+            keys = dict(e.get("keys") or [])
+            models.append({"entity": e["index"], "model": keys.get(key), "distance": round(d, 1)})
+    if models:
+        models.sort(key=lambda m: m["distance"])
+        out.append(
+            _finding(
+                "LEAK_MODEL_NEAR_PATH",
+                "info",
+                f"{len(models)} model entit(ies) within {LEAK_NEAR_MODEL:g} units of the leak path "
+                f"(nearest: entity {models[0]['entity']}, {models[0]['model']}). A model never "
+                "seals: the compiler makes its geometry and clip detail, whether or not the model "
+                "file is found, so none of them is the hull",
+                conf,
+                source=f"{src} ({seal.get('source', '')}: model.cpp:445, 489)",
+                detail={"models": models[:20]},
+            )
+        )
+    return out
+
+
+def leak_trace(
+    lin_path: str | Path,
+    map_path: str | Path | None = None,
+    profile_id: str | None = None,
+    basegame_dirs: list[str | Path] | None = None,
+) -> dict[str, Any]:
     """The leak path as a polyline, and the entity it leaked from (§6.1).
 
     **The `.lin` file does not name the entity.** `leakfile.cpp:116` reports it over q3map2's
@@ -829,6 +1006,10 @@ def leak_trace(lin_path: str | Path, map_path: str | Path | None = None) -> dict
     The polyline runs from outside the map inwards, so its first point is where the leak
     escapes and its last is the entity that leaked — which is the direction to read it in when
     hunting for the hole.
+
+    With `map_path` and a profile that has a `sealing:` section, the path is also checked for
+    the likely causes `_leak_causes` can prove: brushes it passes through that cannot seal, and
+    models beside it that a mapper may have taken for a wall.
     """
     parsed = parse_pointfile(lin_path)
     points = parsed["points"]
@@ -897,6 +1078,8 @@ def leak_trace(lin_path: str | Path, map_path: str | Path | None = None) -> dict
                 detail={"leaked_from_origin": origin, "first_point": points[0]},
             )
         )
+    if map_path is not None:
+        findings += _leak_causes(points, map_path, profile_id, basegame_dirs)
 
     return {
         "lin": parsed["path"],

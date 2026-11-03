@@ -15,7 +15,7 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis as anamod
-from .. import mapscript, profiles, rules
+from .. import mapscript, profiles, rules, soundscript
 from .. import playspace as playspacemod
 from ..kernel import load_map, repo_root
 from ..runtime import (
@@ -508,7 +508,11 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
 
     Complements `validate`, which covers game-agnostic geometry. This checks the game's own
     rules: spawn arrangement, objective counts, gametype keys — and, for a game whose maps
-    carry a script, that script against the map's entities.
+    carry a script, that script against the map's entities. For a game with speaker and sound
+    scripts (the profile's `sound:` section), their syntax, the sound files they name, and
+    whether the sound scripts and speakers the map and its script name exist. Files are looked
+    for beside the map (under the folder holding `maps/`) and, with the game path set, in the
+    base game.
 
     Every rule is data in the profile, and every finding carries a `confidence`. **An
     unverified rule can never produce an error** — it is downgraded to `info` — because three
@@ -527,6 +531,8 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
         found = rules.evaluate(pid, ents) + rules.unknown_classnames(pid, ents)
         # A profile with a map script also checks the script beside the .map against it.
         found += mapscript.check(pid, ents, SESSION.path)
+        # And its speaker and sound scripts, and the names that point into them.
+        found += soundscript.check(pid, ents, SESSION.path)
     except profiles.ProfileError as e:
         raise ToolError(_profile_error_text(e)) from e
     found += _missing_textures(m, pid)

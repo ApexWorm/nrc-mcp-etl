@@ -1071,3 +1071,161 @@ def test_pack_pk3_moves_a_failed_package_out_across_devices_and_fixes_it_up(pack
     (failed,) = r["failed_packages"]
     assert "maps/nrcroom.script" in names(failed), "fixed up like a good package"
     assert not list(install.glob("*.pk3")), "nothing left in the install"
+
+
+# ---------------------------------------------------------------------------
+# What the packer could not find, accounted for
+# ---------------------------------------------------------------------------
+
+_BASE_SHADER = (
+    "textures/base/slick\n{\n\tsurfaceparm slick\n\timplicitMap textures/base/wall.tga\n}\n"
+)
+
+
+@pytest.fixture
+def failing(packer, monkeypatch):
+    """The packer of `packer`, but failing on the names in `failing["state"]["names"]` as q3map2
+    prints them. The base game defines one shader with implicitMap, which the packer cannot
+    read, and ships one sound."""
+    install = packer["install"]
+    with zipfile.ZipFile(install / "basedir" / "pak1.pk3", "w") as z:
+        z.writestr("scripts/base.shader", _BASE_SHADER)
+        z.writestr("sound/world/known.wav", b"x")
+    state = {"names": ["textures/base/slick"]}
+
+    def fake(args, target, timeout=1800):
+        out = install / f"{target.stem}{pack.FAILURE_SUFFIX}"
+        make_pk3(out, ["maps/nrcroom.bsp"])
+        lines = "".join(f"  !FAIL! {n}\n" for n in state["names"])
+        return {"ok": True, "returncode": 0, "stdout": f"{lines}Saved to {out}\n", "stderr": ""}
+
+    monkeypatch.setattr(pack, "_q3map2", fake)
+    return {**packer, "state": state}
+
+
+def test_a_shader_the_base_game_defines_does_not_fail_the_pack(failing):
+    """Six stock maps failed only on shaders like this one (`implicitMap`, autopk3.cpp:466)."""
+    r = pack.pack_pk3(failing["bsp"], profile_id="test")
+    assert r["ok"], r
+    assert r["packages"][0].endswith(pack.SUCCESS_SUFFIX) and not r["failed_packages"]
+    assert r["packer_not_found"] == ["textures/base/slick"]
+    assert r["accounted_for"] == [{"name": "textures/base/slick", "by": "the base game"}]
+    assert r["not_found"] == []
+
+
+def test_a_texture_nothing_supplies_still_fails_the_pack(failing):
+    failing["state"]["names"] = ["textures/base/slick", "textures/nowhere/at_all"]
+    r = pack.pack_pk3(failing["bsp"], profile_id="test")
+    assert not r["ok"] and r["missing_resources"]
+    assert r["failed_packages"][0].endswith(pack.FAILURE_SUFFIX)
+    assert r["not_found"] == ["textures/nowhere/at_all"]
+    assert "textures/nowhere/at_all" in r["hint"]
+
+
+def test_ignore_takes_names_and_patterns_and_reports_the_unused(failing):
+    failing["state"]["names"] = ["textures/nowhere/at_all", "sound/gone/a.wav"]
+    r = pack.pack_pk3(
+        failing["bsp"],
+        profile_id="test",
+        ignore=["TEXTURES/nowhere/at_all", "sound/gone/*", "models/never/*"],
+    )
+    assert r["ok"], r
+    assert {a["name"]: a["pattern"] for a in r["allowed_missing"]} == {
+        "textures/nowhere/at_all": "TEXTURES/nowhere/at_all",
+        "sound/gone/a.wav": "sound/gone/*",
+    }
+    assert r["unused_ignore"] == ["models/never/*"]
+
+
+def test_the_profile_lists_what_the_base_game_never_shipped(failing, monkeypatch):
+    failing["state"]["names"] = ["sound/world/lost.wav"]
+    pkg = {**_PACKAGING, "allowed_missing": [{"path": "sound/world/lost.wav", "reason": "x y"}]}
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"packaging": pkg})
+    r = pack.pack_pk3(failing["bsp"], profile_id="test")
+    assert r["ok"]
+    assert r["allowed_missing"][0]["reason"] == "x y"
+
+
+def test_the_maps_own_implicit_shader_is_packed_with_its_image(failing):
+    work = failing["work"]
+    (work / "scripts").mkdir()
+    (work / "scripts" / "nrcroom.shader").write_text(
+        "textures/mine/floor\n{\n\tqer_editorimage textures/mine/editor.tga\n"
+        "\timplicitMap textures/mine/floor_img.tga\n}\n"
+    )
+    (work / "textures" / "mine").mkdir(parents=True)
+    (work / "textures" / "mine" / "floor_img.jpg").write_bytes(b"jpg")
+    failing["state"]["names"] = ["textures/mine/floor"]
+    r = pack.pack_pk3(failing["bsp"], profile_id="test")
+    assert r["ok"], r
+    inside = names(r["packages"][0])
+    assert "scripts/nrcroom.shader" in inside
+    assert "textures/mine/floor_img.jpg" in inside
+    assert "textures/mine/editor.tga" not in inside, "the editor's image is not the game's"
+
+
+def test_the_maps_own_shader_without_its_image_still_fails(failing):
+    work = failing["work"]
+    (work / "scripts").mkdir()
+    (work / "scripts" / "nrcroom.shader").write_text("textures/mine/floor\n{\n\timplicitMap -\n}\n")
+    failing["state"]["names"] = ["textures/mine/floor"]
+    r = pack.pack_pk3(failing["bsp"], profile_id="test")
+    assert not r["ok"]
+    assert r["not_found"] == ["textures/mine/floor (its image textures/mine/floor)"]
+
+
+_SOUND = {
+    "file_extensions": ["wav"],
+    "speaker_script": {
+        "path": "sound/maps/{map}.sps",
+        "root": "root",
+        "entry": "spk",
+        "sound_key": "noise",
+        "name_key": "targetname",
+        "keys": {"noise": {"type": "string"}, "targetname": {"type": "string"}},
+    },
+    "sound_scripts": {
+        "directory": "sound/scripts",
+        "file_list": "sound/scripts/filelist.txt",
+        "map_file": "sound/scripts/{map}.sounds",
+        "sound_directive": "sound",
+    },
+}
+
+
+def test_pack_carries_the_speaker_script_and_the_sounds_it_names(failing, monkeypatch):
+    companions = _PACKAGING["companions"] + [
+        {"path": "sound/maps/{map}.sps"},
+        {"path": "sound/scripts/{map}.sounds"},
+    ]
+    monkeypatch.setattr(
+        profiles,
+        "load",
+        lambda _pid: {"packaging": {**_PACKAGING, "companions": companions}, "sound": _SOUND},
+    )
+    work = failing["work"]
+    for d in ("maps", "scripts", "mine"):
+        (work / "sound" / d).mkdir(parents=True)
+    (work / "sound" / "mine" / "hum.wav").write_bytes(b"RIFF")
+    (work / "sound" / "maps" / "nrcroom.sps").write_text(
+        'root {\n spk { noise "sound/mine/hum.wav" }\n spk { noise "sound/world/known.wav" }\n}\n'
+    )
+    (work / "sound" / "scripts" / "nrcroom.sounds").write_text(
+        "voice\n{\n\tsound sound/mine/hum.wav\n}\n"
+    )
+    r = pack.pack_pk3(failing["bsp"], profile_id="test")
+    assert r["ok"], r
+    inside = set(names(r["packages"][0]))
+    assert {
+        "sound/maps/nrcroom.sps",
+        "sound/scripts/nrcroom.sounds",
+        "sound/mine/hum.wav",
+    } <= inside
+    assert "sound/world/known.wav" not in inside, "the base game ships that one"
+
+    (work / "sound" / "maps" / "nrcroom.sps").write_text(
+        'root { spk { noise "sound/mine/gone.wav" } }'
+    )
+    r = pack.pack_pk3(failing["bsp"], profile_id="test")
+    assert not r["ok"]
+    assert r["not_found"] == ["sound/mine/gone.wav (named by sound/maps/nrcroom.sps)"]
