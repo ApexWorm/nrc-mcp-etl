@@ -32,6 +32,89 @@ ORDER = (
     "maintenance",
 )
 
+#: What every preset starts from: open, inspect, check and save a map, and read the profile.
+_CORE = (
+    "map_open",
+    "map_new",
+    "map_stats",
+    "map_save",
+    "map_checkpoint",
+    "map_restore",
+    "query_entities",
+    "validate",
+    "validate_profile",
+    "profile_summary",
+)
+_LOOK = ("render_topdown", "render_camera", "render_contact_sheet", "render_player_eye")
+
+#: Named tool subsets for typical sessions, cutting across the groups. A group is where a
+#: tool lives; a preset is what one kind of session calls. Drawn from the dogfood sessions
+#: (`bench/dogfood`, `out/dogfood/*/calls`), which build, analyse and ship maps over MCP:
+#: their calls fall into these three phases. `NRC_MCP_GROUPS` accepts these names beside
+#: the group names, and a selection is the union of everything it names.
+PRESETS: dict[str, tuple[str, ...]] = {
+    # Blocking out and wiring a map: geometry, entities, objectives and the script.
+    "build": _CORE
+    + _LOOK
+    + (
+        "entity_place",
+        "entity_set_keys",
+        "entity_remove_keys",
+        "objective_place",
+        "script_show",
+        "script_set_event",
+        "script_remove",
+        "solid_help",
+        "solid_compile",
+        "solid_preview",
+        "solid_commit",
+        "patch_commit",
+        "brush_set_detail",
+        "solid_inspect",
+        "solid_list",
+        "solid_param_preview",
+        "solid_edit_param",
+        "texture_search",
+    ),
+    # Measuring how it plays, without changing geometry.
+    "analyse": _CORE
+    + _LOOK
+    + (
+        "script_show",
+        "brush_geometry",
+        "navgrid_stats",
+        "route_report",
+        "route_render",
+        "balance_report",
+        "spawn_safety",
+        "movement_check",
+        "sightline_report",
+        "lighting_report",
+        "playable_space_diff",
+    ),
+    # Compiling, packaging and proving it in the engine.
+    "ship": _CORE
+    + (
+        "render_player_eye",
+        "compile_map",
+        "leak_trace",
+        "bsp_report",
+        "bsp_entity_diff",
+        "shader_audit",
+        "texture_search",
+        "pack_pk3",
+        "repack_analyze",
+        "ship_check",
+        "arena_write",
+        "objdata_write",
+        "commandmap_make",
+        "levelshot_make",
+        "engine_playtest",
+    ),
+}
+#: A whole map-making session, start to finish: the three phases together.
+PRESETS["level"] = tuple(dict.fromkeys(PRESETS["build"] + PRESETS["analyse"] + PRESETS["ship"]))
+
 #: The imported modules, in `ORDER`. Importing them is what registers their tools.
 MODULES: tuple[ModuleType, ...] = tuple(
     importlib.import_module(f".{name}", __name__) for name in ORDER
