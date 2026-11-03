@@ -230,6 +230,7 @@ TOOL_NAMES = (
     "map_save",
     "map_checkpoint",
     "map_restore",
+    "map_mirror",
     "query_entities",
     "entity_place",
     "entities_place",

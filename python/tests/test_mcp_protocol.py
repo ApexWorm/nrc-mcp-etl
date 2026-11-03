@@ -150,6 +150,7 @@ def test_reading_a_resource_returns_content():
 WRITERS = {
     "map_checkpoint",
     "map_restore",
+    "map_mirror",
     "map_new",
     "map_save",
     "entity_place",
@@ -187,6 +188,7 @@ WRITERS = {
 DESTRUCTIVE = {
     "map_checkpoint",
     "map_restore",
+    "map_mirror",
     "solid_edit_param",
     "map_save",
     "entity_set_keys",

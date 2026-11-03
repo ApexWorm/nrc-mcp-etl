@@ -452,6 +452,44 @@ impl PyMap {
         Ok(out)
     }
 
+    /// Mirror every brush and patch across the plane `coordinate[axis] = at`, in place.
+    ///
+    /// Planes stay outward, textures come out as the mirror image, patches keep their
+    /// facing (`nrc_core::mirror`). Entity keys are not touched. With `entity`, only that
+    /// entity's primitives. Returns what was changed.
+    #[pyo3(signature = (axis, at, entity=None))]
+    fn mirror_geometry<'py>(
+        &mut self,
+        py: Python<'py>,
+        axis: usize,
+        at: f64,
+        entity: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if axis > 2 || !at.is_finite() {
+            return Err(err("axis is 0, 1 or 2 and at a finite coordinate"));
+        }
+        let s = match entity {
+            None => nrc_core::mirror::mirror_geometry(&mut self.inner, axis, at),
+            Some(i) => {
+                let e = self
+                    .inner
+                    .entities
+                    .get_mut(i)
+                    .ok_or_else(|| err(format!("no entity {i}")))?;
+                let mut s = nrc_core::mirror::MirrorStats::default();
+                nrc_core::mirror::mirror_entity(e, axis, at, &mut s);
+                s
+            }
+        };
+        let d = PyDict::new(py);
+        d.set_item("brushes", s.brushes)?;
+        d.set_item("faces", s.faces)?;
+        d.set_item("patches", s.patches)?;
+        d.set_item("raw_blocks", s.raw_blocks)?;
+        d.set_item("degenerate_faces", s.degenerate_faces)?;
+        Ok(d)
+    }
+
     /// A fingerprint of every brush's geometry: `(entity, primitive, hash)`.
     ///
     /// The hash covers the plane points only, so a brush that moves or changes shape gets a new

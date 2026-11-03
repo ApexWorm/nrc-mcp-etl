@@ -81,6 +81,7 @@ def pack_pk3(
     png: bool = False,
     profile_id: str | None = None,
     ignore: list[str] | None = None,
+    depends: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Build a pk3 for a compiled BSP with `q3map2 -pk3`, then fix up what it produced.
 
@@ -98,10 +99,18 @@ def pack_pk3(
     beside the map, the sound files the map's sound and speaker scripts name, and loses what the
     base game already ships (when `NRC_FS_BASEPATH` is set). Either way it ends up next to the
     map's folder, never in the game install.
+
+    `depends` are other archives the map is played alongside (it uses their textures and
+    models): a name one of them holds counts as found, and what they hold with identical
+    content is left out of this archive, as the base game's own files are.
     """
     target = Path(bsp)
     if not target.is_file():
         raise PackError(f"{target} does not exist — compile the map first")
+    archives = [Path(d) for d in depends or []]
+    for a in archives:
+        if not zipfile.is_zipfile(a):
+            raise PackError(f"{a} is not an archive the map can depend on")
 
     flags = ["-pk3"]
     if png:
@@ -126,11 +135,16 @@ def pack_pk3(
     basegame = Path(base) / str(pkg["basegame"]) if base and pkg.get("basegame") else None
     packer_not_found = _not_found(console)
     optional_missing = _not_found(console, "~fail")
-    found = _account_for(packer_not_found, target, pkg, basegame, ignore or [])
+    found = _account_for(packer_not_found, target, pkg, basegame, ignore or [], archives)
     extra, unpacked = _script_sounds(target, profile_id, basegame)
     found["add"] += extra
     sound_missing: list[str] = []
+    held = {a: archive_entries(a) for a in archives}
     for name, where in unpacked:
+        holder = next((a for a, names in held.items() if name.lower() in names), None)
+        if holder is not None:
+            found["supplied"].append({"name": name, "by": holder.name})
+            continue
         allowed = _allowance(name, pkg, ignore or [])
         if allowed is not None:
             found["allowed"].append(allowed)
@@ -147,7 +161,7 @@ def pack_pk3(
         # A failed package is fixed up too: it is still the map, missing only what the packer
         # could not find, and testing it should not also lose its script.
         if zipfile.is_zipfile(p):
-            a, d = _fix_up(p, dest, target, pkg, basegame, found["add"])
+            a, d = _fix_up(p, dest, target, pkg, basegame, found["add"], archives)
             added += a
             dropped += d
             # Every name the packer missed is accounted for: the package is good. Without names
@@ -264,7 +278,12 @@ def _allowance(name: str, pkg: dict, ignore: list[str]) -> dict | None:
 
 
 def _account_for(
-    names: list[str], bsp: Path, pkg: dict, basegame: Path | None, ignore: list[str]
+    names: list[str],
+    bsp: Path,
+    pkg: dict,
+    basegame: Path | None,
+    ignore: list[str],
+    depends: list[Path] | None = None,
 ) -> dict[str, list]:
     """Sort the names the packer could not find into supplied, allowed and missing.
 
@@ -291,6 +310,13 @@ def _account_for(
         except (optimize.OptimizeError, OSError):
             continue
     images = tuple(optimize.IMAGE_EXTENSIONS)
+    others = {a: archive_entries(a) | _archive_shaders(a) for a in depends or []}
+
+    def depended_on(low: str) -> Path | None:
+        for a, held in others.items():
+            if low in held or any(f"{low}.{e}" in held for e in images):
+                return a
+        return None
 
     def image_supplied(name: str) -> tuple[str, Path] | bool:
         low = name.lower()
@@ -306,6 +332,10 @@ def _account_for(
             continue
         if low in index["shaders"] or low in index["images"] or low in shipped:
             out["supplied"].append({"name": name, "by": "the base game"})
+            continue
+        archive = depended_on(low)
+        if archive is not None:
+            out["supplied"].append({"name": name, "by": archive.name})
             continue
         if low in own:
             shader, script = own[low]
@@ -409,6 +439,54 @@ def _companion_paths(stem: str, pkg: dict) -> list[list[str]]:
     return out
 
 
+def archive_entries(archive: Path) -> set[str]:
+    """Every file path one archive holds, lowercased."""
+    try:
+        with zipfile.ZipFile(archive) as z:
+            return {n.lower() for n in z.namelist() if not n.endswith("/")}
+    except (OSError, zipfile.BadZipFile):
+        return set()
+
+
+def _archive_shaders(archive: Path) -> set[str]:
+    """The names of the shaders an archive's own scripts define, lowercased."""
+    from . import optimize  # noqa: PLC0415
+
+    names: set[str] = set()
+    try:
+        with zipfile.ZipFile(archive) as z:
+            for member in z.namelist():
+                if not member.lower().endswith(".shader"):
+                    continue
+                text = z.read(member).decode("utf-8", errors="replace")
+                try:
+                    names.update(
+                        s["name"].lower() for s in optimize.parse_shader_text(text, member)
+                    )
+                except optimize.OptimizeError:
+                    continue
+    except (OSError, zipfile.BadZipFile):
+        pass
+    return names
+
+
+def _archive_digests(archives: list[Path], wanted: set[str]) -> dict[str, set[bytes]]:
+    """For each wanted path, the digests of the copies these archives hold."""
+    out: dict[str, set[bytes]] = {}
+    for archive in archives:
+        try:
+            with zipfile.ZipFile(archive) as z:
+                for info in z.infolist():
+                    name = info.filename.lower()
+                    if name in wanted and not info.is_dir():
+                        with z.open(info) as f:
+                            digest = hashlib.file_digest(f, "sha256").digest()
+                        out.setdefault(name, set()).add(digest)
+        except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError):
+            continue
+    return out
+
+
 def basegame_entries(basegame: Path) -> set[str]:
     """Every path the base game's archives hold, lowercased, as the engine matches them."""
     names: set[str] = set()
@@ -489,9 +567,10 @@ def _fix_up(
     pkg: dict,
     basegame: Path | None,
     extra: list[tuple[str, Path]] | None = None,
+    depends: list[Path] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Rewrite the packer's archive at `dest`: companions and `extra` (archive path, file) in,
-    base-game duplicates out."""
+    base-game duplicates and copies of what `depends` already holds out."""
     root = _map_root(bsp)
     added: list[str] = []
     dropped: list[str] = []
@@ -503,15 +582,19 @@ def _fix_up(
             {info.filename.lower() for info in src.infolist()},
             {produced.resolve(), dest.resolve()},
         )
+        held = _archive_digests(
+            [d for d in depends or [] if d.resolve() not in {produced.resolve(), dest.resolve()}],
+            {info.filename.lower() for info in src.infolist()},
+        )
         present: set[str] = set()
         for info in src.infolist():
             name = info.filename
             data = src.read(info)
+            low = name.lower()
+            digest = hashlib.sha256(data).digest()
             # The map's own BSP is never dropped, even if a base archive happens to hold one.
-            if (
-                name.lower() in shipped
-                and not name.lower().endswith(f"maps/{bsp.stem}.bsp".lower())
-                and hashlib.sha256(data).digest() == shipped[name.lower()]
+            if not low.endswith(f"maps/{bsp.stem}.bsp".lower()) and (
+                (low in shipped and digest == shipped[low]) or digest in held.get(low, ())
             ):
                 dropped.append(name)
                 continue

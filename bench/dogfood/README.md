@@ -24,6 +24,7 @@ mise run bench:dogfood -- patches stock
 | `frontline` | `objective_place` checkpoint (or `checkpoint_one_way`) with forward spawns, a neutral `command_post`, and an Axis-only door (`allowteams`) |
 | `convoy` | A truck the Allies escort along a path with a curved bend (`path_place`, `objective_place` escort), and Axis orders they steal and deliver (`objective_place` steal) |
 | `patches build` | Eight lanes, one `patch_commit` surface each; `route_report` and an `engine_playtest` walk per lane, side by side |
+| `supply_mirror` | A real map mirrored left-right: `map_mirror` on ET: Legacy's `etl_supply.map`, compiled with its release pk3 beside it and packed with `depends` (none of its art is copied), then an engine smoke and objective flow (`scenarios/supply_mirror*.json`) and Omni-bot runs with seeded waypoints and with the add-on's own mirrored `etl_supply.way`/`.gm`. Needs `/mnt/media_raid/etl_supply.map` and the pk3 (`--map`, `--pk3`) |
 | `patches stock` | Drops a player onto Oasis barrel caps (patches) in the engine and records where it settles |
 
 The depot once placed every brush and entity with its own call: 67 calls and 84,392 bytes of

@@ -584,8 +584,19 @@ def _stop(proc, *, group: bool):
             continue
 
 
-def run(pk3: str | Path, profile_id: str, scenario: dict, *, timeout_seconds: float = 180) -> dict:
-    """Run a scenario in an isolated home, retaining success and failure evidence."""
+def run(
+    pk3: str | Path,
+    profile_id: str,
+    scenario: dict,
+    *,
+    timeout_seconds: float = 180,
+    depends: list[str | Path] | None = None,
+) -> dict:
+    """Run a scenario in an isolated home, retaining success and failure evidence.
+
+    `depends` are other archives the map needs (its textures and models); they are linked into
+    the game home beside the package.
+    """
     _number(timeout_seconds, "timeout_seconds", 1, 600)
     adapter = spec(profile_id)
     scenario = validate(scenario, adapter)
@@ -595,6 +606,10 @@ def run(pk3: str | Path, profile_id: str, scenario: dict, *, timeout_seconds: fl
     if not package.is_file():
         raise PlaytestError(f"{package} does not exist; pack the map first")
     mapname = engine.map_in(package)
+    others = [Path(d).resolve() for d in depends or []]
+    for d in others:
+        if not d.is_file():
+            raise PlaytestError(f"{d} does not exist")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", mapname):
         raise PlaytestError(
             "package map name must contain only letters, digits, underscores or hyphens"
@@ -638,6 +653,7 @@ def run(pk3: str | Path, profile_id: str, scenario: dict, *, timeout_seconds: fl
             observer,
             runs,
             mapname,
+            others,
         )
 
 
@@ -653,12 +669,15 @@ def _run(
     observer,
     runs,
     mapname,
+    depends=(),
 ):
     output = Path(tempfile.mkdtemp(prefix=f"{mapname}-", dir=runs))
     home = output / "home"
     package_dir = _inside(home, profiles.load(profile_id)["packaging"]["basegame"])
     package_dir.mkdir(parents=True)
     shutil.copy2(package, package_dir / package.name)
+    for other in depends:
+        (package_dir / other.name).symlink_to(other)
     token = uuid.uuid4().hex
     result = {
         "ok": False,

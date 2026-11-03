@@ -1410,3 +1410,38 @@ def test_pack_carries_the_speaker_script_and_the_sounds_it_names(failing, monkey
     r = pack.pack_pk3(failing["bsp"], profile_id="test")
     assert not r["ok"]
     assert r["not_found"] == ["sound/mine/gone.wav (named by sound/maps/nrcroom.sps)"]
+
+
+def test_depends_supplies_what_another_archive_holds(failing, tmp_path):
+    """A map built on another map's art: that archive's shaders and images count as found."""
+    other = tmp_path / "other_map.pk3"
+    with zipfile.ZipFile(other, "w") as z:
+        z.writestr(
+            "scripts/other.shader", "textures/other/glow\n{\n\t{\n\t\tmap $lightmap\n\t}\n}\n"
+        )
+        z.writestr("textures/other/rock.jpg", b"x")
+    failing["state"]["names"] = ["textures/other/glow", "textures/other/rock"]
+    r = pack.pack_pk3(failing["bsp"], profile_id="test", depends=[other])
+    assert r["ok"], r
+    assert {"name": "textures/other/glow", "by": "other_map.pk3"} in r["accounted_for"]
+    assert {"name": "textures/other/rock", "by": "other_map.pk3"} in r["accounted_for"]
+    assert not pack.pack_pk3(failing["bsp"], profile_id="test")["ok"]
+
+
+def test_depends_drops_only_identical_copies(packer, tmp_path):
+    other = tmp_path / "other_map.pk3"
+    with zipfile.ZipFile(other, "w") as z:
+        z.writestr("textures/mine/door.tga", b"x")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test", depends=[other])
+    assert "textures/mine/door.tga" in r["dropped_basegame"]
+    assert "textures/mine/door.tga" not in names(r["packages"][0])
+    with zipfile.ZipFile(other, "w") as z:
+        z.writestr("textures/mine/door.tga", b"different")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test", depends=[other])
+    assert "textures/mine/door.tga" in names(r["packages"][0])
+
+
+def test_depends_must_be_an_archive(packer, tmp_path):
+    (tmp_path / "not.pk3").write_text("no")
+    with pytest.raises(pack.PackError):
+        pack.pack_pk3(packer["bsp"], profile_id="test", depends=[tmp_path / "not.pk3"])

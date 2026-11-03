@@ -1,0 +1,57 @@
+{
+  "watch": ["truck", "forward_gate", "depot_gate"],
+  "steps": [
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 60},
+    {"action": "assert", "until": [
+      {"scope": "entity", "name": "truck", "field": "position.1", "value": 600, "op": "lt"}
+    ]},
+    {"action": "position", "origin": [2365, 660, 24], "angles": [0, 90, 0]},
+    {"action": "wait", "timeout": 30, "until": [
+      {"scope": "entity", "name": "truck", "field": "position.1", "value": 680, "op": "gt"}
+    ]},
+    {"action": "screenshot", "name": "truck_escorted_north"},
+
+    {"action": "position", "origin": [20, 2368, -100], "angles": [65, 180, 0]},
+    {"action": "weapon", "name": "dynamite"},
+    {"action": "hold", "controls": ["attack"], "seconds": 0.25, "timeout": 5},
+    {"action": "wait", "timeout": 5, "until": [
+      {"scope": "game", "field": "charge_count", "value": 1, "op": "gte"}
+    ]},
+    {"action": "aim", "at": {"scope": "game", "field": "charge_position", "offset": [0, 0, 4]}},
+    {"action": "weapon", "name": "pliers"},
+    {"action": "hold", "controls": ["attack"], "timeout": 15, "until": [
+      {"scope": "game", "field": "armed_charges", "value": 1, "op": "gte"}
+    ]},
+    {"action": "position", "origin": [600, 2368, -40], "angles": [0, 180, 0]},
+    {"action": "wait", "timeout": 45, "until": [
+      {"scope": "entity", "name": "forward_gate", "field": "present", "value": false}
+    ]},
+    {"action": "screenshot", "name": "forward_gate_breached"},
+
+    {"action": "join", "team": "red", "role": "engineer", "timeout": 60},
+    {"action": "join", "team": "blue", "role": "engineer", "timeout": 60},
+    {"action": "assert", "until": [
+      {"scope": "player", "field": "position.0", "value": 100, "op": "gt"},
+      {"scope": "player", "field": "position.1", "value": 2200, "op": "gt"},
+      {"scope": "player", "field": "position.2", "value": 200, "op": "gt"}
+    ]},
+    {"action": "screenshot", "name": "allies_spawn_in_forward_bunker"},
+
+    {"action": "position", "origin": [-704, -250, 24], "angles": [65, -90, 0]},
+    {"action": "weapon", "name": "dynamite"},
+    {"action": "hold", "controls": ["attack"], "seconds": 0.25, "timeout": 5},
+    {"action": "wait", "timeout": 5, "until": [
+      {"scope": "game", "field": "charge_count", "value": 1, "op": "gte"}
+    ]},
+    {"action": "aim", "at": {"scope": "game", "field": "charge_position", "offset": [0, 0, 4]}},
+    {"action": "weapon", "name": "pliers"},
+    {"action": "hold", "controls": ["attack"], "timeout": 15, "until": [
+      {"scope": "game", "field": "armed_charges", "value": 1, "op": "gte"}
+    ]},
+    {"action": "position", "origin": [-704, 300, 24], "angles": [0, -90, 0]},
+    {"action": "wait", "timeout": 45, "until": [
+      {"scope": "entity", "name": "depot_gate", "field": "present", "value": false}
+    ]},
+    {"action": "screenshot", "name": "depot_gate_breached"}
+  ]
+}

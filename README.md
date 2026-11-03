@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **79 tools, 7 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **80 tools, 7 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -495,7 +495,7 @@ receipt. Gameplay reports use the same in-memory revision even before saving.
 
 ## Tool reference
 
-79 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+80 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -522,6 +522,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `validate_profile` | Entities against the game profile's rules, and the map script, speaker script and sound scripts where the game has them. |
 | `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
 | `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite`, `constructible`, a neutral or one team's `command_post`, and a forward spawn flag with its spawn region and spawns, `checkpoint` or `checkpoint_one_way`; and `escort` and `steal`). Point entities go in `points` by role. Team-only doors are not a kind: give a door the `allowteams` key, which `validate_profile` checks. |
+| `map_mirror` | Mirror the whole map in x or y: brushes stay valid (plane points reordered), textures show the mirror image, patches keep facing out, and the profile's keys follow — origins, facings (`a` → `180 - a`), command-map corners, the swing of rotating doors. Vehicles the game turns to face their path are given a half turn instead. Models face the mirrored way but are not themselves mirrored; script coordinates are left to you. |
 | `path_place` | Lay a path for a mover: a chain of linked path points, straight or curved by control points, with long straight legs optionally split. Its `start` is what `objective_place(kind="escort")` follows. |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
