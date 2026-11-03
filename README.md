@@ -237,9 +237,14 @@ to reach them. `bot_playtest` then runs the packed map on a dedicated server wit
 nothing else in the add-on's nav folder, adds bots and reports what they did. On the dogfood
 maps (see `bench/dogfood/README.md`) the add-on loaded every seeded file, bots walked them,
 crawled the prone vent and crouched through the tunnel, planted, built, captured and stole
-the objectives, and escorted the convoy truck to its gate. Seeded graphs carry no jump, ladder,
-door-use, sniping or camping spots, no bridge flags and no map script; hand-tune those in
-Omni-bot's own editor.
+the objectives, and escorted the convoy truck to its gate. Brushes that change state are seeded
+in every state and gated with the add-on's own runtime tests: a door a player opens gets a
+doorway waypoint flagged `DOOR` (plus the team's flags for an `allowteams` door), blown walls and
+locked doors get `BLOCKWALL` links, and an unbuilt constructible deck is no floor at round start,
+spanned by `BLOCKBRIDGE` links that the add-on closes until it is built. No waypoint stands on a
+deck or inside a wall, since the add-on would make it the objective's unreachable goal. The
+`gates` dogfood map shows all three in the engine. Seeded graphs carry no jump, ladder, sniping
+or camping spots and no map script; hand-tune those in Omni-bot's own editor.
 
 ## Connect an MCP client
 

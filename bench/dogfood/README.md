@@ -12,6 +12,7 @@ mise run bench:dogfood -- constructible
 mise run bench:dogfood -- movement
 mise run bench:dogfood -- frontline [--one-way]
 mise run bench:dogfood -- convoy
+mise run bench:dogfood -- gates [--bots [--strip FLAG]]
 mise run bench:dogfood -- patches build
 mise run bench:dogfood -- patches stock
 ```
@@ -22,6 +23,7 @@ mise run bench:dogfood -- patches stock
 | `constructible` | Workshop pit, stairs, constructible bridge, horizontal pipe, parametric editing and checkpoint restoration |
 | `movement` | Standing stair/arch route, crouch tunnel, prone vent, route changes after lowering a ceiling and restoring it |
 | `frontline` | `objective_place` checkpoint (or `checkpoint_one_way`) with forward spawns, a neutral `command_post`, and an Axis-only door (`allowteams`) |
+| `gates` | A corridor of gates, each the only way on: an Allies-only door, an unbuilt constructible bridge over a lethal trench, a wall Allies dynamite; seeds the bot waypoints, and with `--bots` runs bots and reports where they were before and after each gate changed |
 | `convoy` | A truck the Allies escort along a path with a curved bend (`path_place`, `objective_place` escort), and Axis orders they steal and deliver (`objective_place` steal) |
 | `patches build` | Eight lanes, one `patch_commit` surface each; `route_report` and an `engine_playtest` walk per lane, side by side |
 | `patches stock` | Drops a player onto Oasis barrel caps (patches) in the engine and records where it settles |
@@ -166,11 +168,56 @@ stance on the way in. Without a waypoint file the add-on loads, logs `Waypoint <
 found in file or archives` and adds no bot at all. The same seeded files load in the 0.92
 Linux release library.
 
-What is not seeded, so not tested: door use (a `func_door` is solid to the grids, so the
-frontline Axis door carries no waypoint), jumps, ladders, and map scripts for goal
-priorities. Constructibles are as solid to the grids as any brush, so waypoints are seeded on
-the workshop bridge's deck before it is built; they are not flagged with Omni-bot's
-`BLOCKBRIDGE` (which would close those links while no floor is under them). Blown walls are
-handled: a state-changing brush that separates two areas keeps its cells, and connections
-through it get `BLOCKWALL`; one that separates nothing (the depot transmitter, the movement
-radio) gets no waypoint inside it.
+These runs predate door and constructible seeding (below): their files had no door waypoint
+and seeded the workshop deck as floor.
+
+### Doors, walls and bridges: the `gates` map
+
+`gates` is built only to test state-changing brushes. West to east: the Axis rooms (spawn,
+and a radio to dynamite) | a dynamite wall, the only way out | a hall | a 256-unit trench,
+crossed only by an unbuilt Allied constructible bridge (a `trigger_hurt` at its floor kills
+whoever falls in) | a hall | an Allies-only `func_door` (`allowteams allies`, use key) | the
+Allied spawn room. Allies must open the door, build the bridge and blow the wall; Axis are
+shut in until the wall goes. The seeded file: a doorway waypoint flagged
+`DOOR|ALLIES|TEAMONLY`, wall and deck cells with no waypoint, and lip-to-lip spans across them
+flagged `BLOCKWALL` and `BLOCKBRIDGE` (129 waypoints, one component).
+
+`gates --bots` runs `bot_playtest` (8 bots, 600 s unless noted, ET: Legacy 2.86.2, Omni-bot
+0.93, port 27962) and reads the observer's samples (every 2 s) and the game log in order, so
+each sample falls in a phase: before the bridge is built, after, after the wall is blown.
+`--strip FLAG` removes a flag from every waypoint first, as a control.
+
+| Run | Bridge built | Wall blown | Allied trench deaths before the bridge | Axis samples against the wall before it went | Door crossings (Allies / Axis) |
+| --- | --- | --- | --- | --- | --- |
+| seeded file | 80.6 s | 127.0 s | 4, all one engineer | 13 of 242 | 294 / 0 |
+| without `BLOCKBRIDGE` | 88.0 s | 130.7 s | 17, all four Allies | 12 of 250 | 244 / 0 |
+| without `BLOCKWALL` (300 s) | 87.4 s | 135.9 s | 5 | 165 of 262 | 123 / 0 |
+
+What this shows:
+
+- **Door.** Allies path through the doorway waypoint, pressing use, and the door opens: they
+  cross it hundreds of times (counted between consecutive samples of one bot). Axis never
+  crossed, but they reached the hall beside it only after the wall went and rarely
+  (21 samples), so the team flags are seen working once, not tested by a control.
+- **Wall.** With `BLOCKWALL`, Axis bots do not crowd the wall while it stands (5% of their
+  samples within 48 units of it); without it they press against it (63%), routing through a
+  link the add-on never closes. Once it is blown, Axis come through (469 samples in the hall
+  beyond it) and the Allies reach the Axis rooms.
+- **Bridge.** With `BLOCKBRIDGE`, the only Allied bot to fall in before the bridge was built
+  was the engineer sent to build it, walking from the bank lip straight at the
+  constructible's position (the add-on approaches a goal off the graph); without it every
+  Allied bot walked off the edge, repeatedly. After it is built both teams cross it (deck
+  samples in every run). Bots still fall in now and then afterwards, in fights at the edge and
+  after Axis blow the bridge up (at 353.6 s in the seeded run).
+
+An earlier version put waypoints on the deck and inside the wall: the add-on then logged
+`Path not found ... to BUILD_Trench_Bridge` and `PLANT_Gate_Wall` (92 times each) and nobody
+built in 600 s, because it sends a bot to the waypoint nearest a goal whether or not that
+waypoint's links are closed. Hence no waypoint stands on a deck or in a wall.
+
+Not verified in the engine: a locked or scripted door seeded as a wall (the same
+`BLOCKWALL` mechanism, unit-tested), a constructible barrier that closes a gap once built,
+`func_door_rotating`, and that a team doorway keeps the other team out (see above). Not
+seeded: jumps, ladders, and map scripts for goal priorities or goal positions (stock maps
+call `Wp.CheckBlockable()` from their `.gm` on a build; without it the add-on re-tests
+blockable links every 2 s, which was enough here).

@@ -4377,10 +4377,16 @@ bots:
   # Loaded in ET: Legacy 2.86.2 with the bundled 0.93 library and the 0.92 release library:
   # seeded files load ("N Waypoints Loaded"), bots walk them, take the CROUCH/PRONE stance in
   # flagged passages, and plant, defuse, build, capture, steal and escort on the dogfood maps
-  # (bench/dogfood/README.md). BLOCKWALL is written as the source says the add-on reads it,
-  # but no dogfood map has a blown wall between areas, so its runtime effect is unverified.
-  engine_verified: [load, movement, stance_flags, objectives]
-  engine_unverified: [blockable_flags]
+  # (bench/dogfood/README.md). On the gates map (8 bots, 600 s, 0.93) Allies opened their
+  # DOOR+ALLIES+TEAMONLY doorway and crossed it ~290 times between samples, Axis never; built
+  # the bridge, crossed it, blew the wall and Axis then came through. Controls with a flag
+  # stripped from the same file: without BLOCKWALL, Axis spent 165 of 262 samples pressed
+  # against the wall before it went (13 of 242 with it); without BLOCKBRIDGE, all four Allies
+  # fell into the trench before it was built (17 deaths; 4 with it, all one engineer walking
+  # off-graph to the build goal's own position).
+  engine_verified: [load, movement, stance_flags, objectives, doors, blockable_flags, bridge_flags]
+  # Seen once, not isolated by a control: that the other team keeps out of a team doorway.
+  engine_unverified: [door_team_flags]
   # Where the add-on looks, relative to omnibot_path; and where bot_waypoints_write stages
   # the file, relative to the folder holding maps/ (mirrors the omnibot_path layout, so the
   # staged tree can be copied over the server's Omni-bot folder). pack_pk3 never packs it.
@@ -4485,7 +4491,11 @@ bots:
   # BLOCKBRIDGE, and closes it while the trace meets nothing within 48 units
   # (ET_Game.cpp:763-775), so a connection only gates the bridge when its midpoint is over
   # the deck. Stock files span a bridge with one connection between waypoints on the two
-  # banks (battery 18-30, both BLOCKBRIDGE).
+  # banks (battery 18-30, both BLOCKBRIDGE). Blockable links are re-tested every 2 s
+  # (PathPlannerWaypoint.cpp:117, :437-460); stock map scripts also call Wp.CheckBlockable()
+  # on a build (fueldump.gm Bridge_Built). The add-on sends a bot to the waypoint nearest a
+  # goal, filtering closed waypoints but not closed links (PathPlannerWaypoint.cpp:1500-1515),
+  # so no waypoint is seeded on a deck or inside a wall: they are spanned lip to lip.
   bridge_flags: [BLOCKBRIDGE]
   bridge_trace_depth: 48
   names:
