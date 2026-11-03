@@ -12,7 +12,7 @@ from typing import Any
 
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .. import analysis, botnav, profiles, routes
+from .. import analysis, botgoals, botnav, mapscript, profiles, routes
 from .. import detail as detailmod
 from .. import pack as packmod
 from ..detail import Detail
@@ -318,9 +318,12 @@ def bot_waypoints_write(
     cell: float = 16,
     spacing: float | None = None,
     omnibot_path: str | None = None,
+    spots: list[dict] | None = None,
+    auto_spots: bool = True,
     detail: Detail = "summary",
 ) -> dict:
-    """Seed the bot add-on's waypoint file for the open map from its stance navigation grids.
+    """Seed the bot add-on's waypoint file for the open map from its stance navigation grids,
+    with the map goals (camping spots) and the map script that switches them.
 
     For ET: Legacy this is an Omni-bot `.way` file (format version 9, read and written as
     the add-on's own serializer does). Waypoints sit about `spacing` units apart (default
@@ -338,11 +341,34 @@ def bot_waypoints_write(
     `omnibot_path` to also write it there. Uses the current unsaved map.
 
     `objectives` says, per objective, whether the graph reaches it from each team's spawn
-    waypoints. Objective goals themselves come from the game, not this file. Not seeded:
-    jump, ladder, door-use, sniping or camping spots, or a map script.
-    `bot_playtest` loads the file in the engine with bots and reports what they did.
+    waypoints. Objective goals (plant, build, capture) come from the game itself.
 
-    `detail="summary"` (default) leaves out the per-pin rows; `"full"` returns them.
+    Beside the waypoints go two scripts the add-on runs at map load (ET: Legacy:
+    `<map>_goals.gm`, its map goals, and `<map>.gm`, the map script). With `auto_spots`
+    (default) spots are chosen from the geometry, each on a standing waypoint its team
+    reaches: per objective part a team defends (the thing to blow up, the flag it holds,
+    the item and, once stolen, its delivery place), up to two defend spots that see where
+    the other team uses it, ranked by how much of that team's shortest routes in they see
+    and facing it; per team, up to two snipe spots off the enemy's routes that see the most
+    of them at long range. `goals.spots[].why` says what each one sees. `spots` adds your
+    own: [{"type": "DEFEND", "team": "axis", "position": [x, y, z], "aim_at": [x, y, z]}],
+    with `yaw` (degrees) instead of `aim_at`, and optional `name`, `stance`,
+    `camp_time` [min, max] seconds and `objective` (its spots' on/off follows that
+    objective's); positions snap to the nearest walkable floor. Types are the profile's
+    (DEFEND, ATTACK, CAMP, SNIPE, MOBILEMG42, MOBILEMORTAR; SNIPE is for sniper rifles).
+
+    The map script hooks each objective's events by the trigger names the game sends:
+    the game's own "Planted at <track>." / "Defused at <track>." and the announcements in
+    the map's script (read from the staged script, so edited texts still match). Each
+    hook switches its objective's spots per team: a destroyed objective's defenders stand
+    down, a built one is defended, a captured flag changes defenders, a stolen item sends
+    them to its delivery place. `goals.triggers` lists them; `goals.not_hooked` names
+    events the map's script gives no text for (add a wm_announce there). Both scripts are
+    read back before anything is written.
+    `bot_playtest` loads all three in the engine with bots and reports what they did.
+
+    `detail="summary"` (default) leaves out the per-pin rows and why each spot was chosen;
+    `"full"` returns them.
     """
     full = detailmod.wants_full(detail)
     pid, _pkg, root, stem = _release()
@@ -351,25 +377,57 @@ def bot_waypoints_write(
         cell = routes.number(cell, "cell", maximum=4096)
         if spacing is not None:
             spacing = routes.number(spacing, "spacing", maximum=4096)
+        if spots is not None and not isinstance(spots, list):
+            raise ToolError("spots must be a list of spot objects")
         game_map = parse_map(SESSION.require().source())
+        extras: dict[str, Any] = {}
         waypoint_file, report = botnav.build(
-            SESSION.path, game_map, pid, cell=cell, spacing=spacing
+            SESSION.path, game_map, pid, cell=cell, spacing=spacing, extras=extras
         )
         data = botnav.write(waypoint_file, bots["format"])
         if botnav.write(botnav.read(data, bots["format"]), bots["format"]) != data:
             raise ToolError("the written file does not read back identically; nothing written")
-    except (botnav.BotNavError, analysis.AnalysisError, ValueError, MemoryError) as e:
+        script_spec = profiles.load(pid).get("mapscript")
+        script_data = (
+            SESSION.read_file(mapscript.script_path(script_spec, SESSION.path))
+            if script_spec
+            else None
+        )
+        goals_spec, map_script_spec, _ = botgoals.spec(bots)
+        made = botgoals.make(
+            game_map,
+            pid,
+            bots,
+            waypoint_file.waypoints,
+            extras,
+            script_text=script_data.decode("utf-8", errors="replace") if script_data else None,
+            given=spots,
+            auto=bool(auto_spots),
+            header=f"{goals_spec.get('comment', '')} for {stem}".strip(),
+        )
+    except (
+        botnav.BotNavError,
+        botgoals.BotGoalsError,
+        analysis.AnalysisError,
+        ValueError,
+        MemoryError,
+    ) as e:
         raise ToolError(str(e)) from e
     relative = botnav.install_path(bots, stem)
+    files = {
+        relative: data,
+        Path(str(goals_spec["install_path"]).format(map=stem)): made.goals,
+        Path(str(map_script_spec["install_path"]).format(map=stem)): made.script,
+    }
+    folder = Path(omnibot_path) if omnibot_path else None
+    if folder is not None and not folder.is_dir():
+        raise ToolError(f"omnibot_path {folder} is not a folder; nothing was written")
     staged = root / str(bots["stage_dir"]) / relative
-    _write(staged, data)
-    installed = None
-    if omnibot_path:
-        folder = Path(omnibot_path)
-        if not folder.is_dir():
-            raise ToolError(f"omnibot_path {folder} is not a folder; the staged file is {staged}")
-        installed = folder / relative
-        _write(installed, data)
+    for rel, body in files.items():
+        _write(root / str(bots["stage_dir"]) / rel, body)
+        if folder is not None:
+            _write(folder / rel, body)
+    installed = folder / relative if folder is not None else None
     warnings = []
     for row in report["objectives"]:
         missing = [k for k, v in row.items() if k.startswith("reached_from_") and not v]
@@ -386,12 +444,18 @@ def bot_waypoints_write(
         )
     if report["unplaced_pins"]:
         warnings.append(f"{len(report['unplaced_pins'])} spawn/objective markers found no cell")
+    warnings += made.report["warnings"]
+    goals = {
+        "files": {str(rel): str(root / str(bots["stage_dir"]) / rel) for rel in list(files)[1:]},
+        **{k: v for k, v in made.report.items() if k != "warnings"},
+    }
     out = {
         "path": str(staged),
         "installed": str(installed) if installed else None,
         "install_as": str(relative),
         "bytes": len(data),
         **report,
+        "goals": goals,
         "warnings": warnings,
     }
     if not full:
@@ -399,5 +463,10 @@ def bot_waypoints_write(
         out["pins"] = {
             kind: sum(1 for p in pins if p["kind"] == kind) for kind in ("spawn", "objective")
         }
-        out["omitted"] = {"pins": 'per-marker cells and waypoints; detail="full" lists them'}
+        for row in goals["spots"]:
+            row.pop("why", None)
+        out["omitted"] = {
+            "pins": 'per-marker cells and waypoints; detail="full" lists them',
+            "goals.spots.why": 'what each spot sees and where it stands; detail="full"',
+        }
     return out

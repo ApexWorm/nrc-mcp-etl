@@ -13,10 +13,10 @@ format family (`packed_waypoints`: a fixed header, then per waypoint a field mas
 position, varint-packed optional fields and relative-index connections); the profile states
 which version it is and cites the add-on's source for every field.
 
-What a seeded graph is not: a hand-tuned waypoint file. It carries no jump, ladder, door,
-sniper or camp spots, and no map script; the add-on's goals come from the game itself
-(objective entities the game reports to it), and they need only reachable waypoints near
-them.
+What a seeded graph is not: a hand-tuned waypoint file. It carries no jump, ladder or door
+flags; the add-on's objective goals come from the game itself (objective entities the game
+reports to it), and they need only reachable waypoints near them. Sniping and camping
+spots and the per-map script are `botgoals`'s, written beside this file.
 """
 
 from __future__ import annotations
@@ -661,8 +661,13 @@ def build(
     *,
     cell: float,
     spacing: float | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> tuple[WaypointFile, dict[str, Any]]:
-    """Seed the waypoint file for a map, and report how it was made and what it connects."""
+    """Seed the waypoint file for a map, and report how it was made and what it connects.
+
+    `extras`, when given, receives what later steps reuse: the grids (`grids`, and `closed`,
+    the start-of-round grids, or None), the final `stance_of` per waypoint and the
+    `spawn_waypoints` per team."""
     from . import routes  # routes imports analysis; keep this module importable on its own
 
     bots = spec(profile_id)
@@ -833,6 +838,10 @@ def build(
         world_mins=tuple(float(v) for v in lo),
         world_maxs=tuple(float(v) for v in hi),
     )
+    if extras is not None:
+        extras.update(
+            grids=grids, closed=closed, stance_of=list(seeded.stance_of), spawn_waypoints=spawn_wps
+        )
     flags = {str(k): int(v) for k, v in bots["flags"].items()}
     report = {
         **seeded.report,
