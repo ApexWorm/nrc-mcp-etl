@@ -4379,7 +4379,9 @@ bots:
   # flagged passages, and plant, defuse, build, capture, steal and escort on the dogfood maps
   # (bench/dogfood/README.md). BLOCKWALL is written as the source says the add-on reads it,
   # but no dogfood map has a blown wall between areas, so its runtime effect is unverified.
-  engine_verified: [load, movement, stance_flags, objectives]
+  # On the traversal course (bench/dogfood/traversal.py) Axis bots jumped the seeded ledge
+  # and gap (JUMP/JUMPLOW) and climbed the ladder (CLIMB) to plant the radio.
+  engine_verified: [load, movement, stance_flags, objectives, jumps, ladders]
   engine_unverified: [blockable_flags]
   # Where the add-on looks, relative to omnibot_path; and where bot_waypoints_write stages
   # the file, relative to the folder holding maps/ (mirrors the omnibot_path layout, so the
@@ -4427,6 +4429,10 @@ bots:
     CROUCH: 64
     DOOR: 128
     PRONE: 1048576     # 1<<20
+    JUMPGAP: 256       # 1<<8, NavigationFlags.h:17; see jumps below for why it is not written
+    CLIMB: 512         # 1<<9, NavigationFlags.h:18
+    JUMPLOW: 262144    # 1<<18, NavigationFlags.h:27
+    JUMP: 134217728    # 1<<27, NavigationFlags.h:36
     BLOCKWALL: 137438953472  # F_ET_NAV_WALL = F_NAV_NEXT<<5 = 1<<37
   # A bot heading for a waypoint presses prone or crouch while that waypoint carries the flag
   # (BotBaseStates.cpp:744-747), and path costs weight such waypoints x3.8 / x3.2
@@ -4440,6 +4446,70 @@ bots:
   # add-on traces a connection into a BLOCKWALL waypoint and closes it while the trace hits
   # solid (ET_Game.cpp:738-761), so the bots wait for the wall instead of running into it.
   blockable_flags: [BLOCKWALL]
+  # Jumps the walk grids cannot make: up onto a ledge higher than a step, or across a gap.
+  # Connection flags are not stored in the version-9 file, so the add-on learns of a jump
+  # from WAYPOINT flags, read off the waypoint a bot is heading for (BotBaseStates.cpp:
+  # 736-743): JUMP presses jump once the bot is within that waypoint's radius (:738-739);
+  # JUMPLOW presses it (at most every 100 ms) while a box ray 48 units ahead, from 8 above
+  # the feet (ET's step height for the add-on, ET_Client.cpp:80) to 16 higher, hits
+  # something (:840-893); JUMPGAP traces down JumpGapOffset from the box centre and jumps
+  # when the floor drops away (:905-950), but ET's JumpGapOffset is 0.32 units
+  # (ET_Client.cpp:395-396), so that ray never reaches a floor and the flag never fires:
+  # not written. Stock files put JUMP on a take-off waypoint with a small radius, linked
+  # one way to a higher or farther waypoint (e.g. fueldump_christmas.way, radar_summer.way).
+  #
+  # So a jump is seeded as its own nodes: a run-up waypoint in line with the jump, a take-off
+  # waypoint at the brink (takeoff_flags, `radius`), a ONE-WAY link to a landing waypoint
+  # (landing_flags by kind, `radius`, so a bot below a ledge does not count it reached in
+  # 2D), and walks between those and the ordinary waypoints of the two areas. Only the
+  # take-off -> landing link needs the jump; nothing else leads through the take-off.
+  #
+  # Physics, all from the movement section: a jump gives jump_velocity up (bg_pmove.c:828)
+  # under gravity, so it rises v^2/2g = 45.6. A ledge is linked when its top (measured
+  # exactly, not by cell) is at most that minus `margin` above the take-off floor and the
+  # standing box sweeps clear straight up then across onto it: a bot that meets the riser
+  # early slides up its face, and the add-on's JUMPLOW on the landing re-presses jump while
+  # the riser is ahead. Pressing jump does not change horizontal speed (bg_pmove.c:782-831)
+  # and air acceleration only adds speed toward the wish direction (pm_airaccelerate 1,
+  # bg_pmove.c:88), so a gap is linked only when the standing box, swept along the
+  # ballistic arc from every take-off point within the take-off radius, clears everything
+  # and comes down with its centre over a walkable floor of the far area, at EVERY speed in
+  # speed_scales x movement.run_speed: 0.4 = runSpeedScale 0.8 (g_client.c:3242) x 0.5 for
+  # an unskilled heavy-weapon carrier (bg_pmove.c:673-695), 1.1 = sprintSpeedScale
+  # (g_client.c:3243). Landings may be lower than the take-off only by the grids' safe drop.
+  # Nothing assumes the step-up a falling body gets at a riser (bg_slidemove.c:370).
+  # `detour`: a jump is only added between two areas whose walking route in the seeded
+  # graph is missing or longer than detour x the straight distance, so bots keep walking
+  # where walking works. `tries`: candidate brinks tested per pair of areas.
+  jumps:
+    takeoff_flags: [JUMP]
+    landing_flags: {ledge: [JUMPLOW], gap: []}
+    radius: 16
+    runup: 48
+    margin: 4
+    speed_scales: [0.4, 1.1]
+    detour: 4
+    tries: 8
+  # Ladders: a brush face whose shader has surfaceparm ladder gets SURF_LADDER from q3map2
+  # (games.cpp:180, the default table ET inherits), and a player whose box trace ahead
+  # meets such a face climbs it (game/surfaceflags.h:76; PM_CheckLadderMove,
+  # game/bg_pmove.c:4765-4855, climbing in PM_LadderMove :4860-4960). The base game's
+  # common/ladder is ladder + playerclip, so the grids already treat it as solid. The add-on
+  # climbs whenever the game says the bot is on a ladder (ENT_FLAG_ONLADDER from PMF_LADDER,
+  # g_etbot_interface.cpp:3360-3362; BotBaseStates.cpp:752-808, pressing up toward a
+  # higher next waypoint and down toward a lower one, ET uses this style: ET_Game.cpp:125).
+  # CLIMB on a waypoint makes reaching it a 3D distance test (BotBaseStates.cpp:597) and
+  # keeps the bot from looking around on the way (:1226); stock files flag both the foot and
+  # the top of a ladder CLIMB and link them (e.g. es_alamo_sniper.way, reactor_final.way).
+  # Seeded: a foot waypoint on the open side of the ladder, in front of its face, and a top
+  # waypoint on the floor at the ladder's top (`top_window` below to `step_height` above),
+  # linked both ways, when the standing box sweeps clear from the foot to the face, up the
+  # face and across onto the top floor.
+  ladders:
+    surfaceparms: [ladder]
+    flags: [CLIMB]
+    top_window: 48
+    reach: 64
   names:
     spawn: "{team} spawn"
     objective: "{label}"
