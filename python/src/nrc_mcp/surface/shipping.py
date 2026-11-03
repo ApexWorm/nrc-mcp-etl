@@ -346,11 +346,23 @@ def bot_waypoints_write(
     from the profile) on the walkable cells of the stand, crouch and prone grids (`cell`,
     as in `route_report`); each is connected to its neighbours only where the straight line
     between them is walkable, since bots steer straight between waypoints. Waypoints that
-    need crouch or prone carry that flag (bots press it while heading there); connections
-    that exist only once a state-changing brush is blown carry the blockable flag the
-    add-on re-tests at runtime. Team spawns and every objective approach area get a named
-    waypoint; parts of the map no spawn connects to are dropped. Walking off a ledge is a
-    one-way connection.
+    need crouch or prone carry that flag (bots press it while heading there). Brushes that
+    change state are seeded in every state and flagged for the add-on to test at runtime
+    (the profile's `bots:` section says which classes and flags):
+
+    - a door a player opens with the use key is passable, with a waypoint in the doorway
+      carrying the door flag (bots press use heading for it) and, for a door `allowteams`
+      limits to one team, that team's flags, so the other team never routes through it;
+    - a blown wall, a locked or scripted door, and a constructible that blocks a gap once
+      built are walls: connections through them carry the wall flag, closed while solid;
+    - floor only a built constructible gives (a bridge deck) is no floor at round start:
+      connections onto or across it carry the bridge flag, closed while nothing is under
+      their midpoint, and are split at the deck's edges so that midpoint is over the deck.
+
+    Team spawns and every objective approach area get a named waypoint; parts of the map no
+    spawn connects to are dropped; walking off a ledge is a one-way connection. `doors`,
+    `constructibles` and the `bridge_*` / `door_*`
+    counts say what was gated.
 
     Jumps and ladders (the profile's `bots.jumps` / `bots.ladders`): where walking between
     two areas is impossible or a long detour, a ledge whose top is within the jump's rise

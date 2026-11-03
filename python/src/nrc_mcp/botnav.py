@@ -18,10 +18,15 @@ Jumps and ladders, which the walk grids cannot express, are added after seeding
 take-off, landing and one-way jump links, and a ladder brush gets climb waypoints at its foot
 and top.
 
-What a seeded graph is not: a hand-tuned waypoint file. It carries no door flags; the
-add-on's objective goals come from the game itself (objective entities the game reports to
-it), and they need only reachable waypoints near them. Sniping and camping spots and the
-per-map script are `botgoals`'s, written beside this file.
+Brushes that change state during a round (doors, blown walls, constructibles) are seeded in
+every state at once and gated with the add-on's own runtime tests, as the profile describes:
+a doorway waypoint that makes the bot press use, wall links closed while a trace hits solid,
+bridge links closed while nothing is under their midpoint.
+
+What a seeded graph is not: a hand-tuned waypoint file. The add-on's objective goals come
+from the game itself (objective entities the game reports to it), and they need only
+reachable waypoints near them. Sniping and camping spots and the per-map script are
+`botgoals`'s, written beside this file.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from . import analysis, profiles
+from .rules import parse_spawnflags
 
 
 class BotNavError(RuntimeError):
@@ -312,6 +318,16 @@ class _Graph:
             self._nb[key] = hit
         return hit
 
+    def centre(self, cell) -> tuple[float, float, float]:
+        return self.grids[self.order[0]].centre(cell)
+
+    def column_at(self, x: float, y: float) -> tuple[int, int]:
+        grid = self.grids[self.order[0]]
+        return (
+            math.floor((x - grid.origin[0]) / grid.cell),
+            math.floor((y - grid.origin[1]) / grid.cell),
+        )
+
     def moves(self, r: int, cell) -> frozenset:
         """Moves in any stance up to rank `r`: a body changes stance where both boxes fit."""
         if r == 0:
@@ -366,6 +382,8 @@ def seed(
     pins: list[dict] | None = None,
     openings: frozenset = frozenset(),
     exclude: frozenset = frozenset(),
+    doors: dict | None = None,
+    decks: frozenset = frozenset(),
 ) -> Seed:
     """Sample the walkable cells into waypoints about `spacing` apart and connect them.
 
@@ -381,7 +399,15 @@ def seed(
     a connection walking through one gets the profile's blockable flags on both ends, which
     the add-on re-tests at runtime by tracing between them. `exclude` cells get no waypoint
     and are never walked through (a breakable objective's own volume).
+
+    `doors` maps the cells inside a door a player opens to the flag bits its waypoint takes:
+    a piece holding such cells gets its waypoint in the doorway, carrying them, so a bot
+    heading for it from either side opens the door. `decks` are cells walkable only once a
+    constructible is built: a connection crossing them gets the profile's bridge flags on
+    both ends, and is split at the deck's edges where its midpoint would not be over the deck
+    (the add-on decides from the midpoint, see `_over_deck`).
     """
+    doors = doors or {}
     g = _Graph(grids, exclude)
     if not g.rank:
         raise BotNavError("the grids hold no walkable cell")
@@ -393,6 +419,8 @@ def seed(
     # Pieces: bucket by (column block, stance rank), split by two-way connectivity in that rank.
     buckets: dict[tuple[int, int, int], list] = {}
     for c, r in g.rank.items():
+        if c in decks or c in openings:
+            continue  # no waypoint stands on a deck or in a wall: see the spans below
         buckets.setdefault((c[0] // k, c[1] // k, r), []).append(c)
     piece_of: dict[tuple[int, int, int], int] = {}
     pieces: list[list[tuple[int, int, int]]] = []
@@ -425,12 +453,17 @@ def seed(
             unplaced.append({k2: v for k2, v in pin.items() if k2 != "cell"})
             continue
         chosen.setdefault(piece_of[c], (c, pin))
+    door_rep = _door_reps(pieces, doors) if doors else {}
     reps: list[tuple[int, int, int]] = []
     names: list[str] = []
     for label, piece in enumerate(pieces):
         if label in chosen:
             reps.append(chosen[label][0])
             names.append(str(chosen[label][1].get("name") or ""))
+            continue
+        if label in door_rep:
+            reps.append(door_rep[label])
+            names.append("")
             continue
         cx = sum(c[0] for c in piece) / len(piece)
         cy = sum(c[1] for c in piece) / len(piece)
@@ -448,7 +481,9 @@ def seed(
     # a corner, a waypoint on the border cell they cross can still join them.
     borders: dict[tuple[int, int], list[tuple]] = {}
     for c, r in g.rank.items():
-        a = piece_of[c]
+        a = piece_of.get(c)
+        if a is None:
+            continue
         for rr in range(r, len(g.order)):
             for d in g.nb(rr, c):
                 b = piece_of.get(d)
@@ -459,38 +494,131 @@ def seed(
     blockable: set[int] = set()
     node_rank = list(piece_rank)
 
-    def link(x: int, y: int, r: int) -> None:
+    bridged: set[int] = set()
+    door_crossings: list[tuple[int, int, list]] = []
+    gate = {"bridge_splits": 0, "bridge_rejected": 0}
+    deck_floors: dict[tuple[int, int], list[float]] = {}
+    for c in decks:
+        deck_floors.setdefault((c[0], c[1]), []).append(g.centre(c)[2])
+    depth = float(bots.get("bridge_trace_depth") or 0)
+
+    def node_at(turn, r: int) -> int:
+        nonlocal portals
+        node = portal_at.get(turn)
+        if node is None:
+            node = portal_at[turn] = len(reps)
+            reps.append(turn)
+            names.append("")
+            # The leg into a turn may cross the stricter piece's cells: flag it so.
+            node_rank.append(max(r, g.rank[turn]))
+            portals += 1
+        return node
+
+    def over_deck(p, q) -> bool:
+        # Both ends stand floor_offset above their floor; the add-on traces `depth` down.
+        (ax, ay, az), (bx, by, bz) = g.centre(p), g.centre(q)
+        mz = (az + bz) / 2 + floor_offset
+        column = g.column_at((ax + bx) / 2, (ay + by) / 2)
+        return any(mz - depth <= z <= mz for z in deck_floors.get(column, ()))
+
+    def plain(x: int, y: int, cells: list) -> None:
         edges.setdefault(x, set()).add(y)
-        if openings and any(c in openings for c in g.walk(r, reps[x], reps[y]) or ()):
+        if openings and any(c in openings for c in cells):
             blockable.update((x, y))
+        if doors and any(c in doors for c in cells):
+            door_crossings.append((x, y, cells))
+
+    def plan(p, q, r: int) -> list | None:
+        """The legs a connection p -> q is written as: itself, or split at the deck's
+        edges so the leg across the deck is the one the add-on tests. None when a leg that
+        touches the deck cannot be tested (stepping off its side, say)."""
+        cells = g.walk(r, p, q) or []
+        if not decks or not any(c in decks for c in cells) or over_deck(p, q):
+            return [(p, q, cells, bool(decks) and any(c in decks for c in cells))]
+        stops = [p]
+        for before, after in zip(cells, cells[1:], strict=False):
+            if (before in decks) != (after in decks):
+                edge = after if before in decks else before
+                if edge != stops[-1]:
+                    stops.append(edge)
+        if stops[-1] != q:
+            stops.append(q)
+        legs = []
+        for u, v in zip(stops, stops[1:], strict=False):
+            walked = g.walk(r, u, v)
+            on_deck = walked is not None and any(c in decks for c in walked)
+            if walked is None or (on_deck and not over_deck(u, v)):
+                return None
+            legs.append((u, v, walked, on_deck))
+        return legs
+
+    def apply(x: int, y: int, r: int, legs: list) -> None:
+        if len(legs) > 1:
+            gate["bridge_splits"] += 1
+        nodes = [x, *(node_at(u, r) for u, *_ in legs[1:]), y]
+        for (_u, _v, walked, on_deck), a, b in zip(legs, nodes, nodes[1:], strict=False):
+            plain(a, b, walked)
+            if on_deck:
+                bridged.update((a, b))
 
     portal_at: dict[tuple[int, int, int], int] = {}
     portals = 0
     for a, b in sorted(borders):
         r = max(piece_rank[a], piece_rank[b])
         if g.straight(r, reps[a], reps[b]):
-            link(a, b, r)
+            legs = plan(reps[a], reps[b], r)
+            if legs is None:
+                gate["bridge_rejected"] += 1
+            else:
+                apply(a, b, r, legs)
             continue
         # The straight line cuts a corner: walk the grid inside the two pieces instead, and
         # pull that path taut into straight legs, with a waypoint at each turn.
-        legs = _taut_path(g, r, reps[a], reps[b], set(pieces[a]) | set(pieces[b]))
-        if legs is None:
+        turns = _taut_path(g, r, reps[a], reps[b], set(pieces[a]) | set(pieces[b]))
+        if turns is None:
             rejected += 1
             continue
-        nodes = [a]
-        for turn in legs[1:-1]:
-            node = portal_at.get(turn)
-            if node is None:
-                node = portal_at[turn] = len(reps)
-                reps.append(turn)
-                names.append("")
-                # The leg into a turn may cross the stricter piece's cells: flag it so.
-                node_rank.append(max(r, g.rank[turn]))
-                portals += 1
-            nodes.append(node)
-        nodes.append(b)
-        for x, y in zip(nodes, nodes[1:], strict=False):
-            link(x, y, r)
+        plans = [plan(u, v, r) for u, v in zip(turns, turns[1:], strict=False)]
+        if any(legs is None for legs in plans):
+            gate["bridge_rejected"] += 1
+            continue
+        nodes = [a, *(node_at(turn, r) for turn in turns[1:-1]), b]
+        for legs, x, y in zip(plans, nodes, nodes[1:], strict=False):
+            apply(x, y, r, legs)
+
+    # Bridges and walls. The add-on sends a bot to the waypoint nearest a goal, closed links
+    # or not (PathPlannerWaypoint.cpp:1500-1515 filters only closed waypoints), so a waypoint
+    # on a deck or inside a wall would be the goal of the objective that opens it, and
+    # unreachable until it is open. No piece stands on either; instead each pair of pieces on
+    # its edges is joined by one link straight across, from lip to lip, as stock files span a
+    # bridge (battery 18-30) or a wall (battery 371-373).
+    spans = {"deck": 0, "wall": 0}
+    for kind, cells in (("deck", decks), ("wall", openings)):
+        if cells:
+            spans[kind] = _span(
+                g, cells, pieces, piece_of, piece_rank, reps, plan, apply, node_at, gate
+            )
+
+    # A connection through a door that does not end in the doorway: the bot presses use on
+    # it too. A team door's connections must end in the doorway, where the team flags are.
+    door_bits = {label: doors[rep] for label, rep in enumerate(reps) if rep in doors}
+    door_plain = 0
+    for flag in bots.get("doors", {}).get("flags") or []:
+        door_plain |= flags[flag]
+    team_bits = 0
+    for names_ in (bots.get("doors", {}).get("team_flags") or {}).values():
+        for flag in names_:
+            team_bits |= flags[flag]
+    dropped_door = 0
+    for x, y, cells in door_crossings:
+        if x in door_bits or y in door_bits:
+            continue
+        if any(doors[c] & team_bits for c in cells if c in doors):
+            edges[x].discard(y)
+            dropped_door += 1
+            continue
+        door_bits[x] = door_bits.get(x, 0) | door_plain
+        door_bits[y] = door_bits.get(y, 0) | door_plain
 
     waypoints: list[Waypoint] = []
     stance_of: list[str] = []
@@ -503,6 +631,10 @@ def seed(
         if label in blockable:
             for name in bots.get("blockable_flags") or []:
                 wp_flags |= flags[name]
+        if label in bridged:
+            for name in bots.get("bridge_flags") or []:
+                wp_flags |= flags[name]
+        wp_flags |= door_bits.get(label, 0)
         waypoints.append(
             Waypoint(
                 position=(x, y, z + floor_offset),
@@ -528,6 +660,13 @@ def seed(
         "border_waypoints": portals,
         "by_stance": {s: stance_of.count(s) for s in g.order},
         "blockable_waypoints": len(blockable),
+        "bridge_waypoints": len(bridged),
+        "bridge_connections_split": gate["bridge_splits"],
+        "bridge_connections_rejected": gate["bridge_rejected"],
+        "deck_spans": spans["deck"],
+        "wall_spans": spans["wall"],
+        "door_waypoints": len(door_bits),
+        "team_door_bypasses_dropped": dropped_door,
         "spacing": k * cell,
         "cell": cell,
         "cells_per_waypoint": {"min": min(sizes), "max": max(sizes)},
@@ -537,6 +676,113 @@ def seed(
     return Seed(
         waypoints=waypoints, stance_of=stance_of, cells=reps, report=report, piece_of=piece_of
     )
+
+
+def _span(g, decks, pieces, piece_of, piece_rank, reps, plan, apply, node_at, gate) -> int:
+    """Join the pieces around each patch of `decks` (deck or wall cells) by links straight
+    across it, lip to lip (see `seed`); of the candidates for a pair of pieces, the one
+    that keeps furthest from the patch's sides, then the shortest. Returns the spans made."""
+    made = 0
+    seen: set = set()
+    banks = {(c[0], c[1]) for c in piece_of}
+    for start in sorted(decks):
+        if start in seen:
+            continue
+        patch, todo = set(), [start]
+        seen.add(start)
+        while todo:
+            c = todo.pop()
+            patch.add(c)
+            for r in range(len(g.order)):
+                for d in g.nb(r, c):
+                    if d in decks and d not in seen:
+                        seen.add(d)
+                        todo.append(d)
+        columns = {(c[0], c[1]) for c in patch}
+        # How far each column is from the patch's sides (0 on the side): where it ends in
+        # neither more of it nor ground a piece stands on (the drop off a deck's edge).
+        held = columns | banks
+        side = {
+            (x, y): 0
+            for x, y in columns
+            if any((x + dx, y + dy) not in held for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+        }
+        ring = deque(side)
+        while ring:
+            x, y = ring.popleft()
+            for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if n in columns and n not in side:
+                    side[n] = side[(x, y)] + 1
+                    ring.append(n)
+        # Bank cells a move leads to or from, per piece.
+        edge: dict[int, set] = {}
+        for c in patch:
+            for r in range(len(g.order)):
+                for d in g.nb(r, c):
+                    if d in piece_of:
+                        edge.setdefault(piece_of[d], set()).add(d)
+        for a in sorted(edge):
+            for b in sorted(edge):
+                if a == b:
+                    continue
+                r = max(piece_rank[a], piece_rank[b])
+                best = None
+                for ea in sorted(edge[a]):
+                    for eb in sorted(edge[b]):
+                        legs = plan(ea, eb, r)
+                        if not legs or len(legs) != 1:
+                            continue
+                        walked = [c for c in legs[0][2] if c in patch]
+                        if not walked:
+                            continue
+                        score = (
+                            -min(side[(c[0], c[1])] for c in walked),
+                            math.dist(g.centre(ea), g.centre(eb)),
+                        )
+                        if best is None or score < best[0]:
+                            best = (score, ea, eb, legs)
+                if best is None:
+                    continue
+                _length, ea, eb, legs = best
+                ends = []
+                for piece, lip in ((a, ea), (b, eb)):
+                    turns = (
+                        [reps[piece], lip]
+                        if g.straight(r, reps[piece], lip) or g.straight(r, lip, reps[piece])
+                        else _taut_path(g, r, reps[piece], lip, set(pieces[piece]))
+                    )
+                    ends.append(turns)
+                if ends[0] is None or ends[1] is None:
+                    gate["bridge_rejected"] += 1
+                    continue
+                # rep_a -> ... -> lip_a, across, lip_b -> ... -> rep_b
+                path = [*ends[0], *reversed(ends[1])]
+                nodes = [a, *(node_at(c, r) for c in path[1:-1]), b]
+                for (u, v), x, y in zip(
+                    zip(path, path[1:], strict=False), nodes, nodes[1:], strict=False
+                ):
+                    hop = plan(u, v, r)
+                    if hop is not None:
+                        apply(x, y, r, hop)
+                made += 1
+    return made
+
+
+def _door_reps(pieces: list[list], doors: dict) -> dict[int, tuple[int, int, int]]:
+    """For each piece holding door cells, the door cell nearest the middle of them: the
+    piece's waypoint goes in the doorway, where the bot heading for it meets the door."""
+    out: dict[int, tuple[int, int, int]] = {}
+    for label, piece in enumerate(pieces):
+        inside = [c for c in piece if c in doors]
+        if not inside:
+            continue
+        cx = sum(c[0] for c in inside) / len(inside)
+        cy = sum(c[1] for c in inside) / len(inside)
+        cz = sum(c[2] for c in inside) / len(inside)
+        out[label] = min(
+            inside, key=lambda c: ((c[0] - cx) ** 2 + (c[1] - cy) ** 2 + (c[2] - cz) ** 2, c)
+        )
+    return out
 
 
 def _taut_path(g: _Graph, r: int, start, goal, allowed: set) -> list | None:
@@ -1214,8 +1460,9 @@ def build(
 ) -> tuple[WaypointFile, dict[str, Any]]:
     """Seed the waypoint file for a map, and report how it was made and what it connects.
 
-    `extras`, when given, receives what later steps reuse: the grids (`grids`, and `closed`,
-    the start-of-round grids, or None), the final `stance_of` per waypoint and the
+    `extras`, when given, receives what later steps reuse: the grids (`grids`, the map as the
+    round starts with doors open, and `closed`, the same when anything changes state, else
+    None), the final `stance_of` per waypoint and the
     `spawn_waypoints` per team."""
     from . import routes  # routes imports analysis; keep this module importable on its own
 
@@ -1227,45 +1474,53 @@ def build(
     role_map = analysis.roles(profile_id)
     stances = routes.stances(profile_id, "mixed")
     entities = game_map.entities()
-    changing = [
-        int(e["index"])
-        for e in entities
-        if role_map.category_of.get(str(e.get("classname") or "")) in role_map.state_changing
-    ]
-    grids = {
-        s: analysis.build_navgrid(
-            map_path,
-            cell=cell,
-            profile_id=profile_id,
-            game_map=game_map,
-            stance=s,
-            open_state_changing=True,
-        )
-        for s in stances
-    }
-    closed = (
-        {
+    flags = {str(k): int(v) for k, v in bots["flags"].items()}
+    states = _state_entities(entities, bots, role_map, flags)
+    changing = sorted(states.walls + states.unbuilt + states.built_at_start)
+
+    def grids_without(nonsolid: set[int]) -> dict:
+        return {
             s: analysis.build_navgrid(
-                map_path, cell=cell, profile_id=profile_id, game_map=game_map, stance=s
+                map_path,
+                cell=cell,
+                profile_id=profile_id,
+                game_map=game_map,
+                stance=s,
+                nonsolid_entities=frozenset(nonsolid),
             )
             for s in stances
         }
-        if changing
-        else None
-    )
 
-    exclude = _enclosed_openings(grids, closed) if closed else frozenset()
-    openings = (
-        frozenset(
-            {c for g in grids.values() for c in g.walkable_cells()}
-            - {c for g in closed.values() for c in g.walkable_cells()}
-            - exclude
-        )
-        if closed
-        else frozenset()
+    # Three states of the map, every door open in each: everything that changes gone (open),
+    # as the round starts (closed), and every constructible built with the walls gone (built).
+    doors = set(states.doors)
+    constructible = set(states.unbuilt + states.built_at_start + states.parts)
+    opened = grids_without(doors | set(states.walls) | constructible)
+    start_set = doors | set(states.unbuilt) | set(states.parts)
+    closed = (
+        grids_without(start_set) if start_set != doors | set(states.walls) | constructible else None
     )
+    built = grids_without(doors | set(states.walls)) if constructible else None
+    _aligned(opened, closed, built)
+
+    def walkable(state: dict) -> set:
+        return {c for g in state.values() for c in g.walkable_cells()}
+
+    exclude: set = set()
+    for other in (closed, built):
+        if other:
+            exclude |= _enclosed_openings(opened, other)
+    open_cells = walkable(opened)
+    blocked: set = set()
+    for other in (closed, built):
+        if other:
+            blocked |= open_cells - walkable(other)
+    openings = frozenset(blocked - exclude)
+    decks = frozenset(walkable(built) - open_cells) if built else frozenset()
+    grids = {s: _Union(opened[s], built[s]) for s in stances} if built else opened
+    door_cells = _door_cells(game_map, entities, states.doors, grids)
     # Spawns and objectives are pinned where players stand when the round starts.
-    start = closed or grids
+    start = closed or opened
     names = bots.get("names") or {}
     teams = _team_names(profile_id)
     by_index = {int(e["index"]): e for e in entities}
@@ -1316,8 +1571,17 @@ def build(
             }
         )
 
-    seeded = seed(grids, bots, spacing=spacing, pins=pins, openings=openings, exclude=exclude)
-    traversals = add_traversals(seeded, grids, bots, profile_id, map_path)
+    seeded = seed(
+        grids,
+        bots,
+        spacing=spacing,
+        pins=pins,
+        openings=openings,
+        exclude=frozenset(exclude),
+        doors=door_cells,
+        decks=decks,
+    )
+    traversals = add_traversals(seeded, start, bots, profile_id, map_path)
     for pin in pins:
         pin["waypoint"] = seeded.piece_of.get(pin["cell"]) if pin["cell"] is not None else None
     # Waypoints no spawn connects to in either direction (a ledge on a decorative pipe, a
@@ -1399,15 +1663,22 @@ def build(
     )
     if extras is not None:
         extras.update(
-            grids=grids, closed=closed, stance_of=list(seeded.stance_of), spawn_waypoints=spawn_wps
+            grids=start, closed=closed, stance_of=list(seeded.stance_of), spawn_waypoints=spawn_wps
         )
-    flags = {str(k): int(v) for k, v in bots["flags"].items()}
     report = {
         **seeded.report,
         "pruned_unconnected_to_spawns": pruned,
         "stances": list(stances),
         "state_changing_entities": changing,
         "state_changing_cells_skipped": len(exclude),
+        "doors": [
+            {"entity": e, "flags": flag_names(bits, flags)}
+            for e, bits in sorted(states.doors.items())
+        ],
+        "locked_doors": states.locked_doors,
+        "constructibles": {"unbuilt": states.unbuilt, "built_at_start": states.built_at_start},
+        "door_cells": len(door_cells),
+        "deck_cells": len(decks),
         "pins": [{k: (list(v) if isinstance(v, tuple) else v) for k, v in p.items()} for p in pins],
         "objectives": list(coverage.values()),
         "spawn_waypoints": {t: sorted(v) for t, v in sorted(spawn_wps.items())},
@@ -1453,6 +1724,162 @@ def _enclosed_openings(grids: dict, closed: dict) -> frozenset:
         if len(rim - {-1}) < 2:
             out.update(patch)
     return frozenset(out)
+
+
+@dataclass
+class _StateEntities:
+    """The brush entities whose state the seeding follows, by what they do to the walk."""
+
+    doors: dict[int, int]  # a door a player opens -> the flag bits of its doorway waypoint
+    walls: list[int]  # breakables and locked doors: solid until they go
+    unbuilt: list[int]  # constructibles absent at round start
+    built_at_start: list[int]
+    parts: list[int]  # stage brushes of staged constructibles
+    locked_doors: list[int]
+
+
+def _keys(entity: dict) -> dict[str, str]:
+    return {str(k).lower(): str(v) for k, v in entity.get("keys") or []}
+
+
+def _state_entities(
+    entities: list[dict], bots: dict[str, Any], role_map: Any, flags: dict[str, int]
+) -> _StateEntities:
+    """Sort the map's doors, walls and constructibles by the profile's `bots:` rules."""
+    door_spec = bots.get("doors") or {}
+    con_spec = bots.get("constructibles") or {}
+    door_classes = {str(c).lower() for c in door_spec.get("classnames") or []}
+    con_classes = {str(c).lower() for c in con_spec.get("classnames") or []}
+    part_classes = {str(c).lower() for c in con_spec.get("parts") or []}
+    door_bits = 0
+    for name in door_spec.get("flags") or []:
+        door_bits |= flags[name]
+    team_flags = {
+        str(team).lower(): sum(flags[n] for n in names)
+        for team, names in (door_spec.get("team_flags") or {}).items()
+    }
+    touch = door_spec.get("touch") or {}
+    leave_open = {str(c).lower() for c in door_spec.get("targeters_that_leave_it_open") or []}
+    built_flag = con_spec.get("start_built") or {}
+    targeted: set[str] = set()
+    for e in entities:
+        keys = _keys(e)
+        if str(e.get("classname") or "").lower() not in leave_open and keys.get("target"):
+            targeted.add(keys["target"].lower())
+
+    out = _StateEntities({}, [], [], [], [], [])
+    for e in entities:
+        index = int(e["index"])
+        classname = str(e.get("classname") or "")
+        lowered = classname.lower()
+        keys = _keys(e)
+        if role_map.category_of.get(classname) in role_map.state_changing:
+            out.walls.append(index)
+        elif lowered in door_classes:
+            key = keys.get(str(door_spec.get("key") or "key"))
+            name = keys.get("targetname", "").lower()
+            try:
+                locked = int(float(key)) < 0 if key is not None else bool(name) and name in targeted
+            except ValueError:
+                locked = False
+            allowed = keys.get(str(door_spec.get("team_key") or ""), "").lower()
+            named = [t for t in team_flags if t in allowed]
+            touches = (
+                lowered in {str(c).lower() for c in touch.get("classnames") or []}
+                and parse_spawnflags(keys.get("spawnflags")) & int(touch.get("spawnflag", 0))
+                and not keys.get(str(touch.get("unless_key") or ""))
+            )
+            if touches:
+                out.doors[index] = door_bits
+            elif locked or (allowed and not named):
+                out.walls.append(index)
+                out.locked_doors.append(index)
+            else:
+                out.doors[index] = door_bits | (team_flags[named[0]] if len(named) == 1 else 0)
+        elif lowered in con_classes:
+            bits = parse_spawnflags(keys.get(str(built_flag.get("key") or "spawnflags")))
+            if bits & int(built_flag.get("bit", 0)):
+                out.built_at_start.append(index)
+            else:
+                out.unbuilt.append(index)
+        elif lowered in part_classes:
+            out.parts.append(index)
+    return out
+
+
+class _Union:
+    """One map's grid in two states, walked as one: a cell or move either state allows.
+
+    Seeding over the union puts waypoints on a blown wall's cells and on a built bridge's
+    deck alike; which state a connection needs is then flagged for the add-on to test.
+    """
+
+    def __init__(self, a: Any, b: Any):
+        self.a, self.b = a, b
+        self.cell, self.origin, self.dims = a.cell, a.origin, a.dims
+
+    def centre(self, cell) -> tuple[float, float, float]:
+        return self.a.centre(cell)
+
+    def is_walkable(self, cell) -> bool:
+        return self.a.is_walkable(cell) or self.b.is_walkable(cell)
+
+    def walkable_cells(self) -> list:
+        return sorted(set(self.a.walkable_cells()) | set(self.b.walkable_cells()))
+
+    def neighbours(self, cell, *, symmetric: bool = False):
+        seen: set = set()
+        for grid in (self.a, self.b):
+            if grid.is_walkable(cell):
+                for d, w in grid.neighbours(cell, symmetric=symmetric):
+                    if d not in seen:
+                        seen.add(d)
+                        yield d, w
+
+
+def _aligned(*states: dict | None) -> None:
+    """Cells of different states compare only on one lattice."""
+    frames = {(g.origin, g.dims, g.cell) for state in states if state for g in state.values()}
+    if len(frames) > 1:
+        raise BotNavError(
+            "the map's grids in different door/wall/constructible states have different "
+            "bounds (a state-changing brush reaches past the world's own brushes); enclose "
+            "the map so the world brushes bound it"
+        )
+
+
+def _door_cells(game_map: Any, entities: list[dict], doors: dict[int, int], grids: dict) -> dict:
+    """Walkable cells whose floor lies inside a door's bounds, each with its door's flags.
+
+    The bounds grow by half a cell across, so a door thinner than a cell still holds a row.
+    """
+    out: dict[tuple[int, int, int], int] = {}
+    if not doors:
+        return out
+    by_index = {int(e["index"]): e for e in entities}
+    grid = next(iter(grids.values()))
+    cell, origin = grid.cell, grid.origin
+    cells = {c for g in grids.values() for c in g.walkable_cells()}
+    for index, bits in doors.items():
+        bounds = analysis._brush_bounds(game_map, by_index[index])
+        if bounds is None:
+            continue
+        lo, hi = bounds
+        x0 = math.floor((lo[0] - cell / 2 - origin[0]) / cell)
+        x1 = math.ceil((hi[0] + cell / 2 - origin[0]) / cell)
+        y0 = math.floor((lo[1] - cell / 2 - origin[1]) / cell)
+        y1 = math.ceil((hi[1] + cell / 2 - origin[1]) / cell)
+        for c in cells:
+            if not (x0 <= c[0] < x1 and y0 <= c[1] < y1):
+                continue
+            x, y, z = grid.centre(c)
+            if (
+                lo[0] - cell / 2 <= x <= hi[0] + cell / 2
+                and lo[1] - cell / 2 <= y <= hi[1] + cell / 2
+                and lo[2] - cell <= z < hi[2]
+            ):
+                out[c] = out.get(c, 0) | bits
+    return out
 
 
 def install_path(bots: dict[str, Any], mapname: str) -> Path:

@@ -1135,6 +1135,7 @@ def collect_solids(
     open_state_changing: bool = False,
     patch_thickness: float = PATCH_THICKNESS,
     contents: ShaderContents | None = None,
+    nonsolid_entities: frozenset[int] = frozenset(),
 ) -> tuple[list[Solid], dict[str, Any]]:
     """Every collision brush and patch facet in the map, as half-space solids, plus what was
     left out.
@@ -1147,6 +1148,9 @@ def collect_solids(
     prism `patch_thickness` deep behind its blocking face. `contents` says which patch shaders
     stop a player; without it (or when it read no scripts) a patch is judged by its shader's
     name, as brushes are, and the count of such patches is reported.
+
+    `nonsolid_entities` leaves out the brushes of those entity indices, for a caller that
+    walks the map in one particular state of its doors and objectives.
     """
     nonsolid_categories = set(NONSOLID_ROLES)
     if open_state_changing and role_map:
@@ -1176,7 +1180,7 @@ def collect_solids(
         index = int(entity["index"])
         classname = str(entity.get("classname") or "")
         category = role_map.category_of.get(classname) if role_map else None
-        skip = category in nonsolid_categories
+        skip = category in nonsolid_categories or index in nonsolid_entities
         if skip:
             skipped_entities.add(index)
         if role_map and category is None and int(entity.get("brushes") or 0):
@@ -1815,6 +1819,7 @@ def cached_navgrid(
         kwargs.get("bucket", DEFAULT_BUCKET),
         bool(kwargs.get("open_state_changing", False)),
         kwargs.get("stance", "stand"),
+        frozenset(kwargs.get("nonsolid_entities") or ()),
     )
     hit = _GRID_CACHE.get(key)
     if hit is not None:
@@ -1865,6 +1870,7 @@ def build_navgrid(
     game_map: Any = None,
     open_state_changing: bool = False,
     stance: str = "stand",
+    nonsolid_entities: frozenset[int] = frozenset(),
 ) -> NavGrid:
     """Voxelize a map into a walkable grid.
 
@@ -1917,6 +1923,7 @@ def build_navgrid(
         max_hull_vertices=max_hull_vertices,
         open_state_changing=open_state_changing,
         contents=shader_contents(profile, path),
+        nonsolid_entities=frozenset(nonsolid_entities),
     )
     if not solids:
         raise AnalysisError(
