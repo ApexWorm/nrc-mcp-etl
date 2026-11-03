@@ -81,6 +81,27 @@ def objective_texts(objdata: str) -> tuple[dict, dict]:
     return desc, objs
 
 
+_NUM = r"\s*(-?[0-9.]+)\s*"
+
+
+def mirror_gm(text: str) -> str:
+    """An Omni-bot map script with its `Vec3(x, y, z)` and `AABB(x1, ..., z2)` mirrored in x."""
+
+    def neg(v: str) -> str:
+        return f"{-float(v):.3f}"
+
+    text = re.sub(
+        rf"Vec3\({_NUM},{_NUM},{_NUM}\)",
+        lambda m: f"Vec3({neg(m[1])}, {m[2]}, {m[3]})",
+        text,
+    )
+    return re.sub(
+        rf"AABB\({_NUM},{_NUM},{_NUM},{_NUM},{_NUM},{_NUM}\)",
+        lambda m: f"AABB({neg(m[4])},{m[2]},{m[3]},{neg(m[1])},{m[5]},{m[6]})",
+        text,
+    )
+
+
 def mirror_way(src: Path, dest: Path) -> dict:
     """Mirror an Omni-bot waypoint file in x with the repo's codec (positions, facings, box)."""
     sys.path.insert(0, str(REPO / "python/src"))
@@ -191,31 +212,9 @@ async def main(args):
         }
         run.artifact("result", result)
 
-        # In the engine: Allies start in the mirrored Allied Start (x > 0); Axis at the
-        # forward bunker flag, now at x > 0 too.
-        smoke = {
-            "watch": ["truck", "forward_gate", "depot_gate"],
-            "steps": [
-                {"action": "join", "team": "blue", "role": "engineer", "timeout": 60},
-                {
-                    "action": "assert",
-                    "until": [
-                        {"scope": "player", "field": "position.0", "value": 1900, "op": "gt"},
-                        {"scope": "player", "field": "position.1", "value": 100, "op": "lt"},
-                    ],
-                },
-                {"action": "screenshot", "name": "allied_start"},
-                {"action": "join", "team": "red", "role": "engineer", "timeout": 60},
-                {
-                    "action": "assert",
-                    "until": [
-                        {"scope": "player", "field": "position.0", "value": 0, "op": "gt"},
-                        {"scope": "player", "field": "position.1", "value": 2000, "op": "gt"},
-                    ],
-                },
-                {"action": "screenshot", "name": "axis_forward_bunker"},
-            ],
-        }
+        # In the engine: Allies start in the mirrored Allied Start (x > 0) beside the truck,
+        # which the script has put on the mirrored path; Axis at the forward bunker flag.
+        smoke = json.loads((Path(__file__).parent / "scenarios" / "supply_mirror.json").read_text())
         if args.engine:
             receipt = await run.call(
                 "engine_playtest",
@@ -264,34 +263,41 @@ async def main(args):
                 run.artifact("result", result)
 
         if args.bots:
-            seeded = await run.call("bot_waypoints_write", cell=args.cell)
-            way = seeded.get("staged") or seeded.get("file") or seeded.get("path")
-            ours = await run.call(
-                "bot_playtest",
-                pk3=package,
-                seconds=args.bot_seconds,
-                bots=args.bot_count,
-                port=BOT_PORT,
-                depends=[str(source_pk3)],
-            )
-            result["bots_seeded"] = {"write": seeded, "play": ours}
-            stock = Path(args.stock_way)
-            if stock.is_file():
-                mirrored_way = run.root / "omni-bot-stock" / f"{NAME}.way"
-                mirrored_way.parent.mkdir()
-                result["stock_way_mirrored"] = mirror_way(stock, mirrored_way)
-                theirs = await run.call(
-                    "bot_playtest",
-                    pk3=package,
-                    waypoints=str(mirrored_way),
-                    seconds=args.bot_seconds,
-                    bots=args.bot_count,
-                    port=BOT_PORT,
-                    depends=[str(source_pk3)],
-                )
-                result["bots_stock_mirrored"] = theirs
-            _ = way
-            run.artifact("result", result)
+            # The add-on's own files for the original map, mirrored: waypoints, and its map
+            # script and goals (their Vec3 positions and AABB regions).
+            stock_dir = Path(args.stock_way).parent
+            mirrored = run.root / "omni-bot-stock"
+            mirrored.mkdir()
+            gm = []
+            for suffix in (".gm", "_goals.gm"):
+                src = stock_dir / f"{SOURCE}{suffix}"
+                if src.is_file():
+                    dest = mirrored / f"{NAME}{suffix}"
+                    dest.write_text(mirror_gm(src.read_text(errors="replace")))
+                    gm.append(str(dest))
+            plays = {"seeded": (None, [])}
+            if args.bots_with_gm and gm:
+                plays["seeded+stock_gm"] = (None, gm)
+            if Path(args.stock_way).is_file():
+                way = mirrored / f"{NAME}.way"
+                result["stock_way_mirrored"] = mirror_way(Path(args.stock_way), way)
+                plays["stock_way+stock_gm"] = (str(way), gm)
+            result["bots"] = {"write": await run.call("bot_waypoints_write", cell=args.cell)}
+            for label, (waypoints, nav) in plays.items():
+                try:
+                    result["bots"][label] = await run.call(
+                        "bot_playtest",
+                        pk3=package,
+                        **({"waypoints": waypoints} if waypoints else {}),
+                        nav_files=nav,
+                        seconds=args.bot_seconds,
+                        bots=args.bot_count,
+                        port=BOT_PORT,
+                        depends=[str(source_pk3)],
+                    )
+                except ToolCallError as e:
+                    result["bots"][label] = {"ok": False, "error": str(e)}
+                run.artifact("result", result)
         print(json.dumps({"result": str(run.root / "result.json"), "package": package}))
 
 
@@ -303,10 +309,15 @@ if __name__ == "__main__":
     p.add_argument("--no-engine", dest="engine", action="store_false")
     p.add_argument("--no-objectives", dest="objectives", action="store_false")
     p.add_argument("--no-bots", dest="bots", action="store_false")
+    p.add_argument(
+        "--bots-with-gm",
+        action="store_true",
+        help="also run the seeded waypoints with the mirrored stock bot script",
+    )
     p.add_argument("--bot-seconds", type=float, default=300)
     # The grids cover the whole map, sky and clip ceiling included (6912 x 6912 x 3456): 24
-    # is the finest cell under the analysis cap.
-    p.add_argument("--cell", type=float, default=24)
+    # is over the analysis cap (one cell past it); 32 is the next grid size.
+    p.add_argument("--cell", type=float, default=32)
     p.add_argument("--bot-count", type=int, default=8)
     p.add_argument(
         "--stock-way",

@@ -104,6 +104,7 @@ def bot_playtest(
     profile_id: str | None = None,
     keep: bool = False,
     depends: list[str] | None = None,
+    nav_files: list[str] | None = None,
     detail: Detail = "summary",
 ) -> dict:
     """Load a packaged map with its bot waypoints on a dedicated server, add bots, watch them.
@@ -124,6 +125,8 @@ def bot_playtest(
     the add-on's goal choices and the fight; read `events`, and run longer for more.
     `keep=true` retains the folders and names the logs. Needs the engine and game data.
     `depends` lists other archives the map needs loaded with it, as for `engine_playtest`.
+    `nav_files` are more files for the add-on's nav folder beside the waypoints, such as the
+    map's bot script (for ET: Legacy Omni-bot, `<map>.gm`), named as the add-on wants them.
 
     `detail="summary"` (default) leaves out the per-bot rows when more than 12 bots ran;
     `"full"` always returns them.
@@ -155,7 +158,7 @@ def bot_playtest(
         report = botplay.run(
             path,
             pid,
-            [waypoints],
+            [waypoints, *[_resolve(f) for f in nav_files or []]],
             seconds=float(seconds),
             bots=int(bots),
             addon_dir=addon_dir,
