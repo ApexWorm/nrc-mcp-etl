@@ -115,6 +115,58 @@ Clip variants are deliberately absent — they are what stops the player, so the
 here even though they are never drawn.
 """
 
+SOLID_CLEARING_SURFACEPARMS = (
+    "origin",
+    "areaportal",
+    "nonsolid",
+    "trigger",
+    "water",
+    "slime",
+    "lava",
+    "playerclip",
+    "monsterclip",
+    "nodrop",
+    "clusterportal",
+    "donotenter",
+    "botclip",
+    "fog",
+)
+"""Surfaceparms that take solid contents away from a shader, in the compiler's default table.
+
+q3map2 `games.cpp:142-173` (the `game_default` parms every game inherits): each of these
+clears `CONTENTS_SOLID`. A game's own additions come from the profile's
+`collision.solid_clearing_surfaceparms`. A shader with none of them, or with no script at all,
+keeps the default solid contents (`games.cpp:132`).
+"""
+
+PATCH_SUBDIVIDE_DISTANCE = 16.0
+"""`SUBDIVIDE_DISTANCE` (etlegacy `qcommon/cm_patch.h:129`), restated for reports: the kernel's
+port (`nrc_solid::patch::collision`) is what applies it. A patch collides as chords that stop
+short of its curve by up to this much."""
+
+PLAYER_CLIP_SURFACEPARMS = ("playerclip",)
+"""Surfaceparms that stop players even though they clear solid (`games.cpp:165`)."""
+
+PATCH_THICKNESS = 1.0
+"""How far behind its blocking side a patch facet is treated as solid, in world units.
+
+The engine's facet has no thickness: a trace is stopped by its front plane, or by one of the
+bevels it adds around it (`cm_patch.c:1017`, `1936`). The half-space model needs some volume,
+so each facet is a prism this deep behind its front face, and it blocks from both sides —
+as the engine did with a player box in `bench/dogfood/patches.py` (an inward-facing pipe
+stopped a player outside it). Thin on purpose: a deep prism behind the lower half of
+a small pipe would poke out of its top. The front face, the one players meet, stays exactly
+where the engine puts it. The voxel grid does not sample these slivers at cell centres, which
+would miss them; it marks every cell the facet passes through (`_rasterize_facet`).
+"""
+
+PATCH_RASTER_SHIFT = 0.01
+"""How far behind its front a facet is moved before it is rasterized, in world units.
+
+A facet lying exactly on a cell boundary then lands in the cell behind it, as a brush face on
+that boundary would: a floor at z=0 fills the cell below 0, not the one above.
+"""
+
 UNASSIGNED_TEAM = "unassigned"
 
 _SOLID = b"\x01"
@@ -604,6 +656,11 @@ class Solid:
     #: the player. Carried rather than re-read, because the only other way to answer
     #: "is this cell held up by a clip brush" is a second pass over the map.
     shaders: tuple[str, ...] = ()
+    #: True for one collision facet of a patch (see `_facet_solid`), not a brush.
+    patch: bool = False
+    #: A patch facet's front face, its corners in order. The grid rasterizes this surface
+    #: rather than sampling the thin prism at cell centres.
+    facet: tuple[tuple[float, float, float], ...] = ()
 
     def contains(self, x: float, y: float, z: float) -> bool:
         if not (
@@ -669,6 +726,8 @@ def _body_obstacles(solids: list[Solid], radius: float, height: float) -> list[S
             is_box=solid.is_box,
             approximated=solid.approximated or not solid.is_box,
             shaders=solid.shaders,
+            patch=solid.patch,
+            facet=solid.facet,
         )
         for solid in solids
     ]
@@ -745,6 +804,328 @@ def _nonsolid_shader(shader: str, fragments: tuple[str, ...]) -> bool:
     return any(f in lowered for f in fragments)
 
 
+# ---------------------------------------------------------------------------
+# Patches — the engine's collision facets, as thin solids
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ShaderContents:
+    """Which shaders stop a player, read from the shader scripts the compiler would see.
+
+    A patch has one shader, and that shader's surfaceparms decide whether the compiled patch
+    collides at all: q3map2 writes the shader's contents into the BSP (`games.cpp:132-173`)
+    and the engine skips a patch whose contents miss the trace's mask (`cm_trace.c:876`).
+    """
+
+    #: Lowercased full shader name (`textures/...`) to its surfaceparms.
+    parms: dict[str, tuple[str, ...]]
+    #: Whether any shader script could be read. Without them a name is all there is to go on.
+    resolved: bool
+    sources: tuple[str, ...]
+    clearing: frozenset[str]
+    player_clip: frozenset[str]
+
+    def blocks_player(self, shader: str) -> bool | None:
+        """True or False when a script defines the shader; None when none does."""
+        from .optimize import SHADER_NAME_PREFIX  # noqa: PLC0415
+
+        parms = self.parms.get((SHADER_NAME_PREFIX + shader).lower())
+        if parms is None:
+            return None
+        if any(p in self.player_clip for p in parms):
+            return True
+        return not any(p in self.clearing for p in parms)
+
+
+_BASEGAME_PARMS: dict[tuple, dict[str, tuple[str, ...]]] = {}
+
+
+def _basegame_parms(directory: Path) -> dict[str, tuple[str, ...]]:
+    """Surfaceparms of every shader the base game's archives define, cached per archive set."""
+    from . import optimize  # noqa: PLC0415
+
+    try:
+        stamp = tuple(
+            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            for p in sorted(directory.iterdir())
+            if p.suffix.lower() == ".pk3"
+        )
+    except OSError:
+        return {}
+    key = (str(directory), stamp)
+    hit = _BASEGAME_PARMS.get(key)
+    if hit is None:
+        index = optimize.basegame_index([directory])
+        hit = {name: tuple(s["surfaceparms"]) for name, s in index["shaders"].items()}
+        _BASEGAME_PARMS.clear()
+        _BASEGAME_PARMS[key] = hit
+    return hit
+
+
+def shader_contents(profile_id: str, map_path: str | Path | None = None) -> ShaderContents:
+    """The shader scripts a compile of `map_path` would read: the project's own, then the game's.
+
+    The project's are the loose `scripts/*.shader` beside its `maps/` folder; the game's are
+    the scripts inside the base game's archives (`NRC_FS_BASEPATH` plus the profile's
+    `packaging.basegame`). Either may be missing; `resolved` says whether any was read.
+    """
+    from . import optimize  # noqa: PLC0415
+
+    data = profiles.load(profile_id)
+    collision = data.get("collision") if isinstance(data.get("collision"), dict) else {}
+    extra = collision.get("solid_clearing_surfaceparms") or []
+    clearing = frozenset([*SOLID_CLEARING_SURFACEPARMS, *(str(p).lower() for p in extra)])
+    parms: dict[str, tuple[str, ...]] = {}
+    sources: list[str] = []
+    if map_path is not None:
+        folder = Path(map_path).resolve().parent
+        root = folder.parent if folder.name.lower() == "maps" else folder
+        scripts = root / "scripts"
+        if scripts.is_dir():
+            for script in sorted(scripts.glob("*.shader")):
+                try:
+                    parsed = optimize.parse_shader_file(script)
+                except (OSError, optimize.OptimizeError):
+                    continue
+                for shader in parsed:
+                    parms.setdefault(shader["name"].lower(), tuple(shader["surfaceparms"]))
+                sources.append(str(script))
+    base = os.environ.get("NRC_FS_BASEPATH")
+    basegame = (data.get("packaging") or {}).get("basegame")
+    if base and basegame and (Path(base) / str(basegame)).is_dir():
+        directory = Path(base) / str(basegame)
+        found = _basegame_parms(directory)
+        if found:
+            for name, value in found.items():
+                parms.setdefault(name, value)
+            sources.append(str(directory))
+    return ShaderContents(
+        parms=parms,
+        resolved=bool(sources),
+        sources=tuple(sources),
+        clearing=clearing,
+        player_clip=frozenset(PLAYER_CLIP_SURFACEPARMS),
+    )
+
+
+def _cross(
+    u: tuple[float, float, float], v: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+
+def _facet_solid(
+    normal: tuple[float, float, float],
+    dist: float,
+    points: list[tuple[float, float, float]],
+    thickness: float,
+    entity: int,
+    primitive: int,
+    shader: str,
+) -> list[Solid]:
+    """A patch facet as a prism: its front face where the engine puts it, `thickness` behind.
+
+    Bounded by the facet plane, the plane `thickness` behind it, one plane through each edge
+    perpendicular to the facet, and the six axial planes of its bounds — the same axial bevels
+    the engine adds to every facet (`cm_patch.c:1017`), which keep a player-box expansion of a
+    sharp triangle corner from reaching further than the corner itself. A quad that is not
+    convex is split into its two triangles.
+    """
+    nx, ny, nz = normal
+    count = len(points)
+    edges: list[tuple[float, float, float, float]] = []
+    for k in range(count):
+        a, b = points[k], points[(k + 1) % count]
+        m = _cross((b[0] - a[0], b[1] - a[1], b[2] - a[2]), normal)
+        length = math.sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
+        if length < 1e-9:
+            continue  # a degenerate edge bounds nothing
+        m = (m[0] / length, m[1] / length, m[2] / length)
+        d = m[0] * a[0] + m[1] * a[1] + m[2] * a[2]
+        sides = [m[0] * p[0] + m[1] * p[1] + m[2] * p[2] - d for p in points]
+        if max(sides) > 1e-6:
+            m, d = (-m[0], -m[1], -m[2]), -d
+            sides = [-s for s in sides]
+            if max(sides) > 1e-6:
+                if count == 4:
+                    # Not convex: the two triangles, as the engine would split the cell.
+                    first = [points[0], points[1], points[2]]
+                    second = [points[2], points[3], points[0]]
+                    return [
+                        *_facet_solid(normal, dist, first, thickness, entity, primitive, shader),
+                        *_facet_solid(normal, dist, second, thickness, entity, primitive, shader),
+                    ]
+                return []
+        edges.append((m[0], m[1], m[2], d))
+    if len(edges) < 3:
+        return []
+    corners = [
+        *points,
+        *((p[0] - nx * thickness, p[1] - ny * thickness, p[2] - nz * thickness) for p in points),
+    ]
+    mins = (
+        min(p[0] for p in corners),
+        min(p[1] for p in corners),
+        min(p[2] for p in corners),
+    )
+    maxs = (
+        max(p[0] for p in corners),
+        max(p[1] for p in corners),
+        max(p[2] for p in corners),
+    )
+    planes = (
+        (nx, ny, nz, dist),
+        (-nx, -ny, -nz, thickness - dist),
+        *edges,
+        *_axis_planes(mins, maxs),
+    )
+    return [
+        Solid(
+            planes=planes,
+            mins=mins,
+            maxs=maxs,
+            entity=entity,
+            primitive=primitive,
+            is_box=False,
+            approximated=False,
+            shaders=(shader,),
+            patch=True,
+            facet=tuple(points),
+        )
+    ]
+
+
+def _clip_polygon(
+    points: list[tuple[float, float, float]], axis: int, bound: float, keep_below: bool
+) -> list[tuple[float, float, float]]:
+    """Sutherland-Hodgman against one axial plane, keeping `p[axis] <= bound` or `>= bound`."""
+    out: list[tuple[float, float, float]] = []
+    count = len(points)
+    for k in range(count):
+        a, b = points[k], points[(k + 1) % count]
+        da = (a[axis] - bound) if keep_below else (bound - a[axis])
+        db = (b[axis] - bound) if keep_below else (bound - b[axis])
+        if da <= 0:
+            out.append(a)
+        if (da < 0 < db) or (db < 0 < da):
+            t = da / (da - db)
+            out.append(
+                (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t)
+            )
+    return out
+
+
+def _rasterize_facet(
+    solid: Solid,
+    occupancy: bytearray,
+    origin: tuple[float, float, float],
+    dims: tuple[int, int, int],
+    cell: float,
+) -> None:
+    """Mark every cell a patch facet passes through as solid.
+
+    A brush is sampled at cell centres because it has volume; a facet has none, so centre
+    sampling would let a wall of facets fall between columns. Instead the facet, moved
+    `PATCH_RASTER_SHIFT` behind its front, is clipped to each column it overlaps, and every
+    cell its z-range in that column touches is filled. That reads a patch surface up to one
+    cell nearer the player than a brush face at the same height would read — the
+    conservative side — and the exact checks downstream (body clearance, `movement_check`)
+    measure the real facet, not the cells.
+    """
+    nx, ny, nz = dims
+    ox, oy, oz = origin
+    a, b, c, _ = solid.planes[0]
+    shift = PATCH_RASTER_SHIFT
+    polygon = [(p[0] - a * shift, p[1] - b * shift, p[2] - c * shift) for p in solid.facet]
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    cx0 = max(0, math.floor((min(xs) - ox) / cell))
+    cx1 = min(nx - 1, math.floor((max(xs) - ox) / cell))
+    cy0 = max(0, math.floor((min(ys) - oy) / cell))
+    cy1 = min(ny - 1, math.floor((max(ys) - oy) / cell))
+    for ix in range(cx0, cx1 + 1):
+        x_lo = ox + ix * cell
+        strip = _clip_polygon(polygon, 0, x_lo, keep_below=False)
+        strip = _clip_polygon(strip, 0, x_lo + cell, keep_below=True) if strip else strip
+        if not strip:
+            continue
+        base_x = ix * ny
+        for iy in range(cy0, cy1 + 1):
+            y_lo = oy + iy * cell
+            piece = _clip_polygon(strip, 1, y_lo, keep_below=False)
+            piece = _clip_polygon(piece, 1, y_lo + cell, keep_below=True) if piece else piece
+            if not piece:
+                continue
+            # A facet that only touches the column's edge (a floor ending on a cell boundary)
+            # is not in it: the piece must reach inside the open square.
+            mx = sum(p[0] for p in piece) / len(piece)
+            my = sum(p[1] for p in piece) / len(piece)
+            if not (x_lo < mx < x_lo + cell and y_lo < my < y_lo + cell):
+                continue
+            zs = [p[2] for p in piece]
+            iz0 = max(0, math.floor((min(zs) - oz) / cell))
+            iz1 = min(nz - 1, max(iz0, math.ceil((max(zs) - oz) / cell) - 1))
+            if iz0 > iz1:
+                continue
+            start = (base_x + iy) * nz
+            occupancy[start + iz0 : start + iz1 + 1] = _SOLID * (iz1 - iz0 + 1)
+
+
+def _collect_patches(
+    game_map: Any,
+    solids: list[Solid],
+    provenance: dict[str, Any],
+    skipped_entities: set[int],
+    contents: ShaderContents | None,
+    nonsolid_fragments: tuple[str, ...],
+    thickness: float,
+) -> None:
+    """Add every player-blocking patch's collision facets to `solids`, counting what was not."""
+    if not hasattr(game_map, "patch_collision"):
+        provenance["patches"] = provenance["patches_unmodelled"] = len(game_map.patches())
+        return
+    examples: list[str] = []
+    for patch in game_map.patch_collision():
+        provenance["patches"] += 1
+        entity, primitive = int(patch["entity"]), int(patch["primitive"])
+        shader = str(patch.get("shader") or "")
+        if entity in skipped_entities:
+            provenance["patches_nonsolid_entity"] += 1
+            continue
+        blocks = contents.blocks_player(shader) if contents is not None else None
+        if blocks is None:
+            if contents is None or not contents.resolved:
+                provenance["patches_shader_unresolved"] += 1
+                blocks = not _nonsolid_shader(shader, (*nonsolid_fragments, "nonsolid"))
+            else:
+                blocks = True  # no script: the compiler's default contents are solid
+        if not blocks:
+            provenance["patches_nonsolid_shader"] += 1
+            continue
+        if patch.get("error"):
+            provenance["patches_unmodelled"] += 1
+            if len(examples) < 5:
+                examples.append(f"entity {entity} primitive {primitive}: {patch['error']}")
+            continue
+        made = 0
+        for normal, dist, points in patch["facets"]:
+            for solid in _facet_solid(
+                (float(normal[0]), float(normal[1]), float(normal[2])),
+                float(dist),
+                [(float(p[0]), float(p[1]), float(p[2])) for p in points],
+                thickness,
+                entity,
+                primitive,
+                shader,
+            ):
+                solids.append(solid)
+                made += 1
+        provenance["patch_facets"] += made
+        provenance["patches_used"] += 1 if made else 0
+    provenance["patch_unmodelled_examples"] = examples
+
+
 def collect_solids(
     game_map: Any,
     role_map: Roles | None = None,
@@ -752,12 +1133,20 @@ def collect_solids(
     max_hull_vertices: int = MAX_HULL_VERTICES,
     nonsolid_fragments: tuple[str, ...] = NONSOLID_SHADER_FRAGMENTS,
     open_state_changing: bool = False,
+    patch_thickness: float = PATCH_THICKNESS,
+    contents: ShaderContents | None = None,
 ) -> tuple[list[Solid], dict[str, Any]]:
-    """Every collision brush in the map, as half-space solids, plus what was left out.
+    """Every collision brush and patch facet in the map, as half-space solids, plus what was
+    left out.
 
     The provenance dictionary is not decoration. Brushes the kernel declines to evaluate are
     invisible to everything downstream, and a caller that cannot see how many there were has
     no way to judge an "unreachable" answer.
+
+    Patches enter as the engine's own collision facets (`nrc_solid::patch::collision`), each a
+    prism `patch_thickness` deep behind its blocking face. `contents` says which patch shaders
+    stop a player; without it (or when it read no scripts) a patch is judged by its shader's
+    name, as brushes are, and the count of such patches is reported.
     """
     nonsolid_categories = set(NONSOLID_ROLES)
     if open_state_changing and role_map:
@@ -770,17 +1159,26 @@ def collect_solids(
         "brushes_bounds_approximated": 0,
         "brushes_nonsolid_shader": 0,
         "brushes_nonsolid_entity": 0,
-        "patches_ignored": 0,
+        "patches": 0,
+        "patches_used": 0,
+        "patch_facets": 0,
+        "patches_nonsolid_shader": 0,
+        "patches_nonsolid_entity": 0,
+        "patches_shader_unresolved": 0,
+        "patches_unmodelled": 0,
         "unrecognized_primitives": 0,
         "entities_unknown_to_profile": 0,
     }
     indeterminate_examples: list[str] = []
+    skipped_entities: set[int] = set()
 
     for entity in game_map.entities(with_keys=False):
         index = int(entity["index"])
         classname = str(entity.get("classname") or "")
         category = role_map.category_of.get(classname) if role_map else None
         skip = category in nonsolid_categories
+        if skip:
+            skipped_entities.add(index)
         if role_map and category is None and int(entity.get("brushes") or 0):
             provenance["entities_unknown_to_profile"] += 1
 
@@ -793,9 +1191,7 @@ def collect_solids(
                 message = str(e)
                 if "has no primitive" in message:
                     break
-                if "patch" in message:
-                    provenance["patches_ignored"] += 1
-                else:
+                if "patch" not in message:  # patches are collected below
                     provenance["unrecognized_primitives"] += 1
                 primitive += 1
                 continue
@@ -858,6 +1254,15 @@ def collect_solids(
             provenance["brushes_used"] += 1
 
     provenance["indeterminate_examples"] = indeterminate_examples
+    _collect_patches(
+        game_map,
+        solids,
+        provenance,
+        skipped_entities,
+        contents,
+        nonsolid_fragments,
+        patch_thickness,
+    )
     return solids, provenance
 
 
@@ -1503,6 +1908,7 @@ def build_navgrid(
         role_map,
         max_hull_vertices=max_hull_vertices,
         open_state_changing=open_state_changing,
+        contents=shader_contents(profile, path) if game_map.patches() else None,
     )
     if not solids:
         raise AnalysisError(
@@ -1532,6 +1938,9 @@ def build_navgrid(
     solid = bytearray(total)
     ox, oy, oz = origin
     for brush in solids:
+        if brush.facet:
+            _rasterize_facet(brush, solid, origin, dims, cell)
+            continue
         # Cells whose centre can lie inside this brush, from its bounding box.
         cx0 = max(0, math.ceil((brush.mins[0] - ox) / cell - 0.5))
         cx1 = min(nx - 1, math.floor((brush.maxs[0] - ox) / cell - 0.5))
@@ -1653,17 +2062,34 @@ def build_navgrid(
                 "snap the offending brushes to the grid, then re-run",
             )
         )
-    if provenance["patches_ignored"]:
+    if provenance["patches_unmodelled"]:
+        examples = "; ".join(provenance.get("patch_unmodelled_examples") or [])
         findings.append(
             _finding(
                 "NAV_PATCHES_IGNORED",
                 "warning",
-                f"{provenance['patches_ignored']} patch(es) are not in this grid. Patches are "
-                "curved surfaces, not half-space solids, and the player collides with them in "
-                "game — so a ramp or a curved floor built from patches reads here as thin air.",
+                f"{provenance['patches_unmodelled']} solid patch(es) are not in this grid "
+                "because their control grid is one the engine refuses or cannot hold "
+                f"({examples}). The engine stops loading a map over such a patch, so fix it "
+                "before trusting any route here.",
                 "verified",
-                "nrc_mcp.analysis: patches are outside the half-space model this grid uses",
-                "check whether any of them carries walkable floor or blocks a route",
+                "nrc_solid::patch::collision mirrors CM_GeneratePatchCollide "
+                "(qcommon/cm_patch.c:1451-1475, MAX_FACETS at cm_patch.h:77)",
+                "give the patch odd dimensions of at least 3x3, or split it",
+            )
+        )
+    if provenance["patches_shader_unresolved"]:
+        findings.append(
+            _finding(
+                "NAV_PATCH_CONTENTS_GUESSED",
+                "info",
+                f"{provenance['patches_shader_unresolved']} patch(es) were judged solid or "
+                "not by shader name alone, because no shader script could be read (no project "
+                "scripts/ folder and no base game at NRC_FS_BASEPATH). A decal or trim whose "
+                "script says nonsolid is then a wall here.",
+                "verified",
+                "nrc_mcp.analysis.shader_contents read no scripts",
+                "set NRC_FS_BASEPATH to the game install, then re-run",
             )
         )
     if provenance["brushes_bounds_approximated"]:
@@ -1724,6 +2150,16 @@ def build_navgrid(
     if stance == "prone":
         notes.append(
             "prone uses the main body box only; leg collision, orientation and stance transitions are not modelled"
+        )
+    if provenance["patches_used"]:
+        notes.append(
+            f"{provenance['patches_used']} patch(es) are modelled as the engine's own "
+            f"{provenance['patch_facets']} collision facets: the curve subdivided only until "
+            f"each chord is within {PATCH_SUBDIVIDE_DISTANCE:g} units of it, as the engine does, "
+            "so a small pipe collides as a polygon well inside its drawn curve. A facet "
+            "fills every cell it passes through, so a patch floor or ceiling can read up to a "
+            "cell nearer than a brush face at the same height would. Facets block from both "
+            "sides, as the engine's bevelled facets did against a player box in testing"
         )
 
     return NavGrid(

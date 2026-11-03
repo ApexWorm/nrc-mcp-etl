@@ -776,8 +776,12 @@ reports them as missing, and battery leaks without them.
 
 **Limited patch authoring.** `patch_commit` makes cylinders, arches and quarter-round bevels as
 `patchDef2`; free-form curves and terrain are still editor work. Patches do not seal the map.
-Their shader contents determine player collision; solid patches collide in game but are omitted
-from the analysis grid. Clip brushes can provide simpler collision.
+Their shader contents determine player collision. The movement analysis collides with patches as
+the engine does: it ports `CM_GeneratePatchCollide` (subdivide until each chord is within 16 units of
+the curve, one facet per grid cell) and reads the shader's surfaceparms from the project's and the
+base game's scripts. `bench/dogfood/patches.py` walks eight patch lanes in the engine; the analysis
+agrees on seven and is stricter on the eighth, a 45-degree slope (a grid limitation brush ramps share).
+`NAV_PATCHES_IGNORED` now means a patch the engine itself would refuse to load.
 
 **No measured reference dimensions.** There is no corpus of width/height/length distributions per
 space category, so sizing comes from the profile's verified constants. Related: no cover density or

@@ -326,9 +326,12 @@ def patch_commit(
         (0, 90, 180, 270) picks the quarter; `centre`, `length`, and `axis` as for a cylinder.
 
     `facing` is the side that is drawn: `out` (default for cylinder and bevel) or `in` (default
-    for an arch, seen from below). Patches do not seal the map. Player collision depends on
-    the shader's contents; solid patches collide in game but are omitted from the analysis
-    grid. Clip brushes can provide simpler collision. Nothing reaches disk until `map_save`.
+    for an arch, seen from below); the engine collides with that same side. Patches do not
+    seal the map. Player collision depends on the shader's contents. The engine collides with
+    a coarse polygon, not the drawn curve: each quarter-circle is one straight chord until its
+    midpoint would sit 16 units or more off the curve (radius 45.3 and up), so a 24-radius pipe
+    collides as a 45-degree diamond. The movement analysis uses the same polygon. Nothing
+    reaches disk until `map_save`.
     """
     m = SESSION.require()
     k = _kernel()

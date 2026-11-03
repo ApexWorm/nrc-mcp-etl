@@ -146,8 +146,9 @@ def route_report(
     lower sweep legs, and distance measures those legs. Width and floor separation are checked.
 
     Uses the current unsaved map. This is voxel planning: no jumping, animation, prone
-    legs/turning, patch collision or script-state simulation. `max_nodes` (1..250000)
-    bounds search; exhaustion returns reachable=null rather than claiming no route.
+    legs/turning or script-state simulation. Patches collide as the engine's own facets
+    (coarser than the drawn curve). `max_nodes` (1..250000) bounds search; exhaustion
+    returns reachable=null rather than claiming no route.
     `route_render` draws the same report over the map geometry.
 
     `detail="summary"` (default) omits the model caveats, per-grid constants and the

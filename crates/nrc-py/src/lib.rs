@@ -600,6 +600,68 @@ impl PyMap {
         Ok(out)
     }
 
+    /// Every patch's collision surface, as the engine builds it at map load.
+    ///
+    /// One dict per patch: `entity`, `primitive`, `classname`, `shader`, and either `facets`
+    /// (each `(normal, dist, points)`: a planar triangle or quad that blocks from the side
+    /// `normal` faces) with the subdivided `grid` size, or `error` naming why the engine would
+    /// refuse the patch. See `nrc_solid::patch::collision` for the port and its sources.
+    fn patch_collision<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let out = PyList::empty(py);
+        for (ei, e) in self.inner.entities.iter().enumerate() {
+            for (pi, prim) in e.prims.iter().enumerate() {
+                let Primitive::Patch(p) = prim else { continue };
+                let d = PyDict::new(py);
+                d.set_item("entity", ei)?;
+                d.set_item("primitive", pi)?;
+                d.set_item("classname", e.classname())?;
+                d.set_item("shader", &p.shader)?;
+                let rows: Option<Vec<Vec<[f64; 3]>>> = p
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        r.iter()
+                            .map(|c| {
+                                (c.len() >= 3).then(|| [c[0].value(), c[1].value(), c[2].value()])
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let result = match rows {
+                    None => Err("a control point has fewer than three coordinates".to_string()),
+                    Some(_) if !p.dimensions_consistent() => {
+                        Err("declared dimensions do not match the control points".to_string())
+                    }
+                    Some(rows) => nrc_solid::patch::collision(&rows),
+                };
+                match result {
+                    Ok(c) => {
+                        let facets = PyList::empty(py);
+                        for f in &c.facets {
+                            let points: Vec<(f64, f64, f64)> =
+                                f.points.iter().map(|q| (q[0], q[1], q[2])).collect();
+                            facets.append((
+                                (f.normal[0], f.normal[1], f.normal[2]),
+                                f.dist,
+                                points,
+                            ))?;
+                        }
+                        d.set_item("facets", facets)?;
+                        d.set_item("grid", c.grid)?;
+                        d.set_item("error", py.None())?;
+                    }
+                    Err(e) => {
+                        d.set_item("facets", PyList::empty(py))?;
+                        d.set_item("grid", py.None())?;
+                        d.set_item("error", e)?;
+                    }
+                }
+                out.append(d)?;
+            }
+        }
+        Ok(out)
+    }
+
     /// Axis-aligned bounds as `(min, max)`, or `None` for an empty map.
     fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
         let b = self.inner.bounds();

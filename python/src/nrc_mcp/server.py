@@ -136,9 +136,9 @@ Work in this order, and do not skip the decision step.
    needs collision, then `render_camera` to look at it.
 5. `validate`, then `compile_map` with the draft preset, then `map_save`.
 
-For a cylinder, arch or bevel, use `patch_commit`; check shader collision in game, or add
-simple clip geometry. Patches do not seal the map and are omitted from the analysis grid.
-Other patch shapes still require the editor.
+For a cylinder, arch or bevel, use `patch_commit`. Patches do not seal the map. The analysis
+collides with them as the engine does — a coarse polygon, within 16 units of the drawn curve —
+so a small pipe blocks less than it looks. Other patch shapes still require the editor.
 """
 
 
