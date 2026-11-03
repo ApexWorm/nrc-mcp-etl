@@ -256,6 +256,7 @@ TOOL_NAMES = (
     "objdata_write",
     "commandmap_make",
     "levelshot_make",
+    "bot_waypoints_write",
     "solid_help",
     "solid_compile",
     "solid_preview",
@@ -300,6 +301,7 @@ TOOL_NAMES = (
     "task_run",
     "compile_map",
     "engine_playtest",
+    "bot_playtest",
     "profile_summary",
 )
 

@@ -70,6 +70,19 @@ profile:
     - id: q3map2_source
       path: "vendor/netradiant-custom tools/quake3/q3map2/"
       note: "the compiler this project drives; cited as file:line for what it does with a brush"
+    - id: omnibot_source
+      path: "github.com/jswigart/omni-bot, tag 0.93, directory 0.83/Omnibot/"
+      note: >-
+        the bot add-on's own source, matching the library the 2.86.2 install ships
+        (legacy/omni-bot/omnibot_et.x86_64.so prints 0.93). Cited as file:line relative to
+        0.83/Omnibot/. The serializer, header and flag files are byte-identical at tag 0.92,
+        the version of the separate Linux release tarball. Not in the ET: Legacy tree, which
+        vendors only the interface headers (vendor/Omnibot/Common, vendor/Omnibot/ET).
+    - id: omnibot_release
+      path: "<ET: Legacy 2.86.2>/legacy/omni-bot/et/nav/*.way (682 files) and omnibot-linux-latest.tar.gz omni-bot/et/nav/*.way (680)"
+      note: >-
+        shipped waypoint files, the format's reference data: every version-9 file in both
+        (1360) reads and re-serializes byte-identically through the codec (tests pin a sample).
 
 # Editor/engine facts from games/et.game (verbatim attribute values).
 editor:
@@ -4338,6 +4351,131 @@ engine:
           timeout: 10
           until: [{scope: game, field: phase, value: intermission}, {scope: game, field: winner, value: blue}]
         - {action: screenshot, name: victory}
+
+# ---------------------------------------------------------------------------
+# bots — Omni-bot waypoint files (bot_waypoints_write, bot_playtest)
+# ---------------------------------------------------------------------------
+# ET: Legacy loads Omni-bot as a shared library when omnibot_enable is 1, from the folder in
+# omnibot_path (game/g_cvars.c:535-536; game/etbot/g_etbot_interface.cpp:5918-5944, which calls
+# Omnibot_LoadLibrary with "omnibot_et" and that path; vendor/Omnibot/Common/BotLoadLibrary.cpp:
+# 293-345 appends ".x86_64.so" on x86_64 Linux). The 2.86.2 release ships the add-on: the
+# library (0.93) and its scripts and stock waypoints under legacy/omni-bot/, and the launch
+# scripts etl_bot.x86_64.sh / etlded_bot.x86_64.sh set omnibot_enable 1 and
+# omnibot_path ./legacy/omni-bot. Without those cvars no bot is ever loaded.
+#
+# The add-on reads waypoints through its own PhysFS file system, never through the game's pk3
+# search path: it mounts <omnibot_path>/et (FileSystem.cpp:83-84; ET_Game.cpp:52-57 names the
+# "et" sub folder), then archives inside et/nav and et/user/download onto nav/
+# (IGameManager.cpp:84-85), and loads nav/<mapname>.way, loose files first
+# (PathPlannerWaypoint.cpp:1144-1158). <mapname> is the game's level.rawmapname
+# (g_etbot_interface.cpp:5725-5728). So a waypoint file packed into the map's pk3 is never
+# read: it must be installed into the server's Omni-bot folder, et/nav/.
+bots:
+  confidence: verified
+  source: omnibot_source
+  addon: Omni-bot
+  # Where the add-on looks, relative to omnibot_path; and where bot_waypoints_write stages
+  # the file, relative to the folder holding maps/ (mirrors the omnibot_path layout, so the
+  # staged tree can be copied over the server's Omni-bot folder). pack_pk3 never packs it.
+  install_path: "et/nav/{map}.way"
+  stage_dir: omni-bot
+  # The install's own copy, used by bot_playtest as the template for an isolated add-on
+  # folder ({basepath} = NRC_FS_BASEPATH). Never written to.
+  install_dir: "{basepath}/legacy/omni-bot"
+  format:
+    codec: packed_waypoints
+    # m_WaypointSerializer[9] is the newest serializer, so files are written as version 9
+    # (PathPlannerWaypoint.cpp:95, :1310-1312); a version without a serializer fails with
+    # "No Serializer for waypoint" (:1277-1279).
+    version: 9
+    # #pragma pack(1) { uchar version; uint num_waypoints; char timestamp[32];
+    # char comments[232]; AABB world (6 floats) } = 293 bytes
+    # (PathPlannerWaypoint.h:146-163, static assert :380). Little-endian, as written raw.
+    header:
+      timestamp_bytes: 32
+      comment_bytes: 232
+      comment: "seeded by nrc-mcp from the stance grids (cell {cell:g}, spacing {spacing:g})"
+    # Per waypoint: a mask byte, the uid (varint) if not previous+1, 3 floats position, then
+    # facing, flags (varint, 64-bit NavFlags), radius (byte or float), name, properties (each
+    # varint-length string), then a varint connection count and one zigzag varint per
+    # connection: the target's index minus this waypoint's (WaypointSerializer_V9.cpp:4-80,
+    # :82-148; WaypointSerializer_V9.h:17-23 for the mask bits). Varints are 7 bits per byte,
+    # low first, with the HIGH bit marking the last byte (FileSystem.cpp:632-643, :840-856,
+    # zigzag :658-661 and :874-880). Connection flags are not stored in this version.
+    mask: {flags: 1, name: 2, properties: 4, radius_int: 8, radius_float: 16, uid: 32, facing: 64}
+    # Absent radius means 35 (WaypointSerializer_V9.cpp:36, :96).
+    default_radius: 35
+  # A waypoint's position is the player origin, 24 units above the floor: the waypoint
+  # column runs from -24 to +40 around it (PathPlannerWaypoint.cpp:38-39) and GroundPosition
+  # lifts a floor hit by 24 for a waypoint (:2067-2072). Matches the player box mins z -24.
+  floor_offset: 24
+  # Stock files connect waypoints a median 168-218 units apart (oasis, radar, battery).
+  default_spacing: 128
+  # NavFlags bits (NavigationFlags.h:9-33; ET_NavigationFlags.h for F_NAV_NEXT<<n = bit 32+n)
+  # and their script names (IGame.cpp:602-631, ET_Game.cpp:553-583).
+  flags:
+    AXIS: 1            # TEAM1
+    ALLIES: 2          # TEAM2
+    TEAMONLY: 16
+    CROUCH: 64
+    DOOR: 128
+    PRONE: 1048576     # 1<<20
+    BLOCKWALL: 137438953472  # F_ET_NAV_WALL = F_NAV_NEXT<<5 = 1<<37
+  # A bot heading for a waypoint presses prone or crouch while that waypoint carries the flag
+  # (BotBaseStates.cpp:744-747), and path costs weight such waypoints x3.8 / x3.2
+  # (PathPlannerWaypoint.cpp:826-827). So the flag goes on every waypoint whose cells need the
+  # stance: the bot crouches on the way in and stands once it heads for a standing waypoint
+  # (the game keeps it ducked while the ceiling is too low).
+  stance_flags:
+    crouch: [CROUCH]
+    prone: [PRONE]
+  # A connection that only exists once a state-changing brush is gone (a blown wall): the
+  # add-on traces a connection into a BLOCKWALL waypoint and closes it while the trace hits
+  # solid (ET_Game.cpp:738-761), so the bots wait for the wall instead of running into it.
+  blockable_flags: [BLOCKWALL]
+  names:
+    spawn: "{team} spawn"
+    objective: "{label}"
+    objective_keys: [track, scriptname, targetname, description]
+  # The add-on's own log (omnibot_logsize > 0) goes to <omnibot_path>/et/logs/omnibot_<map>.log
+  # when that folder exists (IGameManager.cpp:61-70), with "N Waypoints Loaded from file
+  # nav/<map>.way" on success (PathPlannerWaypoint.cpp:1256) and these on failure.
+  log: "et/logs/omnibot_{map}.log"
+  loaded: "(\\d+) Waypoints Loaded from file nav/{map}\\.way"
+  load_errors: ["Unable to Load Waypoint", "No Serializer for waypoint", "Waypoint {map}\\.way not found"]
+  # Logging switched on in the isolated add-on folder's config (et/user/omni-bot.cfg, the
+  # sample is et/user/omni-bot.txt): SleepBots 0 keeps bots thinking on a server no human
+  # joined.
+  config_path: et/user/omni-bot.cfg
+  config: |
+    [Log]
+    LogInfo = true
+    LogWarnings = true
+    LogErrors = true
+    LogCriticalErrors = true
+    [ServerManager]
+    SleepBots = 0
+    SaveConfigChanges = 0
+  # The add-on folder's parts bot_playtest copies (library and scripts); nav/ starts empty.
+  copy: ["omnibot_et.x86_64.so", "omnibot_et.aarch64.so", "omnibot_et.so", "et/scripts", "global_scripts"]
+  # A dedicated server with the add-on on, a read-only bot observer, and bots added by the
+  # add-on's own console command ("bot maxbots N", the [ServerManager] MaxBots option).
+  playtest:
+    observer: etl-bots.lua
+    observer_target: legacy/nrc_bots.lua
+    args: ["+set", "omnibot_enable", "1", "+set", "omnibot_path", "{omnibot_path}",
+           "+set", "omnibot_logsize", "2000", "+set", "lua_modules", "nrc_bots.lua",
+           "+set", "g_gametype", "2", "+set", "g_doWarmup", "0", "+set", "g_warmup", "0",
+           "+set", "timelimit", "0", "+set", "sv_maxclients", "16",
+           "+set", "net_ip", "127.0.0.1", "+set", "net_port", "{port}"]
+    after_map: ["+bot", "maxbots", "{bots}"]
+    # Game log lines that mean an objective changed: popups for planted/defused dynamite and
+    # stolen/returned flags (game/g_script.c:740-775), the map script's wm_announce texts
+    # (g_script_actions.c:3835, :3869), a destroyed objective (g_missile.c:438) and the round
+    # ending (g_main.c:3034, e.g. "Wolf EndRound." from wm_endround, g_script_actions.c:3888).
+    events: [" popup: ", " announce: ", "Objective_Destroyed: ", "\\bExit: "]
+    # The add-on's start-up line in the game log, naming its version.
+    version_line: "Omni-bot (\\S+) initialized"
 
 # ---------------------------------------------------------------------------
 # engine_limits — what decides whether the map LOADS, as opposed to compiles

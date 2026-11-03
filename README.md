@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **77 tools, 7 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **79 tools, 7 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -268,15 +268,15 @@ mise run mcp:inspect    # the official MCP inspector, in a browser
 point a client straight at it.
 
 **Serve only what the session needs.** Every listed tool is sent to the model at the start of
-every session (the full list is ~83 KB of JSON). Name a session preset in `NRC_MCP_GROUPS`
+every session (the full list is ~87 KB of JSON). Name a session preset in `NRC_MCP_GROUPS`
 and the server lists only that subset:
 
 | Preset | For | Tools | `tools/list` |
 | --- | --- | --- | --- |
 | `build` | blocking out and wiring a map: solids, patches, entities, objectives, script, textures, renders | 36 | ~40 KB |
 | `analyse` | measuring how it plays: routes, balance, spawns, movement, sightlines, lighting, playable space | 25 | ~28 KB |
-| `ship` | compiling, packing, release files, ship check, `objective_playtests` and `engine_playtest` | 26 | ~26 KB |
-| `level` | all three, start to finish | 60 | ~69 KB |
+| `ship` | compiling, packing, release files, ship check, `objective_playtests`, `engine_playtest` and bot waypoints | 28 | ~30 KB |
+| `level` | all three, start to finish | 62 | ~74 KB |
 
 Each preset also carries the core every session uses: `map_open`/`map_new`/`map_save`,
 checkpoints, `map_stats`, `query_entities`, `validate`, `validate_profile` and
@@ -459,7 +459,7 @@ receipt. Gameplay reports use the same in-memory revision even before saving.
 
 ## Tool reference
 
-77 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+79 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -530,6 +530,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | --- | --- |
 | `compile_map` | Run q3map2 with a named preset. |
 | `engine_playtest` | Run bounded gameplay actions with state assertions; retain logs and return screenshots. |
+| `bot_playtest` | Run the packed map on a dedicated server with the bot add-on and its seeded waypoints only (a throwaway copy of the add-on folder), add bots, and report what the add-on loaded, how far each bot travelled along the waypoints, the stances seen, and the game's objective events. |
 | `bsp_report` · `bsp_entity_diff` | Read a compiled BSP; compare its entities to the source. |
 | `structural_audit` | Brushes marked structural that need not be. |
 | `hint_suggest` | Hint brush planes, proposed from a portal file. |
@@ -570,6 +571,7 @@ The overlay uses the same map snapshot and marks stand/crouch/prone, endpoints a
 | `arena_write` · `objdata_write` | The arena file (the map in the menu: name, briefing, gametypes) and the limbo objective descriptions. |
 | `commandmap_make` · `levelshot_make` | The command map - map coordinates on the worldspawn, a top-down section image and its shaders - and the loading-screen levelshot. |
 | `pack_pk3` | Build the release archive. Names the packer misses but the base game or the map supplies do not fail it; `ignore` lets named resources be missing. |
+| `bot_waypoints_write` | Seed the bot add-on's waypoint file (for ET: Legacy an Omni-bot `.way`) from the stand/crouch/prone grids: connected waypoints, crouch/prone and blockable flags, named spawn and objective waypoints, and whether each objective is reached from each team's spawns. Staged beside the map's folder for the server's `omnibot_path`; the add-on never reads it from the pk3. |
 | `repack_analyze` | Every resource the BSP references, and which of them nothing supplies (what fails a pack). |
 
 **The toolchain itself**

@@ -172,8 +172,10 @@ WRITERS = {
     "objdata_write",
     "commandmap_make",
     "levelshot_make",
+    "bot_waypoints_write",
     "compile_map",
     "engine_playtest",
+    "bot_playtest",
     "compile_ab",
     "task_run",
     "bench_run",
@@ -195,6 +197,7 @@ DESTRUCTIVE = {
     "objdata_write",
     "commandmap_make",
     "levelshot_make",
+    "bot_waypoints_write",
     "task_run",
 }
 
