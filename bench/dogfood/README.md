@@ -10,6 +10,8 @@ configured as described in the root README.
 mise run bench:dogfood -- depot
 mise run bench:dogfood -- constructible
 mise run bench:dogfood -- movement
+mise run bench:dogfood -- patches build
+mise run bench:dogfood -- patches stock
 ```
 
 | Scenario | Exercises |
@@ -17,13 +19,35 @@ mise run bench:dogfood -- movement
 | `depot` | Two routes through a warehouse, six spawns per team, dynamite objective and scripted win |
 | `constructible` | Workshop pit, stairs, constructible bridge, horizontal pipe, parametric editing and checkpoint restoration |
 | `movement` | Standing stair/arch route, crouch tunnel, prone vent, route changes after lowering a ceiling and restoring it |
+| `patches build` | Eight lanes, one `patch_commit` surface each; `route_report` and an `engine_playtest` walk per lane, side by side |
+| `patches stock` | Drops a player onto Oasis barrel caps (patches) in the engine and records where it settles |
 
 These are small development maps. Compile and package success do not establish that an
-objective works in the engine or that a layout is balanced in multiplayer. Analysis omits
-patch collision, and coarse cells can hide low passages. The first movement map had a
+objective works in the engine or that a layout is balanced in multiplayer. Coarse cells can
+hide low passages. The first movement map had a
 40-unit prone vent that looked passable to analysis but blocked a real player: collision
 keeps the body slightly above the floor. The example now uses a 48-unit prone vent and a
 56-unit crouch tunnel, with a regression for a ceiling that exactly matches the body height.
+
+Analysis used to skip patches (`NAV_PATCHES_IGNORED`). It now collides with the facets the
+engine builds from them (`CM_GeneratePatchCollide`, ported in `nrc_solid::patch::collision`).
+`patches build` checks that against ET: Legacy 2.86.2, one engine run per lane, all
+`route_report` at cell 8:
+
+| Lane | Stance | Analysis | Engine |
+| --- | --- | --- | --- |
+| pipe r=48 on the floor | stand | blocked | blocked at x=446 (pipe side at 464) |
+| pipe r=8 on the floor | stand | crosses | crosses (collides as a diamond 16 high, under the 18 step) |
+| pipe r=24 on the floor | stand | blocked | **crosses**: it collides as a 45-degree diamond, a walkable slope; the grid's body test is stricter on slopes than the engine, for brush ramps too |
+| arch over a 128x176 doorway | stand | crosses | crosses |
+| prone vent, 48 high, pipe r=16 at the ceiling | prone | blocked | blocked at x=496 |
+| prone vent, 48 high, pipe r=4 at the ceiling | prone | crosses | crosses |
+| pipe r=48, `common/clipshot` (nonsolid) | stand | crosses | crosses |
+| pipe r=48 facing inward | stand | blocked | blocked at x=446, as the outward one |
+
+The last lane settles a question the source leaves open: `cm_patch.c:1936` skips a facet hit
+through its back plane, but against a player box the facet's bevels decide first, so the
+analysis treating facets as solid from both sides matches the engine there.
 
 All examples use an intermission camera with `spawnflags 3`. A neutral camera alone lets
 spectators join but can crash at round end when ET selects a camera for the winning team.

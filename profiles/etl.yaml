@@ -239,6 +239,17 @@ movement:
     source: etlegacy_source
     locus: "game/g_cvars.c:433"
 
+# Which shader contents stop a player, for patch collision in the movement analysis. The
+# compiler's default table (shared by every game, and kept in code) already clears solid for
+# nonsolid, water, trigger, playerclip and the rest; these are the Wolfenstein table's
+# additions that ET inherits. `playerclip` stops players despite clearing solid.
+collision:
+  confidence: verified
+  source: q3map2_source
+  locus: "q3map2 games.cpp:361-387 (game_wolf surfaceParms, inherited by game_wolfet at games.cpp:400)"
+  rule_source: "etlegacy game/bg_public.h:2056 MASK_PLAYERSOLID = SOLID | PLAYERCLIP | BODY; qcommon/cm_trace.c:876 skips a patch whose contents miss the mask"
+  solid_clearing_surfaceparms: [slag, clipmissile, clipshot, donotenterlarge, ai_nosight, ai_nopass, ai_nopasslarge]
+
 # Reinforcement analysis describes assumptions, not a replay of script execution. Server
 # g_userAxisRespawnTime/g_userAlliedRespawnTime can override these script assignments.
 balance:
