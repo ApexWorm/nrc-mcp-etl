@@ -922,29 +922,82 @@ def _as_ir(shape: dict, what: str) -> dict:
     raise ToolError(f"{what} must be a box {{min, max}} or a Solid IR tree")
 
 
+def _xyz(value: Any) -> list[float] | None:
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 3
+        and all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in value)
+    ):
+        return [float(c) for c in value]
+    return None
+
+
+def _as_points(value: Any, role: str) -> list[tuple[list[float], Any]]:
+    """A role's positions: [x, y, z], {"origin": [x, y, z], "angle": yaw}, or a list of those."""
+    shape = f"points.{role}: a point is [x, y, z] or {{origin, angle}}"
+    one = _xyz(value)
+    if one is not None:
+        return [(one, None)]
+    if isinstance(value, dict):
+        origin = _xyz(value.get("origin"))
+        angle = value.get("angle")
+        if origin is None or set(value) - {"origin", "angle"}:
+            raise ToolError(shape)
+        if angle is not None and (isinstance(angle, bool) or not isinstance(angle, (int, float))):
+            raise ToolError(f"points.{role}: angle is a yaw in degrees")
+        return [(origin, angle)]
+    if isinstance(value, list) and value and all(isinstance(v, (list, dict)) for v in value):
+        return [p for v in value for p in _as_points(v, role)]
+    raise ToolError(shape + ", or a list of them")
+
+
+def _for_team(part: dict, team: str) -> bool:
+    """A recipe part that names `teams` is built only for those teams."""
+    only = part.get("teams")
+    return not only or team in [str(t) for t in only]
+
+
 @tool("map", "Place an objective", writes=True)
 def objective_place(
     kind: str,
     name: str,
     track: str,
     team: str,
-    objective: dict,
-    trigger: dict,
+    objective: dict | None = None,
+    trigger: dict | None = None,
     texture: str = "",
+    points: dict | None = None,
 ) -> dict:
-    """Build a whole objective in one call: its trigger, the objective entity, keys and script.
+    """Build a whole objective in one call: its trigger, the objective entities, keys and script.
 
-    The kinds are the profile's (`objectives:` in `nrc://profile/{id}`); for ET: Legacy,
-    `dynamite` (the other team blows it up) and `constructible` (`team`'s engineers build it,
-    the other team can blow it up once built). `objective` and `trigger` are boxes
-    `{"min": [...], "max": [...]}` or Solid IR trees: the objective's own brushes, and the
-    volume players stand in to see "You are near <track>" and to plant or build. Make the
-    trigger enclose the objective with room to stand. `texture` goes on the objective's brushes.
+    The kinds are the profile's (`objectives:` in `nrc://profile/{id}`, each with a
+    description); for ET: Legacy:
 
-    The links the engine needs are made for you - the trigger targets the objective, the
-    objective carries the weapon class that lets dynamite destroy it - and the script gets the
-    objective's events, which you can extend with `script_set_event`. Nothing in the map reaches
-    disk until `map_save`; the script is staged with it.
+    - `dynamite`: the other team blows it up. `team` owns and defends it.
+    - `constructible`: `team`'s engineers build it; the other team can blow it up once built.
+    - `command_post`: the stock command post. Built, it shortens its team's charge times and
+      reports landmines to it; destroyed, that stops. `team` is `neutral` (either team builds
+      it, one at a time), `axis` or `allies` (only that team builds it).
+    - `checkpoint`: a forward spawn flag both teams capture. `team` holds it, and its spawns,
+      at the start.
+    - `checkpoint_one_way`: the same, but only the other team can raise its flag. `team` can
+      still knock that flag down, and that hands the spawns back (the engine's rule).
+
+    `objective` and `trigger` are boxes `{"min": [...], "max": [...]}` or Solid IR trees,
+    for the kinds that have brushes: the objective's own brushes, and the volume players stand
+    in to see "You are near <track>" and to plant or build. Make the trigger enclose the
+    objective with room to stand. `texture` goes on the objective's brushes.
+
+    `points` places point entities by role, for the kinds that have them:
+    `{"flag": [x, y, z], "spawns": [[x, y, z], {"origin": [x, y, z], "angle": 90}, ...]}`.
+    For a checkpoint, `flag` is the foot of the flagpole, and the spawn region marker named
+    `track` goes there too. Each of `spawns` gets one spawn for each team, linked to the flag:
+    the holder's start active, and a capture hands them to the capturing team. Spawns are
+    optional; place them later with the targetname given under `links`.
+
+    The links the engine needs are made for you, and the script gets the objective's events,
+    which you can extend with `script_set_event`. Nothing in the map reaches disk until
+    `map_save`; the script is staged with it.
     """
     m = SESSION.require()
     pid, spec, path = _script_spec()
@@ -954,36 +1007,67 @@ def objective_place(
     kinds = recipes["kinds"]
     if kind not in kinds:
         raise ToolError(f"unknown objective kind {kind!r}; the profile has: {', '.join(kinds)}")
-    teams = [str(t) for t in recipes.get("teams") or []]
+    raw = kinds[kind]
+    teams = [str(t) for t in raw.get("teams") or recipes.get("teams") or []]
     if team not in teams:
-        raise ToolError(f"team must be one of {', '.join(teams)}, got {team!r}")
+        raise ToolError(f"team must be one of {', '.join(teams)} for {kind}, got {team!r}")
     try:
         mapscript._word(name, "objective name")
     except mapscript.ScriptEditError as e:
         raise ToolError(str(e)) from e
     if not track.strip() or '"' in track or "\n" in track:
         raise ToolError("track is the text shown in game: non-empty, one line, no double quotes")
-    taken = [
-        e["index"]
-        for e in m.entities()
-        if any(
-            k.lower() in ("targetname", "scriptname") and v.lower() == name.lower()
-            for k, v in e["keys"]
-        )
-    ]
-    if taken:
-        raise ToolError(f"entity {taken[0]} already uses the name {name!r}; pick another")
 
     subs = {"name": name, "track": track, "team": team}
     for key, by_team in (recipes.get("team_values") or {}).items():
-        subs[key] = str(by_team[team])
-    recipe = _fill(kinds[kind], subs)
-    shapes = {"trigger": _as_ir(trigger, "trigger"), "objective": _as_ir(objective, "objective")}
+        if team in by_team:
+            subs[key] = str(by_team[team])
+    try:
+        recipe = _fill(raw, subs)
+    except KeyError as e:
+        raise ToolError(f"profile {pid}: {kind} needs a team value {e} for {team}") from e
+    parts = [ent for ent in recipe["entities"] if _for_team(ent, team)]
+    events = [ev for ev in recipe.get("script") or [] if _for_team(ev, team)]
+
+    # Every name the recipe hands out must be free, or two objectives would answer to it.
+    name_keys = ("targetname", "scriptname")
+    ours = {
+        str(v).lower() for ent in parts for k, v in ent.get("keys", {}).items() if k in name_keys
+    } | {str(ev["block"]).lower() for ev in events}
+    for e in m.entities():
+        clash = [v for k, v in e["keys"] if k.lower() in name_keys and v.lower() in ours]
+        if clash:
+            raise ToolError(f"entity {e['index']} already uses the name {clash[0]!r}; pick another")
+
+    given = dict(points or {})
+    brush_roles = {"trigger": trigger, "objective": objective}
+    point_roles = {str(ent["role"]) for ent in parts if ent.get("point")}
+    if set(given) - point_roles:
+        raise ToolError(
+            f"{kind} places no {', '.join(sorted(set(given) - point_roles))}; its points are: "
+            f"{', '.join(sorted(point_roles)) or 'none'}"
+        )
+    shapes: dict[str, dict] = {}
+    places: dict[str, list] = {}
+    for ent in parts:
+        role = str(ent["role"])
+        if ent.get("point"):
+            if role in given:
+                places[role] = _as_points(given[role], role)
+            elif not ent.get("optional"):
+                raise ToolError(f"{kind} needs points.{role}")
+        elif role not in shapes:
+            if brush_roles.get(role) is None:
+                raise ToolError(f"{kind} needs `{role}`: a box {{min, max}} or a Solid IR tree")
+            shapes[role] = _as_ir(brush_roles[role], role)
+    extra = [r for r, v in brush_roles.items() if v is not None and r not in shapes]
+    if extra:
+        raise ToolError(f"{kind} has no `{'`, `'.join(extra)}` brushes; leave it out")
 
     # The script edit is worked out first, so a refusal there changes nothing in the map.
     text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
     try:
-        for ev in recipe.get("script") or []:
+        for ev in events:
             text, _ = mapscript.set_event(
                 text,
                 spec,
@@ -999,8 +1083,19 @@ def objective_place(
     # Build on a copy: a later invalid shape must not leave half an objective behind.
     m = k.Map.parse(m.source())
     made = []
-    for ent in recipe["entities"]:
-        role = ent["role"]
+    for ent in parts:
+        role = str(ent["role"])
+        keys = [(str(a), str(b)) for a, b in ent.get("keys", {}).items()]
+        if ent.get("point"):
+            for origin, angle in places.get(role, []):
+                pairs = [("classname", ent["classname"]), ("origin", _value_text("origin", origin))]
+                if angle is not None:
+                    pairs.append(("angle", _value_text("angle", angle)))
+                index = m.add_entity(pairs + keys)
+                made.append(
+                    {"role": role, "classname": ent["classname"], "entity": index, "origin": origin}
+                )
+            continue
         tex = ent.get("texture") or texture or "common/caulk"
         r = k.solid_commit(
             m,
@@ -1013,7 +1108,7 @@ def objective_place(
             True,
             None,
         )
-        m.set_keys(r["entity"], [(str(a), str(b)) for a, b in ent.get("keys", {}).items()])
+        m.set_keys(r["entity"], keys)
         made.append(
             {
                 "role": role,
@@ -1026,7 +1121,7 @@ def objective_place(
     SESSION.map = m
 
     report = validate_profile()
-    return {
+    out = {
         "kind": kind,
         "name": name,
         "entities": made,
@@ -1035,6 +1130,9 @@ def objective_place(
         "findings": report["findings"],
         "next": "map_save to write the map; script_set_event to add to the objective's events",
     }
+    if recipe.get("links"):
+        out["links"] = recipe["links"]
+    return out
 
 
 @tool("map", "Game profile summary")

@@ -10,6 +10,7 @@ configured as described in the root README.
 mise run bench:dogfood -- depot
 mise run bench:dogfood -- constructible
 mise run bench:dogfood -- movement
+mise run bench:dogfood -- frontline [--one-way]
 ```
 
 | Scenario | Exercises |
@@ -17,6 +18,7 @@ mise run bench:dogfood -- movement
 | `depot` | Two routes through a warehouse, six spawns per team, dynamite objective and scripted win; built with the batch tools (`solids_commit`, `spawn_cluster`, `entities_place`) |
 | `constructible` | Workshop pit, stairs, constructible bridge, horizontal pipe, parametric editing and checkpoint restoration |
 | `movement` | Standing stair/arch route, crouch tunnel, prone vent, route changes after lowering a ceiling and restoring it |
+| `frontline` | `objective_place` checkpoint (or `checkpoint_one_way`) with forward spawns, a neutral `command_post`, and an Axis-only door (`allowteams`) |
 
 The depot once placed every brush and entity with its own call: 67 calls and 84,392 bytes of
 response text. Committing its 12 solids with one `solids_commit`, each team's spawns and region
@@ -47,7 +49,17 @@ The MCP playtest scenarios replace fixed frame waits with fresh state conditions
 mise run bench:dogfood -- playtest workshop
 mise run bench:dogfood -- playtest depot
 mise run bench:dogfood -- playtest movement
+mise run bench:dogfood -- playtest frontline --pk3 <frontline package>
+mise run bench:dogfood -- playtest frontline_one_way --pk3 <frontline --one-way package>
 ```
+
+`frontline` proves the flag by where players respawn: Allies touch the flag, switch team
+and back, and must reappear at the forward spawns (the capture switched the spawns, handed
+the spawn region over and set the autospawn); Axis then retake it and Allies must reappear
+at their camp. The same run builds the command post with pliers and checks that the
+Axis-only door stays shut for Allies and opens for Axis with the use key.
+`frontline_one_way` checks that Axis cannot raise the one-way flag, that Allies can, and
+that Axis lowering it takes the spawns back.
 
 These call `engine_playtest` over stdio MCP, retain its JSON receipt and returned images,
 and use the example packages recorded in `out/dogfood/report.json`. The scenarios live in
