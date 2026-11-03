@@ -18,6 +18,7 @@ from .. import balance as balancemod
 from .. import mapscript, profiles
 from .. import playspace as playspacemod
 from .. import routes as routesmod
+from .. import spawns as spawnsmod
 from ..kernel import parse_map
 from ..project_state import digest
 from ..runtime import (
@@ -26,6 +27,10 @@ from ..runtime import (
     _require_profile,
     tool,
 )
+
+# The entity helpers are mapfile's. It is registered before this module (surface.ORDER), so
+# importing it here cannot reorder the tool list.
+from . import mapfile
 
 
 def _session_grid(cell: float, pid: str, stance: str = "stand"):
@@ -362,6 +367,204 @@ def spawn_safety(cell: float = 16, profile_id: str | None = None) -> dict:
         )
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:
         raise ToolError(str(e)) from e
+
+
+@tool("gameplay", "Place a cluster of team spawns", writes=True)
+def spawn_cluster(
+    team: str,
+    count: int,
+    area: dict,
+    yaw: float = 0,
+    label: str | None = None,
+    group: str | None = None,
+    active: bool = True,
+    marker: bool = True,
+    spacing: float | None = None,
+    cell: float = 16,
+) -> dict:
+    """Place `count` team spawns where a player can stand, plus the team's spawn-region marker.
+
+    `area` is a box `{"min": [x, y, z], "max": [x, y, z]}`: spawns are laid out on a lattice
+    `spacing` apart (default: the profile's) across its x/y, and stand on floors whose height
+    lies within its z range. Each position is checked against the map's collision brushes
+    with the full player box: a floor under it, standing headroom above it, the floor under
+    the origin within a step (not hanging off a ledge), on the walkable grid, and clear of
+    existing spawns. When more positions pass than are needed, those nearest the area's
+    centre are used. If fewer pass, nothing is placed and the reply says why the rest failed.
+
+    Every game convention comes from the profile (`spawn_cluster:` in `nrc://profile/{id}`):
+    the team's spawn classname, the spawnflags for `active` or inactive spawns, the facing key
+    (`yaw`, degrees), and the marker entity with the team flag and `label` as the name players
+    pick in the spawn list. `team` is a side's label or name from the profile (ET: red/axis or
+    blue/allies). `marker=false` adds spawns to a region that already has its marker.
+
+    `group` names the cluster so a script can switch it, for a forward spawn: the spawns and
+    the marker get the names the profile gives, and `group.toggle` in the reply lists the
+    script actions that switch each (ET: `alertentity <group>` toggles the spawns active,
+    `alertentity <group>_wobj` swaps the marker's owner). Put them in your own events with
+    `script_set_event`. One call per group; a name already in use is refused.
+
+    All entities are added together or not at all. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    pid = _require_profile(None)
+    try:
+        spec = spawnsmod.recipe(pid)
+        side = spawnsmod.team_label(pid, team)
+        spawn = spec["spawn"]
+        mark = spec.get("marker") if marker else None
+        if marker and not isinstance(mark, dict):
+            raise spawnsmod.SpawnClusterError(
+                f"profile {pid} names no spawn-region marker; pass marker=false"
+            )
+        classname = str(spawnsmod.by_team(spawn, "classname", side, "spawn classname"))
+        flags = spawn.get("spawnflags") or {}
+        flag = flags.get("active" if active else "inactive")
+        offset = float(spawn.get("origin_height", 0))
+    except spawnsmod.SpawnClusterError as e:
+        raise ToolError(str(e)) from e
+    if count < 1:
+        raise ToolError(f"count must be at least 1, got {count}")
+    if mark is not None and not (label and label.strip()):
+        raise ToolError(
+            "label is the spawn region's name in the game's spawn list; pass one, or "
+            "marker=false to add spawns to a region that already has a marker"
+        )
+    if label is not None and ('"' in label or "\n" in label):
+        raise ToolError("label is one line of text with no double quotes")
+    if not isinstance(area, dict) or "min" not in area or "max" not in area:
+        raise ToolError('area must be a box {"min": [x, y, z], "max": [x, y, z]}')
+    lo, hi = area["min"], area["max"]
+    if len(lo) != 3 or len(hi) != 3 or any(a > b for a, b in zip(lo, hi, strict=True)):
+        raise ToolError("area min and max are three numbers each, min <= max on every axis")
+    if not math.isfinite(yaw):
+        raise ToolError("yaw must be a number of degrees")
+
+    named: dict[str, str] = {}
+    marker_named: dict[str, str] = {}
+    if group is not None:
+        try:
+            mapscript._word(group, "group name")
+        except mapscript.ScriptEditError as e:
+            raise ToolError(str(e)) from e
+        named = spawnsmod.names(spawn, group)
+        marker_named = spawnsmod.names(mark, group) if mark is not None else {}
+        wanted = {v.lower() for v in (*named.values(), *marker_named.values())}
+        taken = [
+            (e["index"], v)
+            for e in m.entities()
+            for k, v in e["keys"]
+            if k.lower() in ("targetname", "scriptname") and v.lower() in wanted
+        ]
+        if taken:
+            raise ToolError(
+                f"entity {taken[0][0]} already uses the name {taken[0][1]!r}; pick another group"
+            )
+
+    try:
+        grid = _session_grid(cell, pid)
+        movement = grid.movement
+        width = movement.player_width.value if movement.player_width else None
+        if width is None:
+            raise ToolError(f"profile {pid} states no player width, so spacing cannot be checked")
+        gap = float(spacing if spacing is not None else spec.get("default_spacing") or 0)
+        if not gap > width:
+            raise ToolError(
+                f"spacing {gap:g} must exceed the player width {width:g}: a player standing on "
+                "one spawn would make its neighbour count as occupied"
+            )
+        g = SESSION.grid
+        xs = spawnsmod.lattice(lo[0], hi[0], gap, width, g)
+        ys = spawnsmod.lattice(lo[1], hi[1], gap, width, g)
+        existing, _objectives, _ = anamod._markers(grid.game_map, anamod.roles(pid))
+        avoid = [(s.origin[0], s.origin[1], s.origin[2] - offset) for s in existing]
+        found = spawnsmod.find_spots(grid, xs, ys, lo[2], hi[2], avoid, gap)
+    except spawnsmod.SpawnClusterError as e:
+        raise ToolError(str(e)) from e
+    except (OSError, MemoryError, anamod.AnalysisError) as e:
+        raise ToolError(str(e)) from e
+    if len(found.spots) < count:
+        raise ToolError(
+            f"only {len(found.spots)} of {len(xs) * len(ys)} positions {gap:g} apart in the area "
+            f"can hold a standing player, and {count} were asked for; nothing was placed. "
+            f"Rejected: {found.rejected or 'none'}. Widen the area, lower spacing (above "
+            f"{width:g}), or adjust the z range to the floor's height"
+        )
+    chosen = spawnsmod.choose(found.spots, count, ((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2))
+
+    def num(v: float) -> float | int:
+        v = round(v, 3)
+        return int(v) if float(v).is_integer() else v
+
+    items: list[tuple[str, list[float], dict[str, Any]]] = []
+    facing = str(spawn.get("facing_key") or "angle")
+    for s in chosen:
+        keys: dict[str, Any] = {facing: num(yaw)}
+        if flag is not None:
+            keys["spawnflags"] = flag
+        keys.update(named)
+        items.append((classname, [num(s.x), num(s.y), num(s.floor + offset)], keys))
+    if mark is not None:
+        mx = sum(s.x for s in chosen) / len(chosen)
+        my = sum(s.y for s in chosen) / len(chosen)
+        if g > 0:
+            mx, my = round(mx / g) * g, round(my / g) * g
+        mz = min(s.floor for s in chosen) + offset
+        mkeys: dict[str, Any] = {str(mark.get("label_key") or "description"): label}
+        try:
+            mkeys["spawnflags"] = spawnsmod.by_team(mark, "spawnflags", side, "marker flag")
+        except spawnsmod.SpawnClusterError as e:
+            raise ToolError(str(e)) from e
+        mkeys.update(marker_named)
+        items.append((str(mark["classname"]), [num(mx), num(my), num(mz)], mkeys))
+
+    prepared = [(c, o, mapfile._point_pairs(c, o, k)) for c, o, k in items]
+    candidate = m.copy()
+    try:
+        indices = [candidate.add_entity(pairs) for _c, _o, pairs in prepared]
+    except ValueError as e:
+        raise ToolError(f"{e}; nothing was added") from e
+    SESSION.map = candidate
+
+    notes: list[str] = []
+    for c, o, pairs in prepared:
+        for note in mapfile._placement_notes(c, pairs, o, None):
+            if note not in notes:
+                notes.append(note)
+    out: dict[str, Any] = {
+        "team": side,
+        "spawns": {
+            "classname": classname,
+            "entities": mapfile._index_span(indices[: len(chosen)]),
+            "origins": [p[1][1] for _c, _o, p in prepared[: len(chosen)]],
+            "keys": dict(list(prepared[0][2])[2:]),
+        },
+        "checked": {
+            "positions": len(xs) * len(ys),
+            "standable": len(found.spots),
+            "rejected": found.rejected,
+        },
+    }
+    if mark is not None:
+        out["marker"] = {
+            "classname": prepared[-1][0],
+            "entity": indices[-1],
+            "origin": prepared[-1][2][1][1],
+        }
+    if group is not None:
+        template = str(spec.get("toggle_action") or "")
+        key = str(spec.get("toggle_key") or "targetname")
+        toggle = {}
+        if template and key in named:
+            toggle["spawns"] = template.format(name=named[key])
+        if template and key in marker_named:
+            toggle["marker"] = template.format(name=marker_named[key])
+        out["group"] = {"spawns": named, "marker": marker_named, "toggle": toggle}
+    if notes:
+        out["notes"] = notes
+    out["entities_now"] = candidate.entity_count
+    out["next"] = "map_save to write them; spawn_safety and balance_report measure from them"
+    return out
 
 
 @tool("gameplay", "Lighting report")

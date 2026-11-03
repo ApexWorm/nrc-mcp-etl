@@ -344,8 +344,107 @@ def entity_place(
 
     A classname the profile declares as a brush entity — a door, a trigger — is refused: build
     its brushes with `solid_commit` and `target_classname`, then give it keys with
-    `entity_set_keys`. Nothing reaches disk until `map_save`.
+    `entity_set_keys`. Nothing reaches disk until `map_save`. To add several entities, use
+    `entities_place`: one call, all or none.
     """
+    pairs = _point_pairs(classname, origin, keys)
+    index = _add_entity(pairs)
+    return {
+        "entity": index,
+        "keys": pairs,
+        "notes": _placement_notes(classname, pairs, origin, grid),
+        "entities_now": SESSION.map.entity_count,
+        "next": "call map_save to write it, and validate_profile to check spawns and counts",
+    }
+
+
+@tool("map", "Place several point entities", writes=True)
+def entities_place(entities: list[dict[str, Any]], grid: int | None = None) -> dict:
+    """Add many point entities in one call, all or none: lights, spawns, markers.
+
+    Each item is `{"classname": ..., "origin": [x, y, z], "keys": {...}}`, checked exactly as
+    `entity_place` checks one. Every item is checked before any is added, so a refusal names
+    the item (`entities[3]: ...`) and changes nothing.
+
+    The reply is compact: the new indices, in the order given, and each distinct note once
+    with the items it applies to. Ten lights with the same key produce one note, not ten.
+    Read the notes: a key the profile does not declare is written anyway and does nothing
+    in game if it is misspelt. For team spawns with their region marker, `spawn_cluster`
+    also finds the standing positions. Nothing reaches disk until `map_save`.
+    """
+    m = SESSION.require()
+    if not entities:
+        raise ToolError("no entities given; pass a list of {classname, origin, keys}")
+    prepared = []
+    for i, item in enumerate(entities):
+        where = f"entities[{i}]"
+        if not isinstance(item, dict):
+            raise ToolError(f"{where}: each item is an object {{classname, origin, keys}}")
+        extra = sorted(set(item) - {"classname", "origin", "keys"})
+        if extra:
+            raise ToolError(
+                f"{where}: unknown field(s) {extra}; an item has classname, origin, keys"
+            )
+        classname, origin, keys = item.get("classname"), item.get("origin"), item.get("keys")
+        if not isinstance(classname, str) or not classname:
+            raise ToolError(f"{where}: classname must be a non-empty string")
+        if not isinstance(origin, list) or not all(
+            isinstance(c, (int, float)) and not isinstance(c, bool) for c in origin
+        ):
+            raise ToolError(f"{where}: origin must be a list of three numbers")
+        if keys is not None and not isinstance(keys, dict):
+            raise ToolError(f"{where}: keys must be a mapping of key to value")
+        try:
+            pairs = _point_pairs(classname, origin, keys)
+        except ToolError as e:
+            raise ToolError(f"{where}: {e}") from e
+        prepared.append((classname, origin, pairs))
+
+    # Built on a copy, so an entity the kernel refuses part-way leaves nothing behind.
+    candidate = m.copy()
+    indices = []
+    for i, (_classname, _origin, pairs) in enumerate(prepared):
+        try:
+            indices.append(candidate.add_entity(pairs))
+        except ValueError as e:
+            raise ToolError(f"entities[{i}]: {e}; nothing was added") from e
+    SESSION.map = candidate
+
+    g = grid if grid is not None else SESSION.grid
+    grouped: dict[str, list[int]] = {}
+    off_grid: list[int] = []
+    for i, (classname, origin, pairs) in enumerate(prepared):
+        for note in _profile_notes(classname, pairs):
+            grouped.setdefault(note, []).append(i)
+        if g > 0 and any(float(c) % g for c in origin):
+            off_grid.append(i)
+    if off_grid:
+        note = f"origin off the {g}-unit grid; written as given, not snapped"
+        grouped[note] = off_grid
+    counts: dict[str, int] = {}
+    for classname, _, _ in prepared:
+        counts[classname] = counts.get(classname, 0) + 1
+    return {
+        "placed": len(indices),
+        "entities": _index_span(indices),
+        "classnames": counts,
+        "notes": [{"note": note, "items": _index_span(items)} for note, items in grouped.items()],
+        "entities_now": candidate.entity_count,
+        "next": "call map_save to write them, and validate_profile to check spawns and counts",
+    }
+
+
+def _index_span(indices: list[int]) -> list[int] | dict[str, int]:
+    """Consecutive indices as `{"first", "last"}`, anything else as the list itself."""
+    if len(indices) > 2 and indices == list(range(indices[0], indices[0] + len(indices))):
+        return {"first": indices[0], "last": indices[-1]}
+    return indices
+
+
+def _point_pairs(
+    classname: str, origin: list[float], keys: dict[str, Any] | None
+) -> list[tuple[str, str]]:
+    """The key/value pairs for a point entity, or a refusal. Changes nothing."""
     if "classname" in (keys or {}) or "origin" in (keys or {}):
         raise ToolError("pass classname and origin as their own arguments, not inside keys")
     if len(origin) != 3:
@@ -362,23 +461,19 @@ def entity_place(
             "keys with entity_set_keys."
         )
     pairs = [("classname", classname), ("origin", _value_text("origin", origin))]
-    pairs += [(k, _value_text(k, v)) for k, v in (keys or {}).items()]
+    return pairs + [(k, _value_text(k, v)) for k, v in (keys or {}).items()]
 
-    index = _add_entity(pairs)
 
+def _placement_notes(
+    classname: str, pairs: list[tuple[str, str]], origin: list[float], grid: int | None
+) -> list[str]:
     g = grid if grid is not None else SESSION.grid
     notes = _profile_notes(classname, pairs)
     if g > 0 and any(float(c) % g for c in origin):
         notes.append(
             f"origin {pairs[1][1]} is off the {g}-unit grid; it was written as given, not snapped"
         )
-    return {
-        "entity": index,
-        "keys": pairs,
-        "notes": notes,
-        "entities_now": SESSION.map.entity_count,
-        "next": "call map_save to write it, and validate_profile to check spawns and counts",
-    }
+    return notes
 
 
 @tool("map", "Set entity keys", writes=True, destructive=True, idempotent=True)

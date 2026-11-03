@@ -38,12 +38,6 @@ async def main():
         )
         shell = {"op": "hollow", "solid": box([-32, -32, -32], [2080, 1312, 416]), "thickness": 32}
         await run.call("solid_compile", ir=shell)
-        await run.call(
-            "solid_commit",
-            ir=shell,
-            label="warehouse_shell",
-            textures={"default": textures["wall"], "top": textures["floor"]},
-        )
         divider = {
             "op": "subtract",
             "from": box([1008, 0, 0], [1040, 1280, 384]),
@@ -55,10 +49,45 @@ async def main():
         await run.call(
             "solid_preview", ir=divider, textures={"default": textures["wall"]}, view="sheet"
         )
+        # One batch for every brush: the shell, the divider, cargo and supports. All or none.
+        crate = {"default": textures["crate"], "detail": True}
+        metal = {"default": textures["metal"], "detail": True}
         await run.call(
-            "solid_commit",
-            ir=divider,
-            label="route_divider",
+            "solids_commit",
+            solids=[
+                {
+                    "ir": shell,
+                    "label": "warehouse_shell",
+                    "textures": {"default": textures["wall"], "top": textures["floor"]},
+                },
+                {"ir": divider, "label": "route_divider"},
+                # Cargo creates offset approaches; the northern loading aisle is the longer flank.
+                *(
+                    {
+                        "ir": box([x, y, 0], [x + sx, y + sy, height]),
+                        "label": f"cargo_{i}",
+                        "textures": crate,
+                    }
+                    for i, (x, y, sx, sy, height) in enumerate(
+                        [
+                            (448, 448, 160, 128, 96),
+                            (736, 704, 128, 160, 128),
+                            (384, 960, 128, 128, 96),
+                            (1216, 192, 128, 192, 96),
+                            (1408, 640, 160, 128, 112),
+                            (1664, 960, 128, 128, 96),
+                        ]
+                    )
+                ),
+                *(
+                    {
+                        "ir": box([x, 16, 0], [x + 32, 48, 384]),
+                        "label": f"support_{i}",
+                        "textures": metal,
+                    }
+                    for i, x in enumerate((384, 896, 1408, 1920))
+                ),
+            ],
             textures={"default": textures["wall"]},
         )
         await run.call(
@@ -71,64 +100,41 @@ async def main():
             axis="x",
         )
 
-        # Cargo creates offset approaches; the northern loading aisle is the longer flank.
-        for i, (x, y, sx, sy, height) in enumerate(
-            [
-                (448, 448, 160, 128, 96),
-                (736, 704, 128, 160, 128),
-                (384, 960, 128, 128, 96),
-                (1216, 192, 128, 192, 96),
-                (1408, 640, 160, 128, 112),
-                (1664, 960, 128, 128, 96),
-            ]
-        ):
-            await run.call(
-                "solid_commit",
-                ir=box([x, y, 0], [x + sx, y + sy, height]),
-                label=f"cargo_{i}",
-                textures={"default": textures["crate"], "detail": True},
-            )
-        for i, x in enumerate((384, 896, 1408, 1920)):
-            await run.call(
-                "solid_commit",
-                ir=box([x, 16, 0], [x + 32, 48, 384]),
-                label=f"support_{i}",
-                textures={"default": textures["metal"], "detail": True},
-            )
-
-        # Both teams get six separated slots rather than one placeholder spawn.
-        for _team, cls, x, angle, marker_flag, description in [
-            ("blue", "team_CTF_bluespawn", 160, 0, 2, "Allied Loading Bay"),
-            ("red", "team_CTF_redspawn", 1920, 180, 1, "Axis Relay Room"),
+        # Both teams get six separated slots rather than one placeholder spawn, at positions
+        # spawn_cluster checks for floor and headroom, with the region marker the game needs.
+        for team, x, yaw, label in [
+            ("allies", 160, 0, "Allied Loading Bay"),
+            ("axis", 1920, 180, "Axis Relay Room"),
         ]:
             await run.call(
-                "entity_place",
-                classname="team_WOLF_objective",
-                origin=[x, 640, 24],
-                keys={"description": description, "spawnflags": marker_flag},
+                "spawn_cluster",
+                team=team,
+                count=6,
+                area={"min": [x - 32, 448, 0], "max": [x + 32, 992, 64]},
+                yaw=yaw,
+                label=label,
+                spacing=96,
             )
-            for y in (480, 576, 672, 768, 864, 960):
-                await run.call(
-                    "entity_place",
-                    classname=cls,
-                    origin=[x, y, 24],
-                    keys={"angle": angle, "spawnflags": 3},
-                )
-        await run.call("entity_place", classname="script_multiplayer", origin=[64, 64, 64])
         await run.call(
-            "entity_place",
-            classname="info_player_intermission",
-            origin=[384, 256, 160],
-            keys={"angles": [12, 0, 0], "spawnflags": 3},
+            "entities_place",
+            entities=[
+                {"classname": "script_multiplayer", "origin": [64, 64, 64]},
+                {
+                    "classname": "info_player_intermission",
+                    "origin": [384, 256, 160],
+                    "keys": {"angles": [12, 0, 0], "spawnflags": 3},
+                },
+                *(
+                    {
+                        "classname": "light",
+                        "origin": [x, y, 320],
+                        "keys": {"light": 600, "_color": [1, 0.85, 0.65]},
+                    }
+                    for x in (320, 768, 1280, 1792)
+                    for y in (320, 960)
+                ),
+            ],
         )
-        for x in (320, 768, 1280, 1792):
-            for y in (320, 960):
-                await run.call(
-                    "entity_place",
-                    classname="light",
-                    origin=[x, y, 320],
-                    keys={"light": 600, "_color": [1, 0.85, 0.65]},
-                )
 
         await run.call(
             "objective_place",

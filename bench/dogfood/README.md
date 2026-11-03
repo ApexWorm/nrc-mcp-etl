@@ -14,9 +14,15 @@ mise run bench:dogfood -- movement
 
 | Scenario | Exercises |
 | --- | --- |
-| `depot` | Two routes through a warehouse, six spawns per team, dynamite objective and scripted win |
+| `depot` | Two routes through a warehouse, six spawns per team, dynamite objective and scripted win; built with the batch tools (`solids_commit`, `spawn_cluster`, `entities_place`) |
 | `constructible` | Workshop pit, stairs, constructible bridge, horizontal pipe, parametric editing and checkpoint restoration |
 | `movement` | Standing stair/arch route, crouch tunnel, prone vent, route changes after lowering a ceiling and restoring it |
+
+The depot once placed every brush and entity with its own call: 67 calls and 84,392 bytes of
+response text. Committing its 12 solids with one `solids_commit`, each team's spawns and region
+marker with one `spawn_cluster`, and the script entity, camera and eight lights with one
+`entities_place` brings it to 35 calls and 75,864 bytes; the spawn positions are unchanged.
+Most of the remaining bytes are `balance_report`, `spawn_safety` and `profile_summary`.
 
 These are small development maps. Compile and package success do not establish that an
 objective works in the engine or that a layout is balanced in multiplayer. Analysis omits

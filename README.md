@@ -369,8 +369,8 @@ The whole map can be made through tool calls, with nothing written by hand. With
 | Step | Tools |
 | --- | --- |
 | Start the file | `map_new` |
-| Rooms, walls, trim | `solid_commit` (`textures` per face direction; `detail` for trim and props), `patch_commit` for columns, arches and bevels |
-| Spawns, markers, intermission, lights | `entity_place` (team spawns, `team_WOLF_objective` markers with a description, `script_multiplayer`, `info_player_intermission`, `light`) |
+| Rooms, walls, trim | `solid_commit` (`textures` per face direction; `detail` for trim and props), `solids_commit` for many at once, `patch_commit` for columns, arches and bevels |
+| Spawns, markers, intermission, lights | `spawn_cluster` (a team's spawns at checked standing positions plus their `team_WOLF_objective` marker, optionally named for a script to toggle); `entities_place` for `script_multiplayer`, `info_player_intermission`, `light` and the rest in one call |
 | Objectives | `objective_place` (`dynamite` or `constructible`): trigger, objective, links and script events in one call |
 | The map script | `script_set_event` (respawn times, `wm_setwinner`, `setautospawn`, the objectives' events), `script_show` to read it back |
 | Check | `validate`, `validate_profile`, `spawn_safety`, `balance_report`, `lighting_report`, `structural_audit` then `brush_set_detail` |
@@ -427,6 +427,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `map_save` | Write it back. Refuses if the map did not round-trip when opened, or if the write would destroy playable space. |
 | `query_entities` | Entities, filterable by classname. |
 | `entity_place` | Add a point entity — a spawn, a script or objective marker. Keys the profile does not declare come back as notes. |
+| `entities_place` | Add many point entities in one call, all or none, with a compact reply: new indices and each distinct note once. |
 | `entity_set_keys` · `entity_remove_keys` | Set or remove keys on any entity, brush entities and worldspawn included. |
 | `brush_geometry` | Exact vertices and derived properties of one brush. |
 | `validate` | Geometry and file-format findings. |
@@ -452,6 +453,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `solid_compile` | Compile geometry and report it, touching nothing. |
 | `solid_preview` | Compile and render, without committing. |
 | `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail; `new_entity` makes a second door or trigger of a class. |
+| `solids_commit` | Commit many solids in one call, all or none (sidecar included); a shared `textures` default and a compact per-label reply. |
 | `brush_set_detail` | Mark existing brushes detail (or structural again); takes `structural_audit` findings directly. |
 | `patch_commit` | Curved surfaces as patches: a column, an arch, a quarter-round bevel. |
 | `solid_inspect` · `solid_list` | Structure of a recorded shape; everything recorded. |
@@ -493,6 +495,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `sightline_report` | Sightline length distribution and power positions. |
 | `movement_check` | Clearances against verified movement constants. |
 | `spawn_safety` | Exits per spawn, and distance to the nearest enemy spawn. |
+| `spawn_cluster` | Place N team spawns in an area at positions checked for floor, headroom and support with the full player box, facing a yaw, plus the region marker; classnames, flags and script names from the profile's `spawn_cluster` recipe. `group` names them for a script (`alertentity`) to toggle. |
 | `lighting_report` | Lights, ambient and minimum light as q3map2 reads them; warns on a map that would compile black, notes walkable areas far from any light. |
 | `playable_space_diff` | What an edit did to the space a player can stand in. |
 
