@@ -181,7 +181,7 @@ def script_report(
             messages.append((_log_time(line), clean[clean.index(marker) :].strip()))
     spots: dict[str, dict] = {}
     if goals_file is not None:
-        table = botgoals.read_goals(goals_file.read_text(), goals_spec)
+        table = botgoals.read_goals(goals_file.read_text(errors="replace"), goals_spec)
         table.pop("Version", None)
         sides = {int(v["bit"]): str(v["side"]) for v in (goals_spec.get("teams") or {}).values()}
         for name, row in table.items():
@@ -194,7 +194,9 @@ def script_report(
     functions: dict = {}
     triggers: list = []
     if script_file is not None:
-        parsed = botgoals.read_script(script_file.read_text(), script_spec)
+        parsed = botgoals.read_script(
+            script_file.read_text(errors="replace"), script_spec, strict=False
+        )
         functions, triggers = parsed["functions"], parsed["triggers"]
     switched = []
     for t, msg in messages:

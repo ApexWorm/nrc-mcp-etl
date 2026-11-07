@@ -872,194 +872,773 @@ def script_text_for(
 
 
 # --------------------------------------------------------------------------------------
-# Reading them back (the subset of GameMonkey both files use)
+# GameMonkey: reading the add-on's scripts, mirroring them, writing them back
 # --------------------------------------------------------------------------------------
+#
+# Both files are GameMonkey, the add-on's script language, read here with the language's own
+# grammar: the scanner and parser of gmscriptex, the GameMonkey build Omni-bot 0.93 embeds
+# (github.com/jswigart/gmscriptex at 2d24f6e, gmsrc_ex/src/gm/gmScanner.l and gmParser.y;
+# the Omni-bot tree vendored with ET: Legacy carries only the game interface headers). The
+# reader is lossless: every byte of a file is in exactly one token, comments and whitespace
+# included, so the tokens joined give the file back byte for byte, and a rewrite (a mirror)
+# touches only the tokens it changes.
 
-_TOKEN = re.compile(
-    r'\s+|//[^\n]*|/\*.*?\*/|(?P<str>"(?:\\.|[^"\\])*")|(?P<num>-?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?)'
-    r"|(?P<id>[A-Za-z_][A-Za-z0-9_]*)|(?P<op>[{}()=,;.\[\]<>+*/!&|-])",
+# gmScanner.l:48-72; "&&" and "||" scan as `and` and `or` (gmScanner.l:86-87).
+_GM_KEYWORDS = frozenset(
+    [
+        "local",
+        "global",
+        "member",
+        "and",
+        "or",
+        "if",
+        "else",
+        "while",
+        "for",
+        "foreach",
+        "in",
+        "dowhile",
+        "break",
+        "continue",
+        "null",
+        "return",
+        "function",
+        "table",
+        "this",
+        "true",
+        "false",
+        "fork",
+        "switch",
+        "case",
+        "default",
+    ]
+)
+
+# One token per match, in gmScanner.l's terms: whitespace (:131), comments (:31-46; an
+# unclosed block comment runs to the end of the file), strings in double quotes with
+# backslash escapes or in backquotes with `` for a backquote (:83-84; flex's `.` stops at a
+# newline), character constants (:79), numbers (:76-82, longest match first), identifiers
+# and keywords (:48-74) and operators (:86-129, longest first). Anything else is the
+# scanner's TOKEN_ERROR (:132).
+_GM_LEX = re.compile(
+    r"(?P<ws>[ \t\v\r\n\f]+)"
+    r"|(?P<comment>/\*.*?(?:\*/|\Z)|//[^\n]*)"
+    r'|(?P<str>"(?:\\[^\n]|[^\\"])*"|`(?:[^`]|``)*`)'
+    r"|(?P<char>'(?:\\[^\n]|[^\\'])+')"
+    r"|(?P<num>0[xX][0-9a-fA-F]+|0[bB][01]+"
+    r"|\d+[eE][-+]?\d+[fF]?|\d*\.\d+(?:[eE][-+]?\d+)?[fF]?|\d+\.\d*(?:[eE][-+]?\d+)?[fF]?|\d+)"
+    r"|(?P<id>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|(?P<op>>>=|<<=|&&|\|\||[-+*/%&|^]=|>>|<<|\+\+|--|<=|>=|==|!=|[;{},=()\[\].!\-+*/%<>&|^~:])",
     re.S,
 )
 
+_GM_TRIVIA = ("ws", "comment")
 
-def tokens(text: str) -> list[tuple[str, str]]:
-    out, pos = [], 0
-    while pos < len(text):
-        m = _TOKEN.match(text, pos)
-        if not m:
-            raise BotGoalsError(f"unexpected character {text[pos]!r} at byte {pos}")
+# Binary operators by precedence, loosest first, all left-associative
+# (gmParser.y:467-617, logical_or_expression down to multiplicative_expression).
+_GM_BINARY = {
+    "or": 1,
+    "||": 1,
+    "and": 2,
+    "&&": 2,
+    "|": 3,
+    "^": 4,
+    "&": 5,
+    "==": 6,
+    "!=": 6,
+    "<": 7,
+    ">": 7,
+    "<=": 7,
+    ">=": 7,
+    "<<": 8,
+    ">>": 8,
+    "+": 9,
+    "-": 9,
+    "*": 10,
+    "/": 10,
+    "%": 10,
+}
+_GM_UNARY = frozenset(("++", "--", "+", "-", "~", "!"))  # gmParser.y:619-657
+_GM_ASSIGN = frozenset(("=", ">>=", "<<=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="))
+# Nodes a postfix_expression can be: the left side of an assignment (gmParser.y:393-447).
+_GM_POSTFIX = frozenset(
+    ("id", "dotid", "this", "num", "char", "str", "bool", "null", "table", "func", "paren")
+    + ("index", "call", "method", "dot")
+)
+
+
+def gm_lex(text: str) -> list[tuple[str, str, int]]:
+    """Every token of a GameMonkey text as (kind, text, offset), whitespace and comments
+    included: the texts joined are the input."""
+    out: list[tuple[str, str, int]] = []
+    pos = 0
+    keywords = _GM_KEYWORDS
+    for m in _GM_LEX.finditer(text):
+        at = m.start()
+        if at != pos:
+            break
+        kind, v = m.lastgroup, m.group()
+        if kind == "id" and v in keywords:
+            kind = "kw"
+        out.append((kind, v, at))
         pos = m.end()
-        for kind in ("str", "num", "id", "op"):
-            if m.group(kind) is not None:
-                out.append((kind, m.group(kind)))
+    if pos < len(text):
+        line = text.count("\n", 0, pos) + 1
+        raise BotGoalsError(f"line {line}: unexpected character {text[pos]!r} at byte {pos}")
     return out
 
 
-class _Parser:
-    def __init__(self, toks, vectors: tuple[str, ...]):
-        self.t, self.i, self.vectors = toks, 0, vectors
+def gm_string(token: str) -> str:
+    """The value of a string token: backslash escapes (decimal \\ddd included) in double
+    quotes, `` in backquotes (gmCodeTree.cpp:473-547, gmProcess*QuoteString)."""
+    if token.startswith("`"):
+        return token[1:-1].replace("``", "`")
+    body, out, i = token[1:-1], [], 0
+    if "\\" not in body:
+        return body
+    esc = {"a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+    while i < len(body):
+        c = body[i]
+        if c == "\\" and i + 1 < len(body):
+            d = body[i + 1]
+            if d.isdigit():
+                j = i + 1
+                while j < len(body) and j < i + 4 and body[j].isdigit():
+                    j += 1
+                out.append(chr(int(body[i + 1 : j]) & 0xFF))
+                i = j
+                continue
+            out.append(esc.get(d, d))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
-    def peek(self, k=0):
-        return self.t[self.i + k] if self.i + k < len(self.t) else ("eof", "")
 
-    def take(self, value=None):
-        tok = self.peek()
-        if value is not None and tok[1] != value:
-            raise BotGoalsError(f"expected {value!r}, got {tok[1]!r} (token {self.i})")
-        self.i += 1
-        return tok
+class GmNode:
+    """A parse tree node over the significant tokens [lo, hi)."""
 
-    def value(self):
-        kind, v = self.peek()
-        if kind == "str":
-            self.take()
-            return bytes(v[1:-1], "latin-1").decode("unicode_escape")
-        if kind == "num":
-            self.take()
-            return float(v) if any(c in v for c in ".eE") else int(v)
-        if v == "{":
-            return self.table()
-        if kind == "id" and v in self.vectors:
-            self.take()
-            self.take("(")
-            args = [self.value()]
-            while self.peek()[1] == ",":
-                self.take(",")
-                args.append(self.value())
-            self.take(")")
-            if len(args) != 3 or not all(isinstance(a, (int, float)) for a in args):
-                raise BotGoalsError(f"{v} takes three numbers")
-            return tuple(float(a) for a in args)
-        if kind == "id" and v in ("true", "false", "null"):
-            self.take()
-            return {"true": True, "false": False, "null": None}[v]
-        raise BotGoalsError(f"unsupported value {v!r} (token {self.i})")
+    __slots__ = ("kind", "lo", "hi", "kids", "value")
 
-    def table(self):
-        self.take("{")
+    def __init__(self, kind: str, lo: int, hi: int, kids: list | None = None, value: Any = None):
+        self.kind, self.lo, self.hi, self.kids, self.value = kind, lo, hi, kids or [], value
+
+    def __repr__(self) -> str:
+        return f"GmNode({self.kind}, {self.value!r}, {len(self.kids)} kids)"
+
+
+class GmScript:
+    """A parsed GameMonkey text. `tokens` hold every byte; the tree indexes the significant
+    tokens (not whitespace or comments)."""
+
+    def __init__(self, text: str):
+        self.text = text
+        self.tokens = gm_lex(text)
+        self.sig = [i for i, t in enumerate(self.tokens) if t[0] not in _GM_TRIVIA]
+        self.k = [self.tokens[i][0] for i in self.sig] + ["eof"]
+        self.v = [self.tokens[i][1] for i in self.sig] + [""]
+        self.p = 0
+        self.program = self._program()
+
+    # -- positions -----------------------------------------------------------------------
+
+    def offset(self, at: int) -> int:
+        if at >= len(self.sig):
+            return len(self.text)
+        return self.tokens[self.sig[at]][2]
+
+    def line(self, at: int) -> int:
+        return self.text.count("\n", 0, self.offset(at)) + 1
+
+    def span(self, node: GmNode) -> tuple[int, int]:
+        """The node's byte range, without the whitespace and comments around it."""
+        last = self.tokens[self.sig[node.hi - 1]]
+        return self.offset(node.lo), last[2] + len(last[1])
+
+    def source(self, node: GmNode) -> str:
+        a, b = self.span(node)
+        return self.text[a:b]
+
+    def compact(self, node: GmNode) -> str:
+        """The node's tokens without whitespace or comments, e.g. `Util.MapDebugPrint`."""
+        return "".join(self.v[node.lo : node.hi])
+
+    def emit(self) -> str:
+        return "".join(t[1] for t in self.tokens)
+
+    def walk(self):
+        """Every node with the name of the innermost named function it is in (None outside
+        any): a function is named by the table field, variable or assignment that holds it."""
+        stack: list[tuple[GmNode, str | None]] = [(self.program, None)]
+        while stack:
+            node, fn = stack.pop()
+            if node.kind == "func" and node.value:
+                fn = node.value
+            yield node, fn
+            stack.extend((k, fn) for k in reversed(node.kids) if k is not None)
+
+    # -- the parser (gmParser.y) ---------------------------------------------------------
+
+    def _fail(self, want: str):
+        got = self.v[self.p] or "the end of the file"
+        raise BotGoalsError(f"line {self.line(self.p)}: expected {want}, got {got!r}")
+
+    def _take(self, value: str) -> int:
+        if self.v[self.p] != value or self.k[self.p] not in ("op", "kw"):
+            self._fail(repr(value))
+        self.p += 1
+        return self.p - 1
+
+    def _is(self, value: str) -> bool:
+        return self.v[self.p] == value and self.k[self.p] in ("op", "kw")
+
+    def _ident(self) -> str:
+        if self.k[self.p] != "id":
+            self._fail("a name")
+        self.p += 1
+        return self.v[self.p - 1]
+
+    def _program(self) -> GmNode:
+        # program: statement_list (gmParser.y:127-143). A file of only comments is taken as
+        # empty rather than refused.
+        kids = []
+        while self.k[self.p] != "eof":
+            kids.append(self._statement())
+        return GmNode("program", 0, self.p, [k for k in kids if k is not None])
+
+    def _compound(self) -> GmNode:
+        lo = self._take("{")  # gmParser.y:168-178
+        kids = []
+        while not self._is("}"):
+            if self.k[self.p] == "eof":
+                self._fail("'}'")
+            kids.append(self._statement())
+        self.p += 1
+        return GmNode("block", lo, self.p, [k for k in kids if k is not None])
+
+    def _paren_expr(self) -> GmNode:
+        self._take("(")
+        e = self._expr()
+        self._take(")")
+        return e
+
+    @staticmethod
+    def _name_function(value: GmNode | None, name: str | None):
+        if value is not None and value.kind == "func" and name and not value.value:
+            value.value = name
+
+    def _statement(self) -> GmNode | None:  # noqa: C901 - one branch per grammar rule
+        lo, v, k = self.p, self.v[self.p], self.k[self.p]
+        if k == "op" and v == ";":  # expression_statement ';' (gmParser.y:208-217)
+            self.p += 1
+            return None
+        if k == "kw":
+            if v in ("local", "global", "member"):  # var_statement (gmParser.y:180-206)
+                self.p += 1
+                name = self._ident()
+                kids = []
+                if self._is("="):
+                    self.p += 1
+                    kids.append(self._expr())
+                    self._name_function(kids[0], name)
+                self._take(";")
+                return GmNode("var", lo, self.p, kids, (v, name))
+            if v == "if":  # selection_statement (gmParser.y:219-257)
+                self.p += 1
+                kids = [self._paren_expr(), self._compound()]
+                if self._is("else"):
+                    self.p += 1
+                    kids.append(self._statement() if self._is("if") else self._compound())
+                return GmNode("if", lo, self.p, kids)
+            if v == "fork":
+                self.p += 1
+                name = self._ident() if self.k[self.p] == "id" else None
+                return GmNode("fork", lo, self.p, [self._compound()], name)
+            if v == "switch":  # with case_selection_statement (gmParser.y:259-326)
+                self.p += 1
+                kids = [self._paren_expr()]
+                self._take("{")
+                while not self._is("}"):
+                    kids.append(self._case())
+                if len(kids) == 1:
+                    self._fail("'case' or 'default'")
+                self.p += 1
+                return GmNode("switch", lo, self.p, kids)
+            if v in ("while", "dowhile"):  # iteration_statement (gmParser.y:328-371)
+                self.p += 1
+                return GmNode(v, lo, self.p, [self._paren_expr(), self._compound()])
+            if v == "for":
+                self.p += 1
+                self._take("(")
+                kids: list = [None if self._is(";") else self._assignment()]
+                self._take(";")
+                kids.append(None if self._is(";") else self._expr())
+                self._take(";")
+                kids.append(None if self._is(")") else self._assignment())
+                self._take(")")
+                kids.append(self._compound())
+                return GmNode("for", lo, self.p, kids)
+            if v == "foreach":
+                self.p += 1
+                self._take("(")
+                names = [self._ident()]
+                if self._is("and") or self._is("&&"):
+                    self.p += 1
+                    names.append(self._ident())
+                self._take("in")
+                kids = [self._expr()]
+                self._take(")")
+                kids.append(self._compound())
+                return GmNode("foreach", lo, self.p, kids, tuple(names))
+            if v in ("continue", "break"):  # jump_statement (gmParser.y:373-391)
+                self.p += 1
+                self._take(";")
+                return GmNode(v, lo, self.p)
+            if v == "return":
+                self.p += 1
+                kids = [] if self._is(";") else [self._expr()]
+                self._take(";")
+                return GmNode("return", lo, self.p, kids)
+        node = self._assignment()
+        self._take(";")
+        return GmNode("expr", lo, self.p, [node])
+
+    def _case(self) -> GmNode:
+        lo = self.p
+        if self._is("default"):
+            self.p += 1
+            self._take(":")
+            return GmNode("default", lo, self.p, [self._compound()])
+        self._take("case")
+        # postfix_case_expression: a name, .name, this or a constant, then [i] and .name.
+        start = self.p
+        if self._is("."):
+            self.p += 1
+            node = GmNode("dotid", start, self.p + 1, value=self._ident())
+        elif self.k[self.p] == "id":
+            node = GmNode("id", start, self.p + 1, value=self._ident())
+        elif self._is("this"):
+            self.p += 1
+            node = GmNode("this", start, self.p)
+        else:
+            node = self._constant()
+            if node is None:
+                self._fail("a case value")
+        while True:
+            if self._is("["):
+                self.p += 1
+                i = self._expr()
+                self._take("]")
+                node = GmNode("index", start, self.p, [node, i])
+            elif self._is("."):
+                self.p += 1
+                node = GmNode("dot", start, self.p + 1, [node], self._ident())
+            else:
+                break
+        self._take(":")
+        kids = [node]
+        if self._is("{"):
+            kids.append(self._compound())
+        return GmNode("case", lo, self.p, kids)
+
+    def _assignment(self) -> GmNode:
+        lhs = self._expr()
+        if self.v[self.p] in _GM_ASSIGN and self.k[self.p] == "op":
+            if lhs.kind not in _GM_POSTFIX:
+                self._fail("';' (only a name, field or call is assigned to)")
+            op = self.v[self.p]
+            self.p += 1
+            rhs = self._expr()
+            if op == "=":
+                name = lhs.value if lhs.kind in ("id", "dotid", "dot") else None
+                self._name_function(rhs, name)
+            return GmNode("assign", lhs.lo, self.p, [lhs, rhs], op)
+        return lhs
+
+    def _expr(self, least: int = 1) -> GmNode:
+        left = self._unary()
+        while True:
+            k = self.k[self.p]
+            prec = _GM_BINARY.get(self.v[self.p]) if k in ("op", "kw") else None
+            if prec is None or prec < least:
+                return left
+            op = self.v[self.p]
+            self.p += 1
+            right = self._expr(prec + 1)
+            left = GmNode("bin", left.lo, right.hi, [left, right], op)
+
+    def _unary(self) -> GmNode:
+        if self.k[self.p] == "op" and self.v[self.p] in _GM_UNARY:
+            lo, op = self.p, self.v[self.p]
+            self.p += 1
+            operand = self._unary()
+            return GmNode("un", lo, operand.hi, [operand], op)
+        return self._postfix()
+
+    def _args(self, close: str) -> list[GmNode]:
+        args: list[GmNode] = []
+        if not self._is(close):
+            args.append(self._expr())
+            while self._is(","):
+                self.p += 1
+                args.append(self._expr())
+        self._take(close)
+        return args
+
+    def _postfix(self) -> GmNode:
+        node = self._primary()
+        lo = node.lo
+        while self.k[self.p] == "op":  # gmParser.y:659-696
+            v = self.v[self.p]
+            if v == "[":
+                self.p += 1
+                i = self._expr()
+                self._take("]")
+                node = GmNode("index", lo, self.p, [node, i])
+            elif v == "(":
+                self.p += 1
+                node = GmNode("call", lo, -1, [node, *self._args(")")])
+                node.hi = self.p
+            elif v == ":":
+                self.p += 1
+                name = self._ident()
+                self._take("(")
+                node = GmNode("method", lo, -1, [node, *self._args(")")], name)
+                node.hi = self.p
+            elif v == ".":
+                self.p += 1
+                node = GmNode("dot", lo, self.p + 1, [node], self._ident())
+            else:
+                break
+        return node
+
+    def _constant(self) -> GmNode | None:
+        lo, k, v = self.p, self.k[self.p], self.v[self.p]
+        if k == "num":
+            self.p += 1
+            return GmNode("num", lo, self.p, value=v)
+        if k == "char":
+            self.p += 1
+            return GmNode("char", lo, self.p, value=v)
+        if k == "str":  # constant_string_list: adjacent strings join (gmParser.y:938-975)
+            parts = []
+            while self.k[self.p] == "str":
+                parts.append(gm_string(self.v[self.p]))
+                self.p += 1
+            return GmNode("str", lo, self.p, value="".join(parts))
+        if k == "kw" and v in ("true", "false"):
+            self.p += 1
+            return GmNode("bool", lo, self.p, value=v == "true")
+        if k == "kw" and v == "null":
+            self.p += 1
+            return GmNode("null", lo, self.p)
+        return None
+
+    def _primary(self) -> GmNode:  # gmParser.y:809-839
+        lo, k, v = self.p, self.k[self.p], self.v[self.p]
+        if k == "id":
+            self.p += 1
+            return GmNode("id", lo, self.p, value=v)
+        if k == "op" and v == ".":
+            self.p += 1
+            return GmNode("dotid", lo, self.p + 1, value=self._ident())
+        if k == "kw" and v == "this":
+            self.p += 1
+            return GmNode("this", lo, self.p)
+        const = self._constant()
+        if const is not None:
+            return const
+        if (k == "kw" and v == "table") or (k == "op" and v == "{"):
+            return self._table()
+        if k == "kw" and v == "function":  # function_constructor (gmParser.y:735-747)
+            self.p += 1
+            self._take("(")
+            params = []
+            if not self._is(")"):
+                while True:
+                    plo = self.p
+                    name = self._ident()
+                    default = []
+                    if self._is("="):
+                        self.p += 1
+                        default = [self._expr()]
+                    params.append(GmNode("param", plo, self.p, default, name))
+                    if not self._is(","):
+                        break
+                    self.p += 1
+            self._take(")")
+            body = self._compound()
+            return GmNode("func", lo, self.p, [*params, body])
+        if k == "op" and v == "(":
+            self.p += 1
+            e = self._expr()
+            self._take(")")
+            return GmNode("paren", lo, self.p, [e])
+        self._fail("a value")
+
+    def _table(self) -> GmNode:
+        # table_constructor: table( fields ) or { fields [,] } (gmParser.y:709-733); a field is
+        # a value, name = value or [integer] = value (:760-782).
+        lo = self.p
+        close = ")" if self._is("table") else "}"
+        if close == ")":
+            self.p += 1
+            self._take("(")
+        else:
+            self._take("{")
+        fields: list[GmNode] = []
+        while not self._is(close):
+            flo = self.p
+            if self.k[self.p] == "id" and self.v[self.p + 1] == "=" and self.k[self.p + 1] == "op":
+                name = self.v[self.p]
+                self.p += 2
+                value = self._expr()
+                self._name_function(value, name)
+                fields.append(GmNode("field", flo, self.p, [value], name))
+            elif self._is("["):
+                self.p += 1
+                if self.k[self.p] != "num" or not self.v[self.p].isdigit():
+                    self._fail("an integer index")
+                key = int(self.v[self.p])
+                self.p += 1
+                self._take("]")
+                self._take("=")
+                fields.append(GmNode("field", flo, self.p, [self._expr()], key))
+            else:
+                value = self._expr()
+                fields.append(GmNode("field", flo, self.p, [value], None))
+            if self._is(","):
+                self.p += 1
+                if close == ")" and self._is(")"):
+                    self._fail("a field")
+            elif not self._is(close):
+                self._fail(f"',' or {close!r}")
+        self.p += 1
+        return GmNode("table", lo, self.p, fields)
+
+
+def gm_parse(text: str) -> GmScript:
+    """A GameMonkey text parsed with the add-on's grammar; BotGoalsError (with its line) when
+    the add-on's compiler would refuse it."""
+    return GmScript(text)
+
+
+def _gm_number(text: str) -> int | float:
+    if text[:2] in ("0x", "0X"):
+        return int(text, 16)
+    if text[:2] in ("0b", "0B"):
+        return int(text[2:], 2)
+    if any(c in text for c in ".eEfF"):
+        return float(text.rstrip("fF"))
+    return int(text)
+
+
+def _gm_value(script: GmScript, node: GmNode, vectors: tuple[str, ...]):
+    """A literal value: numbers (signed), strings, booleans, null, vectors of three numbers
+    and tables keyed by name, [index] or position."""
+    kind = node.kind
+    if kind == "num":
+        return _gm_number(node.value)
+    if kind == "un" and node.value in ("-", "+") and node.kids[0].kind == "num":
+        v = _gm_number(node.kids[0].value)
+        return -v if node.value == "-" else v
+    if kind == "str":
+        return node.value
+    if kind == "bool":
+        return node.value
+    if kind == "null":
+        return None
+    if kind == "table":
         out: dict = {}
         n = 0
-        while self.peek()[1] != "}":
-            if self.peek()[0] in ("id", "str") and self.peek(1)[1] == "=":
-                key = self.take()[1]
-                key = key[1:-1] if key.startswith('"') else key
-                self.take("=")
-                out[key] = self.value()
-            elif self.peek()[1] == "[":
-                self.take("[")
-                key = self.value()
-                self.take("]")
-                self.take("=")
-                out[key] = self.value()
-            else:
-                out[n] = self.value()
+        for f in node.kids:
+            if f.value is None:
+                out[n] = _gm_value(script, f.kids[0], vectors)
                 n += 1
-            if self.peek()[1] in (",", ";"):
-                self.take()
-            elif self.peek()[1] != "}":
-                raise BotGoalsError(
-                    f"expected ',' or '}}', got {self.peek()[1]!r} (token {self.i})"
-                )
-        self.take("}")
+            else:
+                out[f.value] = _gm_value(script, f.kids[0], vectors)
         return out
+    if kind == "call" and node.kids[0].kind == "id" and node.kids[0].value in vectors:
+        args = [_gm_value(script, a, vectors) for a in node.kids[1:]]
+        if len(args) != 3 or not all(
+            isinstance(a, (int, float)) and not isinstance(a, bool) for a in args
+        ):
+            raise BotGoalsError(
+                f"line {script.line(node.lo)}: {node.kids[0].value} takes three numbers"
+            )
+        return tuple(float(a) for a in args)
+    raise BotGoalsError(
+        f"line {script.line(node.lo)}: unsupported value {script.source(node)[:40]!r}"
+    )
 
 
 def read_goals(text: str, goals_spec: dict) -> dict:
-    """The goal table a goals script sets, for the literal subset goal files use (numbers,
-    strings, booleans, vectors and nested tables, keyed by name or [value])."""
+    """The goal table a goals script sets with `global <table> = { ... };`, read as literals
+    (numbers, strings, booleans, vectors and nested tables keyed by name, [index] or
+    position). The whole file must parse."""
     table = str(goals_spec["table"])
-    p = _Parser(tokens(text), tuple(str(v) for v in goals_spec["vector_names"]))
-    p.take("global")
-    if p.take()[1] != table:
-        raise BotGoalsError(f"the script does not set {table}")
-    p.take("=")
-    out = p.table()
-    if p.peek()[1] == ";":
-        p.take()
-    if p.peek()[0] != "eof":
-        raise BotGoalsError(f"trailing tokens after the table: {p.peek()[1]!r}")
-    return out
+    script = gm_parse(text)
+    vectors = tuple(str(v) for v in goals_spec["vector_names"])
+    for st in script.program.kids:
+        if st.kind == "var" and st.value == ("global", table) and st.kids:
+            if st.kids[0].kind != "table":
+                raise BotGoalsError(f"{table} is not set to a table")
+            return _gm_value(script, st.kids[0], vectors)
+    raise BotGoalsError(f"the script does not set {table}")
 
 
-def _str(tok: tuple[str, str]) -> str:
-    return bytes(tok[1][1:-1], "latin-1").decode("unicode_escape")
+def _gm_strings(node: GmNode) -> list[str] | None:
+    if node.kind == "str":
+        return [node.value]
+    if node.kind == "table" and all(f.kids[0].kind == "str" for f in node.kids):
+        return [f.kids[0].value for f in node.kids]
+    return None
 
 
-def read_script(text: str, script_spec: dict) -> dict:
-    """What a map script defines and registers, for the statements the written scripts use:
-    its globals, its functions (those of the map table and the map-load function) with the
-    goals each one switches (team expression, on, names) and the messages it prints, and the
-    trigger registrations with the function each calls. Brackets must pair up and every
-    registration must name a defined function. The statement names are the profile's
-    (`bots.script`)."""
+def read_script(text: str, script_spec: dict, *, strict: bool = True) -> dict:
+    """What a map script defines and registers. Its globals; its named functions (table
+    fields, variables and assignments holding a function) with the goal switches each makes
+    with literal arguments (team expression, on, names) and the messages it prints with a
+    literal; the trigger registrations `<on_trigger>("name", <map_table>.function)`; the
+    functions those name that the script does not define (`undefined`, an error when
+    `strict`; a shipped script or two registers a misspelt one, which the add-on passes as
+    null); and how many switches and registrations take computed arguments, which are not
+    followed. The whole file must parse with the add-on's
+    grammar. The statement names are the profile's (`bots.script`)."""
     table, on_trigger = str(script_spec["map_table"]), str(script_spec["on_trigger"])
     available = str(script_spec["set_available"])
-    debug = str(script_spec["debug_print"]).split(".")[-1]
-    toks = tokens(text)
+    debug = str(script_spec["debug_print"])
     stack: list[str] = []
     pairs = {"}": "{", ")": "(", "]": "["}
-    for _kind, v in toks:
+    for kind, v, _at in gm_lex(text):
+        if kind != "op":
+            continue
         if v in "{([":
             stack.append(v)
         elif v in pairs and (not stack or stack.pop() != pairs[v]):
             raise BotGoalsError(f"unbalanced {v!r}")
     if stack:
         raise BotGoalsError(f"unclosed {stack[-1]!r}")
-    out: dict[str, Any] = {"globals": [], "functions": {}, "triggers": []}
-    depth = 0
-    current: list[tuple[str, int]] = []  # (function, brace depth of its body)
-    i = 0
-    while i < len(toks):
-        kind, v = toks[i]
-        if v == "global" and i + 1 < len(toks):
-            out["globals"].append(toks[i + 1][1])
-        if (
-            kind == "id"
-            and i + 3 < len(toks)
-            and toks[i + 1][1] == "="
-            and toks[i + 2][1] == "function"
-        ):
-            # name = function( args ) { body }
-            j = i + 3
-            while toks[j][1] != "{":
-                j += 1
-            out["functions"][v] = {"switches": [], "messages": []}
-            current.append((v, depth + 1))
-        elif v == "{":
-            depth += 1
-        elif v == "}":
-            if current and current[-1][1] == depth:
-                current.pop()
-            depth -= 1
-        elif v == on_trigger and toks[i + 1][1] == "(":
-            if toks[i + 2][0] != "str" or [t[1] for t in toks[i + 3 : i + 6]] != [",", table, "."]:
-                raise BotGoalsError(f"{on_trigger} takes a name and a {table} function")
-            out["triggers"].append((_str(toks[i + 2]), toks[i + 6][1]))
-        elif v == available and current:
-            j = i + 2
-            team = []
-            while toks[j][1] != ",":
-                team.append(toks[j][1])
-                j += 1
-            on = toks[j + 1][1]
-            if toks[j + 2][1] != "," or toks[j + 3][1] != "{":
-                raise BotGoalsError(f"{available} takes a team, true/false and a name table")
-            names = []
-            k = j + 4
-            while toks[k][1] != "}":
-                if toks[k][0] == "str":
-                    names.append(_str(toks[k]))
-                k += 1
-            out["functions"][current[-1][0]]["switches"].append(
-                ("".join(team), on == "true", names)
-            )
-        elif v == debug and current and toks[i + 2][0] == "str":
-            out["functions"][current[-1][0]]["messages"].append(_str(toks[i + 2]))
-        i += 1
-    missing = [f for _t, f in out["triggers"] if f not in out["functions"]]
-    if missing:
-        raise BotGoalsError(f"{on_trigger} names functions the script does not define: {missing}")
+    script = gm_parse(text)
+    out: dict[str, Any] = {
+        "globals": [],
+        "functions": {},
+        "triggers": [],
+        "computed": {"switches": 0, "triggers": 0},
+    }
+    for node, _fn in script.walk():
+        if node.kind == "var" and node.value[0] == "global":
+            out["globals"].append(node.value[1])
+        elif node.kind == "func" and node.value:
+            out["functions"].setdefault(node.value, {"switches": [], "messages": []})
+    for node, fn in script.walk():
+        if node.kind != "call":
+            continue
+        callee, args = script.compact(node.kids[0]), node.kids[1:]
+        if callee == on_trigger:
+            name = _gm_strings(args[0]) if args else None
+            target = args[1] if len(args) > 1 else None
+            if (
+                name is not None
+                and len(name) == 1
+                and target is not None
+                and target.kind == "dot"
+                and script.compact(target.kids[0]) == table
+            ):
+                out["triggers"].append((name[0], target.value))
+            else:
+                out["computed"]["triggers"] += 1
+        elif fn is None:
+            continue
+        elif callee == available:
+            names = _gm_strings(args[2]) if len(args) > 2 else None
+            if len(args) > 2 and args[1].kind == "bool" and names is not None:
+                out["functions"][fn]["switches"].append(
+                    (script.compact(args[0]), args[1].value, names)
+                )
+            else:
+                out["computed"]["switches"] += 1
+        elif callee == debug and args and args[0].kind == "str":
+            out["functions"][fn]["messages"].append(args[0].value)
+    out["undefined"] = [f for _t, f in out["triggers"] if f not in out["functions"]]
+    if out["undefined"] and strict:
+        raise BotGoalsError(
+            f"{on_trigger} names functions the script does not define: {out['undefined']}"
+        )
     return out
+
+
+def _gm_negated(script: GmScript, node: GmNode) -> str | None:
+    """The source text of minus a literal decimal number, exactly: the sign flipped, a zero
+    left as it is; None for anything else."""
+    sign, num = "", node
+    if node.kind == "un" and node.value in ("-", "+") and node.kids[0].kind == "num":
+        sign, num = node.value, node.kids[0]
+    if num.kind != "num" or num.value[:2].lower() in ("0x", "0b"):
+        return None
+    if _gm_number(num.value) == 0:
+        return script.source(node)
+    return num.value if sign == "-" else "-" + num.value
+
+
+def gm_mirror(
+    text: str | GmScript, coordinates: dict, axis: int, *, check: bool = True
+) -> tuple[str, dict]:
+    """A GameMonkey script mirrored through the plane where world `axis` (0, 1, 2 for x, y, z)
+    is 0: in every call the profile lists as holding a point (`coordinates.points`, callee ->
+    the index of its x argument) that argument's component is negated, and in every box call
+    (`coordinates.boxes`, callee -> the index of its first of six arguments, mins then maxes)
+    the min and max of that component swap and are negated. Only literal numbers are
+    rewritten (the sign flipped in place, the rest of the file byte for byte); calls whose
+    component is computed are listed as not mirrored. The result is parsed again when
+    `check`. `text` may be a script already parsed."""
+    if axis not in (0, 1, 2):
+        raise BotGoalsError("axis is 0, 1 or 2")
+    script = text if isinstance(text, GmScript) else gm_parse(text)
+    text = script.text
+    points = {str(k): int(v) for k, v in (coordinates.get("points") or {}).items()}
+    boxes = {str(k): int(v) for k, v in (coordinates.get("boxes") or {}).items()}
+    edits: list[tuple[int, int, str]] = []
+    report: dict[str, Any] = {"points": 0, "boxes": 0, "not_mirrored": []}
+
+    def skip(node: GmNode):
+        report["not_mirrored"].append(
+            {"line": script.line(node.lo), "call": script.source(node)[:120]}
+        )
+
+    for node, _fn in script.walk():
+        if node.kind != "call":
+            continue
+        callee, args = script.compact(node.kids[0]), node.kids[1:]
+        if callee in points:
+            i = points[callee] + axis
+            neg = _gm_negated(script, args[i]) if i < len(args) else None
+            if neg is None:
+                skip(node)
+                continue
+            edits.append((*script.span(args[i]), neg))
+            report["points"] += 1
+        elif callee in boxes:
+            lo, hi = boxes[callee] + axis, boxes[callee] + 3 + axis
+            if hi >= len(args):
+                skip(node)
+                continue
+            neg_lo, neg_hi = _gm_negated(script, args[lo]), _gm_negated(script, args[hi])
+            if neg_lo is None or neg_hi is None:
+                skip(node)
+                continue
+            edits.append((*script.span(args[lo]), neg_hi))
+            edits.append((*script.span(args[hi]), neg_lo))
+            report["boxes"] += 1
+    parts, at = [], 0
+    for a, b, new in sorted(edits):
+        parts += [text[at:a], new]
+        at = b
+    out = "".join(parts) + text[at:]
+    if check:
+        gm_parse(out)
+    return out, report
 
 
 # --------------------------------------------------------------------------------------

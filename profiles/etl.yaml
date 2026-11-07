@@ -4793,6 +4793,21 @@ bots:
     vector: Vec3
     vector_names: [Vec3, Vector3]
 
+  # Where the two scripts hold world coordinates, for mirroring a map's stock scripts with the
+  # map (botgoals.gm_mirror): calls taking a point or direction (callee -> index of its x
+  # argument, y and z following) and boxes (callee -> index of the first of six, mins then
+  # maxes). Vec3/Vector3(x, y, z) are the vector constructors above; the goal tables' Position,
+  # AimVectors, Facing, Offsets and AimPosition are written with them. Util.SetGoalPosition
+  # and Util.SetGoalOffset(x, y, z, GoalName) set and shift a goal's position
+  # (global_scripts/utilities.gm:216-234). AABB(p, p) builds a box from a mins and a maxs
+  # corner (global_scripts/commands.gm:316); 3659 of the 3668 six-number AABBs in the 0.93
+  # scripts list the mins first. Only literal numbers are rewritten; the plane is through
+  # the world origin, so points and directions mirror alike.
+  coordinates:
+    confidence: unverified
+    points: {Vec3: 0, Vector3: 0, Util.SetGoalPosition: 0, Util.SetGoalOffset: 0}
+    boxes: {AABB: 0}
+
   # The map script: one function per objective event, registered with OnTrigger. The game
   # hands the add-on a trigger with a tag name (Bot_Util_SendTrigger, etbot/
   # g_etbot_interface.cpp:6769-6779, which cuts it to TriggerBufferSize - 1 = 71 bytes,

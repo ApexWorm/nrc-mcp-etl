@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -194,6 +195,174 @@ def test_script_reader_rejects_what_the_writer_never_makes():
         )
     with pytest.raises(botgoals.BotGoalsError):
         botgoals.read_goals("global _MG = { A = Vec3(1, 2), };", sections()[0])
+
+
+# --------------------------------------------------------------------------------------
+# GameMonkey: the whole language, byte for byte, and mirroring
+# --------------------------------------------------------------------------------------
+
+# Every construct of the grammar the shipped scripts use (gmscriptex gmParser.y): switch with
+# case labels, obj:method() calls, this and member, fork, foreach with key and value, for,
+# dowhile, default parameters, table(), [index] fields, trailing commas, adjacent strings,
+# escapes, backquoted and character constants, hex and float forms, compound assignment, and
+# comments everywhere (an unclosed block comment runs to the end).
+GM_ALL = """// header\r
+global Map =\r
+{\r
+\tDebug = 0, /* inline */ Count = 0x1F + 0b101 % 3,\r
+\tBounds = AABB(-397.000,2155.000,-126.000,-175.000,2540.000,-52.000),\r
+\tTruck = function( trigger, extra = 2.5e1f )\r
+\t{\r
+\t\tswitch( Map.Count )\r
+\t\t{\r
+\t\t\tcase 1: // first\r
+\t\t\t{\r
+\t\t\t\tSetAvailableMapGoals( TEAM.ALLIES, false, "ESCORT_truck" );\r
+\t\t\t}\r
+\t\t\tcase TEAM.AXIS:\r
+\t\t\tdefault:\r
+\t\t\t{\r
+\t\t\t\tMap.Count -= 1;\r
+\t\t\t}\r
+\t\t}\r
+\t\tif ( !Map.Debug && trigger.Action != "x" ) { return; }\r
+\t\telse if ( Map.Debug == null or -.5 < 1. ) { yield(); }\r
+\t\telse { sleep(1); }\r
+\t\tUtil.MapDebugPrint( "a \\"q\\" " "b\\065" );\r
+\t},\r
+\tRegion = function() { bot:SetFacing( Vec3(1, 0, 0), true ); member m = this.x; },\r
+};\r
+\r
+global OnMapLoad = function()\r
+{\r
+\tlocal t = table( 1, 2, 3 );\r
+\tforeach ( k and v in { [0] = 'ab', `back``tick`, } ) { t[k] = ~v; }\r
+\tfor ( i = 0; i < 3; i += 1 ) { fork th { sleep(0.1); } }\r
+\tdowhile ( false ) { break; }\r
+\tOnTrigger( "the truck has moved", Map.Truck );\r
+\tUtil.SetGoalPosition( 29.874, 2384.431, -103.875, "PLANT_Gate" );\r
+\tVec3( x, 0, 0 );\r
+};\r
+/* unclosed"""
+
+
+def test_gamemonkey_reads_the_whole_language_and_writes_it_back_byte_for_byte():
+    script = botgoals.gm_parse(GM_ALL)
+    assert script.emit() == GM_ALL
+    calls = {script.compact(n.kids[0]) for n, _f in script.walk() if n.kind == "call"}
+    assert {"SetAvailableMapGoals", "Util.MapDebugPrint", "OnTrigger", "AABB"} <= calls
+    assert any(n.kind == "method" and n.value == "SetFacing" for n, _f in script.walk())
+    parsed = botgoals.read_script(GM_ALL, sections()[1])
+    assert parsed["globals"] == ["Map", "OnMapLoad"]
+    assert parsed["triggers"] == [("the truck has moved", "Truck")]
+    truck = parsed["functions"]["Truck"]
+    # A switch with a single name, inside a case; adjacent strings join, escapes decode
+    # (the digits of a backslash escape are decimal, gmCodeTree.cpp:510-521).
+    assert truck["switches"] == [("TEAM.ALLIES", False, ["ESCORT_truck"])]
+    assert truck["messages"] == ['a "q" bA']
+    assert set(parsed["functions"]) == {"Truck", "Region", "OnMapLoad"}
+
+
+@pytest.mark.parametrize(
+    "text, where",
+    [
+        # Shapes of the four shipped scripts the add-on's compiler refuses.
+        ("global A = function() { }\nglobal B = 1;", "line 2: expected ';'"),
+        ("f = function() { g()\n if (x) { } };", "line 2: expected ';'"),
+        ("M = { a = function() { p(); } }, };", "expected ';'"),
+        ("M = { a = function() { else { } } };", "expected a value"),
+        ("x = 1 $ 2;", "unexpected character '$' at byte 6"),
+        ('x = "open;', "unexpected character"),
+        # Assignment is a statement, a field index an integer (gmParser.y:393, :775).
+        ("a = b = 1;", "expected ';'"),
+        ('t = { ["k"] = 1 };', "an integer index"),
+        ("t = table( 1, );", "a field"),
+        ("if (x) y();", "expected '{'"),
+    ],
+)
+def test_gamemonkey_refuses_what_the_addon_compiler_refuses(text, where):
+    with pytest.raises(botgoals.BotGoalsError, match=re.escape(where)):
+        botgoals.gm_parse(text)
+
+
+def test_gamemonkey_mirror_negates_literal_coordinates_in_place():
+    coords = bots()["coordinates"]
+    out, report = botgoals.gm_mirror(GM_ALL, coords, 0)
+    assert "AABB(175.000,2155.000,-126.000,397.000,2540.000,-52.000)" in out
+    assert "Util.SetGoalPosition( -29.874, 2384.431" in out
+    # A zero stays as written; a computed component is reported, not guessed.
+    assert "Vec3(1, 0, 0)" not in out and "Vec3(-1, 0, 0)" in out
+    assert report["points"] == 2 and report["boxes"] == 1
+    assert [n["call"] for n in report["not_mirrored"]] == ["Vec3( x, 0, 0 )"]
+    # Only those numbers change: mirroring twice gives the file back.
+    assert botgoals.gm_mirror(out, coords, 0)[0] == GM_ALL
+    zero, _ = botgoals.gm_mirror("v = Vec3(-0.0, 0, 5);", coords, 0)
+    assert zero == "v = Vec3(-0.0, 0, 5);"
+    y, _ = botgoals.gm_mirror("v = Vec3(1, 2, 3); b = AABB(1,2,3,4,5,6);", coords, 1)
+    assert y == "v = Vec3(1, -2, 3); b = AABB(1,-5,3,4,-2,6);"
+
+
+def omnibot_root() -> Path | None:
+    nav = stock_nav()
+    return nav.parent.parent if nav else None
+
+
+# The shipped scripts with syntax errors (a missing ';' or a stray brace or 'else'), which the
+# add-on's compiler refuses too: 1338 of the 1339 et/nav scripts compile with gmscriptex.
+GM_REFUSED = {
+    "et/incomplete_navs/with_script/2skilled.gm": "line 11:",
+    "et/incomplete_navs/with_script/canyon_depths_b5.gm": "line 1033:",
+    "et/incomplete_navs/with_script/fatal_mill_b4.gm": "line 174:",
+    "et/nav/wolken3_final.gm": "line 340:",
+}
+
+
+def _check_shipped_script(args: tuple[str, str]) -> tuple[str, str | None]:
+    """One shipped script: parsed, written back byte for byte, mirrored in x and back to the
+    same bytes; a goal table's positions mirror, a map script reads. Returns the error."""
+    root, name = args
+    goals_spec, script_spec, _ = sections()
+    coords = bots()["coordinates"]
+    path = Path(root) / name
+    text = path.read_bytes().decode("latin-1")
+    try:
+        script = botgoals.gm_parse(text)
+    except botgoals.BotGoalsError as e:
+        return name, str(e)
+    if script.emit() != text:
+        return name, "not written back byte for byte"
+    mirrored, _report = botgoals.gm_mirror(script, coords, 0, check=False)
+    flipped = botgoals.gm_parse(mirrored)
+    if botgoals.gm_mirror(flipped, coords, 0, check=False)[0] != text:
+        return name, "mirrored twice is not the file"
+    if path.parent.name in ("nav", "with_script", "no_script", "priority_maps"):
+        if path.name.endswith("_goals.gm"):
+            table = botgoals.read_goals(text, goals_spec)
+            back = botgoals.read_goals(mirrored, goals_spec)
+            for key, row in table.items():
+                if isinstance(row, dict) and isinstance(row.get("Position"), tuple):
+                    x, y, z = row["Position"]
+                    if back[key]["Position"] != (-x, y, z):
+                        return name, f"{key} did not mirror"
+        else:
+            botgoals.read_script(text, script_spec, strict=False)
+    return name, "ok"
+
+
+def test_gamemonkey_reads_mirrors_and_writes_back_every_shipped_script():
+    root = omnibot_root()
+    if root is None:
+        pytest.skip("no ET: Legacy install with the Omni-bot add-on (NRC_FS_BASEPATH)")
+    from concurrent.futures import ProcessPoolExecutor
+
+    names = sorted(f.relative_to(root).as_posix() for f in root.rglob("*.gm"))
+    assert len(names) > 2000
+    with ProcessPoolExecutor(max_workers=min(16, os.cpu_count() or 1)) as pool:
+        results = dict(pool.map(_check_shipped_script, [(str(root), n) for n in names]))
+    refused = {n: e for n, e in results.items() if e != "ok"}
+    assert set(refused) == set(GM_REFUSED), refused
+    for name, where in GM_REFUSED.items():
+        assert refused[name].startswith(where), refused[name]
 
 
 GMCHECK = os.environ.get("NRC_GM_CHECK")
