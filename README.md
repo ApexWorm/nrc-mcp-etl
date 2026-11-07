@@ -4,7 +4,7 @@ An MCP server for designing, sculpting, optimizing and shipping levels for
 [NetRadiant-custom](https://github.com/Garux/netradiant-custom), targeting Urban Terror and ET: Legacy.
 
 `nrc-mcp` owns the `.map` file. It parses and writes it losslessly, derives geometry with exact
-arithmetic, drives `q3map2`, and exposes all of it to an agent as **80 tools, 7 resources and 4 prompts** —
+arithmetic, drives `q3map2`, and exposes all of it to an agent as **81 tools, 7 resources and 4 prompts** —
 grouped, safety-annotated, and narrowable to the subset a session actually needs.
 A human gets the same capabilities through a CLI and a set of `mise` tasks.
 
@@ -527,7 +527,7 @@ receipt. Gameplay reports use the same in-memory revision even before saving.
 
 ## Tool reference
 
-80 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
+81 tools in 9 groups. `mise run mcp:tools` prints the list live, grouped, with a `*` against
 every tool that changes something — that listing is generated from the running server, so it
 cannot drift from what the server actually serves.
 
@@ -554,7 +554,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `validate_profile` | Entities against the game profile's rules, and the map script, speaker script and sound scripts where the game has them. |
 | `script_show` · `script_set_event` · `script_remove` | Read and edit the map script beside the `.map`, for a game whose maps carry one. Unknown events and actions are refused before anything is written; everything outside the edited event is left as it was. |
 | `objective_place` | Build a whole objective in one call - its trigger, the objective entity, the links and weapon class the engine needs, and its script events - from the profile's recipes (for ET: Legacy, `dynamite`, `constructible`, a neutral or one team's `command_post`, and a forward spawn flag with its spawn region and spawns, `checkpoint` or `checkpoint_one_way`; and `escort` and `steal`). Point entities go in `points` by role. Team-only doors are not a kind: give a door the `allowteams` key, which `validate_profile` checks. |
-| `map_mirror` | Mirror the whole map in x or y: brushes stay valid (plane points reordered), textures show the mirror image, patches keep facing out, and the profile's keys follow — origins, facings (`a` → `180 - a`), command-map corners, the swing of rotating doors. Vehicles the game turns to face their path are given a half turn instead. Models face the mirrored way but are not themselves mirrored; script coordinates are left to you. |
+| `map_mirror` | Mirror the whole map in x or y: brushes stay valid (plane points reordered), textures show the mirror image, patches keep facing out, and the profile's keys follow — origins, facings (`a` → `180 - a`), command-map corners, the swing of rotating doors. Vehicles the game turns to face their path are given a half turn instead. Models face the mirrored way but are not themselves mirrored; map script coordinates are left to you, bot add-on files go through `bot_files_mirror`. |
 | `path_place` | Lay a path for a mover: a chain of linked path points, straight or curved by control points, with long straight legs optionally split. Its `start` is what `objective_place(kind="escort")` follows. |
 | `profile_summary` | What the profile knows, and how much of it is verified. |
 
@@ -653,6 +653,7 @@ inside the bound is the same answer as without one. `analysis.path_distances` an
 | `commandmap_make` · `levelshot_make` | The command map - map coordinates on the worldspawn, a top-down section image and its shaders - and the loading-screen levelshot. |
 | `pack_pk3` | Build the release archive. Names the packer misses but the base game or the map supplies do not fail it; `ignore` lets named resources be missing. |
 | `bot_waypoints_write` | Seed the bot add-on's waypoint file (for ET: Legacy an Omni-bot `.way`) from the stand/crouch/prone grids: connected waypoints (walking off a ledge one way), crouch/prone flags, one-way jump links up ledges and across gaps the player box's arc clears (`JUMP` take-off, listed in `jumps`), `CLIMB` foot and top waypoints on ladder brushes (`ladders`), doorway waypoints that open doors (`DOOR`, team flags for team doors), wall links closed until a wall is blown and bridge links closed until a constructible deck is built (`BLOCKWALL` / `BLOCKBRIDGE`), named spawn and objective waypoints, and whether each objective is reached from each team's spawns. Also writes the map goals (defend spots per held objective part, snipe spots per team, chosen by line of sight over the teams' shortest routes; plus caller `spots`) and a map script that switches them on the game's objective triggers. Staged beside the map's folder for the server's `omnibot_path`; the add-on never reads them from the pk3. |
+| `bot_files_mirror` | Mirror another map's bot add-on files (`.way` waypoints, `_goals.gm`, `.gm`) through the plane `map_mirror` used, under the open map's name: waypoint positions reflected and facings turned, script coordinates (the profile's `bots.coordinates` calls) rewritten in place, the rest byte for byte. A plane off the origin is refused for scripts with vector constructors, which may hold a position or a direction. Staged where `bot_waypoints_write` stages, or into `out_dir`. |
 | `repack_analyze` | Every resource the BSP references, and which of them nothing supplies (what fails a pack). |
 
 **The toolchain itself**

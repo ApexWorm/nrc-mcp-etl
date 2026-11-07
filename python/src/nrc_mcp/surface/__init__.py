@@ -117,6 +117,7 @@ PRESETS: dict[str, tuple[str, ...]] = {
         "objective_playtests",
         "engine_playtest",
         "bot_waypoints_write",
+        "bot_files_mirror",
         "bot_playtest",
     ),
 }

@@ -1544,13 +1544,19 @@ def segment_clear(
 ) -> bool:
     """Whether nothing solid lies between the two points."""
     delta = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
-    lo = tuple(min(p0[i], p1[i]) for i in range(3))
-    hi = tuple(max(p0[i], p1[i]) for i in range(3))
+    # The bounds test (`_aabb_misses`) written out: it runs for every candidate brush of
+    # every segment, tens of times per clearance test, and a call per brush dominated it.
+    lx, hx = (p0[0], p1[0]) if p0[0] <= p1[0] else (p1[0], p0[0])
+    ly, hy = (p0[1], p1[1]) if p0[1] <= p1[1] else (p1[1], p0[1])
+    lz, hz = (p0[2], p1[2]) if p0[2] <= p1[2] else (p1[2], p0[2])
     seen: set[int] = set()
     for i in index.everywhere:
         seen.add(i)
         solid = solids[i]
-        if not _aabb_misses(solid, lo, hi) and _segment_enters(solid, p0, delta) is not None:
+        mn, mx = solid.mins, solid.maxs
+        if hx < mn[0] or lx > mx[0] or hy < mn[1] or ly > mx[1] or hz < mn[2] or lz > mx[2]:
+            continue
+        if _segment_enters(solid, p0, delta) is not None:
             return False
     for key in index.along(p0, p1):
         for i in index.cells.get(key, ()):
@@ -1558,7 +1564,10 @@ def segment_clear(
                 continue
             seen.add(i)
             solid = solids[i]
-            if not _aabb_misses(solid, lo, hi) and _segment_enters(solid, p0, delta) is not None:
+            mn, mx = solid.mins, solid.maxs
+            if hx < mn[0] or lx > mx[0] or hy < mn[1] or ly > mx[1] or hz < mn[2] or lz > mx[2]:
+                continue
+            if _segment_enters(solid, p0, delta) is not None:
                 return False
     return True
 
@@ -1919,6 +1928,18 @@ class RestHeights(Mapping):
     __hash__ = None  # type: ignore[assignment]
 
 
+_MOVE_PACK = struct.Struct("<hhh")
+
+
+def unpack_moves(cell: tuple[int, int, int], packed: bytes, size: float) -> list:
+    """`(dest, distance)` pairs from `NavGrid.pack_moves`, distances as `neighbours` gives."""
+    ix, iy, iz = cell
+    return [
+        ((ix + dx, iy + dy, iz + rise), math.sqrt(dx * dx + dy * dy + rise * rise) * size)
+        for dx, dy, rise in _MOVE_PACK.iter_unpack(packed)
+    ]
+
+
 @dataclass
 class NavGrid:
     """A voxelized walkable surface, with the provenance needed to judge it.
@@ -1962,6 +1983,8 @@ class NavGrid:
     stand_z: Mapping = field(default_factory=dict)
     _components: dict[tuple[int, int, int], int] | None = None
     _component_sizes: list[int] = field(default_factory=list)
+    #: Moves learned ahead per relation (directed, symmetric): cell -> `pack_moves` bytes.
+    _move_memo: tuple[dict, dict] | None = None
 
     # --- coordinates ------------------------------------------------------
 
@@ -2016,7 +2039,34 @@ class NavGrid:
         The relation is **directed**, because the game is: a 64-unit ledge can be walked off
         and not climbed back up. `symmetric=True` relaxes the rise limit to the fall limit in
         both directions, which is what component labelling needs.
+
+        Moves learned ahead (`learn_moves`, the same computation done in worker processes)
+        are answered from memory, in the same order with the same distances.
         """
+        memo = self._move_memo
+        if memo is not None:
+            packed = memo[symmetric].get(cell)
+            if packed is not None:
+                return unpack_moves(cell, packed, self.cell)
+        return self._walk_moves(cell, symmetric)
+
+    def pack_moves(self, cell: tuple[int, int, int], symmetric: bool) -> bytes:
+        """`neighbours(cell)` packed as `(dx, dy, rise)` int16 triples, for `learn_moves`."""
+        return b"".join(
+            _MOVE_PACK.pack(d[0] - cell[0], d[1] - cell[1], d[2] - cell[2])
+            for d, _ in self._walk_moves(cell, symmetric)
+        )
+
+    def learn_moves(self, cells, symmetric: bool, packed) -> None:
+        """Keep moves computed elsewhere (`pack_moves` of each of `cells`, in order)."""
+        if self._move_memo is None:
+            self._move_memo = ({}, {})
+        self._move_memo[symmetric].update(zip(cells, packed, strict=True))
+
+    def forget_moves(self) -> None:
+        self._move_memo = None
+
+    def _walk_moves(self, cell: tuple[int, int, int], symmetric: bool):
         ix, iy, iz = cell
         up = self.fall_cells if symmetric else self.step_up_cells
         width = self.movement.player_width

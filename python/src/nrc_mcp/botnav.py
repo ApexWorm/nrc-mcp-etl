@@ -267,6 +267,35 @@ def write(wf: WaypointFile, fmt: dict) -> bytes:
     return bytes(out)
 
 
+def mirror(wf: WaypointFile, axis: int, at: float = 0.0) -> dict[str, Any]:
+    """Mirror a waypoint file in place through the plane where world `axis` (0, 1 for x, y)
+    equals `at`: each position's component becomes `2 * at - v` (a point), each facing's is
+    negated (a direction), and the file's world box is reflected with its corners swapped.
+    Connections, flags, radii, names and properties stay as they are (the file holds no other
+    coordinate: positions and facings are separate fields, so a plane anywhere is exact)."""
+    if axis not in (0, 1):
+        raise BotNavError("axis is 0 or 1 (a mirror in z would turn floors into ceilings)")
+    if not math.isfinite(at):
+        raise BotNavError("at is a coordinate")
+
+    def point(v: float) -> float:
+        return -v if at == 0 else 2 * at - v
+
+    for wp in wf.waypoints:
+        p, f = list(wp.position), list(wp.facing)
+        p[axis] = point(p[axis])
+        if f[axis]:
+            f[axis] = -f[axis]
+        wp.position, wp.facing = (p[0], p[1], p[2]), (f[0], f[1], f[2])
+    lo, hi = list(wf.world_mins), list(wf.world_maxs)
+    lo[axis], hi[axis] = point(hi[axis]), point(lo[axis])
+    wf.world_mins, wf.world_maxs = (lo[0], lo[1], lo[2]), (hi[0], hi[1], hi[2])
+    return {
+        "waypoints": len(wf.waypoints),
+        "with_properties": sum(1 for wp in wf.waypoints if wp.properties),
+    }
+
+
 def flag_names(flags: int, spec_flags: dict[str, int]) -> list[str]:
     return [name for name, bit in spec_flags.items() if flags & int(bit)]
 
@@ -1065,8 +1094,14 @@ class _Extend:
         return self.walk(piece, index) and self.walk(index, piece)
 
 
-def _distances(waypoints: list[Waypoint], start: int) -> dict[int, float]:
-    """Shortest directed travel from `start` over the connections, in world units."""
+def _distances(
+    waypoints: list[Waypoint], start: int, goal: int | None = None, limit: float = math.inf
+) -> dict[int, float]:
+    """Shortest directed travel from `start` over the connections, in world units.
+
+    With `goal`, the search stops once the goal's distance is settled or everything left
+    is further than `limit`: the goal's entry is then exact if within `limit`, and absent
+    or above `limit` otherwise."""
     import heapq  # noqa: PLC0415
 
     best = {start: 0.0}
@@ -1075,6 +1110,8 @@ def _distances(waypoints: list[Waypoint], start: int) -> dict[int, float]:
         d, n = heapq.heappop(todo)
         if d > best.get(n, math.inf):
             continue
+        if goal is not None and (n == goal or d > limit):
+            break
         for m in waypoints[n].connections:
             nd = d + math.dist(waypoints[n].position, waypoints[m].position)
             if nd < best.get(m, math.inf):
@@ -1186,6 +1223,29 @@ def _jump(ext: _Extend, phys: _Physics, cfg: dict, a, c, d, k) -> dict | None:
         "rise": round(rise, 2),
         "distance": round(math.dist(pa[:2], grid.centre(landing[0])[:2]), 2),
     }
+
+
+def _jumps_ahead(ext: _Extend, phys: _Physics, cfg: dict, tried: dict) -> dict:
+    """`_jump` for every candidate `add_traversals` will test, in worker processes.
+
+    A test reads only the standing grid and the seeded pieces, never the links added so
+    far, so its answer does not depend on when it runs. The loop tests a pair's candidates
+    in order until one passes; here they go in rounds, the n-th candidate of every pair
+    whose earlier ones all failed, so nothing is tested that the loop would not test."""
+    from . import routesearch  # noqa: PLC0415
+
+    out: dict = {}
+    live = sorted(key for key, cands in tried.items() if cands)
+    depth = 0
+    while live:
+        batch = [tried[key][depth] for key in live]
+        found = routesearch.fork_map(lambda job: _jump(ext, phys, cfg, *job), batch)
+        out.update(zip(batch, found, strict=True))
+        depth += 1
+        live = [
+            key for key, f in zip(live, found, strict=True) if f is None and depth < len(tried[key])
+        ]
+    return out
 
 
 def _ladder_boxes(grid: analysis.NavGrid, parms: dict, names: set[str]) -> list[tuple]:
@@ -1344,17 +1404,23 @@ def add_traversals(
             pairs.setdefault(key, []).append(
                 (k * math.hypot(*d), abs(d[0]) + abs(d[1]), math.dist(a, home), a, c, d, k)
             )
+        tried = {key: [tuple(c[3:]) for c in sorted(cands)[:tries]] for key, cands in pairs.items()}
+        ahead = _jumps_ahead(ext, phys, jumps_cfg, tried)
         # Detours are judged on the graph as it grows: once one jump serves a stretch of
         # ledge, its neighbours walk to it rather than getting their own.
-        for (pa, _pc), cands in sorted(pairs.items()):
-            for *_rank, a, c, d, k in sorted(cands)[:tries]:
-                found = _jump(ext, phys, jumps_cfg, a, c, d, k)
+        for pa, pc in sorted(pairs):
+            for a, c, d, k in tried[(pa, pc)]:
+                found = (
+                    ahead[(a, c, d, k)]
+                    if (a, c, d, k) in ahead
+                    else _jump(ext, phys, jumps_cfg, a, c, d, k)
+                )
                 if found is None:
                     continue
                 pb = seeded.piece_of[found["landing"]]
                 w = seeded.waypoints
-                straight = math.dist(w[pa].position, w[pb].position)
-                if _distances(w, pa).get(pb, math.inf) <= detour * straight:
+                limit = detour * math.dist(w[pa].position, w[pb].position)
+                if _distances(w, pa, pb, limit).get(pb, math.inf) <= limit:
                     break
                 takeoff = ext.node(
                     a, floor=found["takeoff_floor"], flags=takeoff_flags, radius=radius
@@ -1512,6 +1578,8 @@ def build(
     )
     built = grids_without(doors | set(states.walls)) if constructible else None
     _aligned(opened, closed, built)
+    learned = [g for state in (opened, closed, built) if state for g in state.values()]
+    _learn_moves((closed, built), learned)
 
     def walkable(state: dict) -> set:
         return {c for g in state.values() for c in g.walkable_cells()}
@@ -1697,7 +1765,27 @@ def build(
         },
         **traversals,
     }
+    # The moves learned ahead hold memory for every walkable cell; the grids handed on in
+    # `extras` work theirs out lazily again.
+    for g in learned:
+        g.forget_moves()
     return wf, report
+
+
+def _learn_moves(states: tuple, learned: list) -> None:
+    """Every move the seeder will ask for, learned ahead in worker processes: each grid's
+    directed moves for all its walkable cells (the seeder, `_Union` and the traversals walk
+    them all), and the symmetric ones of the first stance of the closed and built states
+    (`_enclosed_openings` labels their components). The answers are the grid's own, so the
+    graph is the one asking lazily builds; only the clearance tests run in parallel."""
+    from . import routesearch  # noqa: PLC0415
+
+    for g in learned:
+        routesearch.learn_moves(g, g.walkable_cells())
+    for state in states:
+        if state:
+            first = next(iter(state.values()))
+            routesearch.learn_moves(first, first.walkable_cells(), symmetric=True)
 
 
 def _enclosed_openings(grids: dict, closed: dict) -> frozenset:

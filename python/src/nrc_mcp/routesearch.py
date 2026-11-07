@@ -36,6 +36,8 @@ from .kernel import kernel
 _ATTR = "_route_graphs"
 #: Fewest cells worth handing to worker processes; below it, learning stays lazy.
 PARALLEL_MIN_CELLS = 4000
+#: Fewest items worth handing to worker processes in `fork_map`.
+FORK_MAP_MIN = 64
 #: Worker processes for parallel learning; `NRC_ROUTE_WORKERS=1` turns it off.
 MAX_WORKERS = 16
 _MOVE = struct.Struct("<iiiidB")
@@ -214,6 +216,83 @@ def learn(graph, expand, keys: list, *, processes: int | None = None) -> int:
         _FORK_EXPAND = None
         LOCK.release()
     return learned
+
+
+_FORK_GRID = None
+
+
+def _pack_moves(job: tuple[list, bool]) -> list[bytes]:
+    cells, symmetric = job
+    return [_FORK_GRID.pack_moves(c, symmetric) for c in cells]  # type: ignore[union-attr]
+
+
+def learn_moves(
+    grid: Any, cells: list, *, symmetric: bool = False, processes: int | None = None
+) -> int:
+    """Learn `grid.neighbours(cell)` for many cells at once, in forked worker processes,
+    and keep them on the grid (`NavGrid.learn_moves`): later calls answer from memory with
+    the same moves in the same order. For callers that will ask for most of a grid's cells
+    anyway (a waypoint seeder walks them all). Returns how many cells were learned: none
+    when there are too few to be worth a pool or fork is unavailable (the grid then works
+    them out lazily, with the same result).
+    """
+    memo = grid._move_memo
+    known = memo[symmetric] if memo is not None else {}
+    cells = [c for c in cells if c not in known]
+    processes = workers() if processes is None else processes
+    if processes <= 1 or len(cells) < PARALLEL_MIN_CELLS:
+        return 0
+    global _FORK_GRID
+    chunk = math.ceil(len(cells) / (processes * 8))
+    jobs = [(cells[i : i + chunk], symmetric) for i in range(0, len(cells), chunk)]
+    _FORK_GRID = grid
+    LOCK.acquire()
+    try:
+        with warnings.catch_warnings():
+            # As in `learn`: the children only run the grid's own geometry and return.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            context = multiprocessing.get_context("fork")
+            with context.Pool(processes) as pool:
+                for (part, _), packed in zip(jobs, pool.imap(_pack_moves, jobs), strict=True):
+                    grid.learn_moves(part, symmetric, packed)
+    finally:
+        _FORK_GRID = None
+        LOCK.release()
+    return len(cells)
+
+
+_FORK_FN = None
+
+
+def _map_chunk(items: list) -> list:
+    return [_FORK_FN(item) for item in items]  # type: ignore[misc]
+
+
+def fork_map(fn, items: list, *, processes: int | None = None) -> list:
+    """`[fn(item) for item in items]`, in forked worker processes that inherit everything
+    `fn` reads as it is. For pure geometry tests over a grid (no I/O, no shared state):
+    the answers are the ones a plain loop gives, in the same order. Runs in this process
+    when there are fewer than `FORK_MAP_MIN` items or fork is unavailable."""
+    processes = workers() if processes is None else processes
+    if processes <= 1 or len(items) < FORK_MAP_MIN:
+        return [fn(item) for item in items]
+    global _FORK_FN
+    chunk = max(1, math.ceil(len(items) / (processes * 8)))
+    chunks = [items[i : i + chunk] for i in range(0, len(items), chunk)]
+    _FORK_FN = fn
+    out: list = []
+    LOCK.acquire()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            context = multiprocessing.get_context("fork")
+            with context.Pool(processes) as pool:
+                for part in pool.imap(_map_chunk, chunks):
+                    out.extend(part)
+    finally:
+        _FORK_FN = None
+        LOCK.release()
+    return out
 
 
 def cells_near(grid: Any, pairs: list, pad) -> list[tuple[int, int, int]]:

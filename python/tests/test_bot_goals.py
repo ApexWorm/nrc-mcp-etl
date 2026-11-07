@@ -302,6 +302,29 @@ def test_gamemonkey_mirror_negates_literal_coordinates_in_place():
     assert y == "v = Vec3(1, -2, 3); b = AABB(1,-5,3,4,-2,6);"
 
 
+def test_gamemonkey_mirror_off_the_origin_reflects_positions_and_turns_directions():
+    coords = bots()["coordinates"]
+    text = (
+        'Util.SetGoalPosition( 10.5, 20, 30, "g" );\n'
+        'Util.SetGoalOffset( 16, 0, 0, "g" );\n'
+        "b = AABB(-50, 0, 0, 200, 8, 8);\n"
+    )
+    out, report = botgoals.gm_mirror(text, coords, 0, at=100)
+    assert out == (
+        'Util.SetGoalPosition( 189.5, 20, 30, "g" );\n'
+        'Util.SetGoalOffset( -16, 0, 0, "g" );\n'
+        "b = AABB(0, 0, 0, 250, 8, 8);\n"
+    )
+    assert (report["points"], report["boxes"]) == (2, 1)
+    # Back through the same plane is the file again.
+    assert botgoals.gm_mirror(out, coords, 0, at=100)[0] == text
+    # A vector constructor may hold a place or a direction: refused, naming the line.
+    with pytest.raises(botgoals.BotGoalsError, match=r"line 2: .*Vec3\( 1, 0, 0 \)"):
+        botgoals.gm_mirror("x = 1;\nFacing = Vec3( 1, 0, 0 );\n", coords, 0, at=100)
+    # Through the origin it is still the sign flip, positions and directions alike.
+    assert botgoals.gm_mirror(text, coords, 0, at=0)[0] == botgoals.gm_mirror(text, coords, 0)[0]
+
+
 def omnibot_root() -> Path | None:
     nav = stock_nav()
     return nav.parent.parent if nav else None
