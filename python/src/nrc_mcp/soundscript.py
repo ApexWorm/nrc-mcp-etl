@@ -310,9 +310,9 @@ def _script_blocks(profile_id: str, map_path: Path, text: str | None) -> list:
         p = mapscript.script_path(ms, map_path)
         if not p.is_file():
             return []
-        text = p.read_text(errors="replace")
+        text = mapscript.decode(p.read_bytes())
     try:
-        return mapscript.parse(text, mapscript.brace_actions(ms))
+        return mapscript.parse_spec(text, ms)
     except mapscript.ScriptSyntaxError:
         return []  # mapscript.check reports it
 

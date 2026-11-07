@@ -315,25 +315,32 @@ impl Entity {
 
     /// Set `key` so that `value` is what the engine reads.
     ///
-    /// [`Entity::set`] replaces the *first* occurrence, but the engine takes the *last*, so
-    /// on an entity carrying a duplicate it changes a value nobody reads. This replaces the
-    /// first occurrence in place and drops the rest. Returns the value the engine read
-    /// before, if there was one, and how many duplicates were dropped.
+    /// q3map2 copies every pair into the BSP in order, duplicates included
+    /// (bspfile_abstract.cpp ParseEPair/UnparseEntities), and ET: Legacy applies each pair
+    /// to the entity's fields in turn, matching names without regard to case
+    /// (game/g_spawn.c:799-801, G_ParseField :747-749): for a field the *last* pair of any
+    /// spelling wins. A key a spawn function reads itself with G_SpawnString matches its
+    /// exact spelling and takes the *first* (:64-66). [`Entity::set`] replaces only the first
+    /// exact match, so on an entity carrying a duplicate it can change a value nobody reads.
+    /// This replaces the first occurrence of any spelling in place (keeping that spelling)
+    /// and drops the rest, which is right under both rules. Returns the value the engine
+    /// read for a field before, if there was one, and how many duplicates were dropped.
     pub fn set_effective(
         &mut self,
         key: &str,
         value: impl Into<String>,
     ) -> (Option<String>, usize) {
+        let same = |k: &str| k.eq_ignore_ascii_case(key);
         let previous = self
             .keys
             .iter()
             .rev()
-            .find(|(k, _)| k == key)
+            .find(|(k, _)| same(k))
             .map(|(_, v)| v.clone());
         let before = self.keys.len();
         let mut seen = false;
         self.keys.retain(|(k, _)| {
-            if k != key {
+            if !same(k) {
                 return true;
             }
             let keep = !seen;
@@ -341,8 +348,19 @@ impl Entity {
             keep
         });
         let dropped = before - self.keys.len();
-        self.set(key, value);
+        let value = value.into();
+        match self.keys.iter_mut().find(|(k, _)| same(k)) {
+            Some(slot) => slot.1 = value,
+            None => self.keys.push((key.to_string(), value)),
+        }
         (previous, dropped)
+    }
+
+    /// Remove every pair the engine would read as `key`: any spelling of the name.
+    pub fn remove_effective(&mut self, key: &str) -> bool {
+        let before = self.keys.len();
+        self.keys.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+        self.keys.len() != before
     }
 
     /// Parse a whitespace-separated vector value such as `origin`.
@@ -580,6 +598,20 @@ mod tests {
         );
         assert_eq!(e.set_effective("speed", "100"), (None, 0));
         assert_eq!(e.keys.last().unwrap().0, "speed", "a new key is appended");
+    }
+
+    #[test]
+    fn a_key_in_another_spelling_is_the_same_key_to_the_engine() {
+        // G_ParseField matches names with Q_stricmp, so `Target` after `target` is read.
+        let mut e = Entity::default();
+        e.keys.push(("target".into(), "a".into()));
+        e.keys.push(("Target".into(), "b".into()));
+        let (previous, dropped) = e.set_effective("target", "c");
+        assert_eq!((previous.as_deref(), dropped), (Some("b"), 1));
+        assert_eq!(e.keys, vec![("target".to_string(), "c".to_string())]);
+        e.keys.push(("TARGET".into(), "d".into()));
+        assert!(e.remove_effective("target"));
+        assert!(e.keys.is_empty());
     }
 
     #[test]

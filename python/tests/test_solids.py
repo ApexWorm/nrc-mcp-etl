@@ -414,17 +414,33 @@ def test_solid_commit_can_make_a_second_entity_of_a_class(k, tmp_path):
     srv.map_new(str(tmp_path / "e.map"))
     try:
         first = srv.solid_commit(box, label="a", target_classname="func_door")
-        piled = srv.solid_commit(box, label="b", target_classname="func_door")
-        second = srv.solid_commit(box, label="c", target_classname="func_door", new_entity=True)
-        assert first["entity"] == piled["entity"] == 1, "without new_entity it joins the first"
-        assert second["entity"] == 2 and second["created_entity"] == "func_door"
+        second = srv.solid_commit(box, label="b", target_classname="func_door")
+        assert (first["entity"], second["entity"]) == (1, 2), "a second door is its own entity"
+        assert second["created_entity"] == "func_door"
+        third = srv.solid_commit(box, label="c", target_classname="func_door", new_entity=True)
+        assert third["entity"] == 3
         onto = srv.solid_commit(box, label="d", target_entity=2)
         assert onto["entity"] == 2
-        assert [e["brushes"] for e in srv.query_entities()["entities"]] == [0, 2, 2]
+        world = srv.solid_commit(box, label="w")
+        assert world["entity"] == 0 and "created_entity" not in world
+        assert [e["brushes"] for e in srv.query_entities()["entities"]] == [1, 1, 2, 1]
         with pytest.raises(ToolError, match="no entity 9"):
             srv.solid_commit(box, label="e", target_entity=9)
         with pytest.raises(ToolError, match="not both"):
             srv.solid_commit(box, label="f", new_entity=True, target_entity=1)
+        # The classname is a key like any other: one the .map cannot hold is refused, and so
+        # is a second worldspawn (audit M-R2).
+        before = srv.SESSION.map.source()
+        for bad, why in [
+            ('func_"door', "cannot hold"),
+            ("", "non-empty"),
+            ("worldspawn", "second"),
+        ]:
+            with pytest.raises(ToolError, match=why):
+                srv.solid_commit(box, label="g", target_classname=bad, new_entity=bad != "")
+        with pytest.raises(ToolError, match="cannot hold"):
+            srv.patch_commit("cylinder", [0, 0, 0], 32, 64, "x", target_classname="a\nb")
+        assert srv.SESSION.map.source() == before
     finally:
         srv.SESSION.map = None
         srv.SESSION.path = None

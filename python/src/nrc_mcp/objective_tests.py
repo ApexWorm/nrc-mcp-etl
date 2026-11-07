@@ -67,11 +67,9 @@ class Found:
 
 
 def _keys(entity: dict) -> dict[str, str]:
-    """Keys by lower-cased name; the first of a duplicate wins, as analysis reads them."""
-    out: dict[str, str] = {}
-    for k, v in entity.get("keys") or []:
-        out.setdefault(str(k).lower(), str(v))
-    return out
+    """Keys by lower-cased name; the last of a duplicate wins, as the game reads them
+    (`rules._keys`)."""
+    return {str(k).lower(): str(v) for k, v in entity.get("keys") or []}
 
 
 def _flags(entity: dict, key: str) -> int:
@@ -469,7 +467,7 @@ class Script:
     def __init__(self, text: str, spec: dict, meta: dict):
         self.meta = meta.get("script") or {}
         try:
-            blocks = mapscript.parse(text, mapscript.brace_actions(spec)) if text else []
+            blocks = mapscript.parse_spec(text, spec) if text else []
         except mapscript.ScriptSyntaxError:
             blocks = []
         self.blocks = {b.name.casefold(): b for b in blocks}

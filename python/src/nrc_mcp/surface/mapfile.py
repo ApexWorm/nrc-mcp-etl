@@ -19,6 +19,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from .. import analysis as anamod
 from .. import mapscript, profiles, rules, soundscript
 from .. import playspace as playspacemod
+from .. import solids as solidsmod
 from ..kernel import parse_map, repo_root
 from ..project_state import write_batch
 from ..runtime import (
@@ -32,17 +33,22 @@ from ..runtime import (
 
 
 @tool("map", "Open map")
-def map_open(path: str, grid: int = 8) -> dict:
+def map_open(path: str, grid: int = 8, discard_unsaved: bool = False) -> dict:
     """Open a `.map` file for analysis.
+
+    Refused while the open map has edits or staged files `map_save` has not written, which
+    opening another map would throw away; save them first, or pass `discard_unsaved`.
 
     Args:
         path: path to the `.map`. Relative paths resolve against the repo root.
         grid: authoring grid that off-grid geometry is measured against.
+        discard_unsaved: open anyway, dropping the open map's unsaved work.
 
     Returns a summary plus a round-trip check. If `round_trip.identical` is false, treat
     every later answer about this map with suspicion and report it — that is the §3.2 gate
     failing on a real file, which is a kernel bug worth fixing before anything else.
     """
+    _refuse_unsaved(discard_unsaved)
     p = Path(path)
     if not p.is_absolute():
         p = repo_root() / p
@@ -51,6 +57,7 @@ def map_open(path: str, grid: int = 8) -> dict:
     m = parse_map(loaded.decode("utf-8"))
 
     SESSION.map = m
+    SESSION.saved_source = m.source()
     SESSION.path = p
     SESSION.grid = grid
     SESSION.warnings = []
@@ -88,22 +95,36 @@ def map_open(path: str, grid: int = 8) -> dict:
     }
 
 
+def _refuse_unsaved(discard: bool) -> None:
+    """Refuse to replace the open map while it holds work `map_save` has not written."""
+    unsaved = SESSION.unsaved()
+    if unsaved and not discard:
+        raise ToolError(
+            f"the open map {SESSION.path} has unsaved work ({', '.join(unsaved)}); map_save it "
+            "first, or pass discard_unsaved=true to drop it"
+        )
+
+
 #: An empty map: the worldspawn every map starts with, and nothing else.
 EMPTY_MAP = '{\n"classname" "worldspawn"\n}\n'
 
 
 @tool("map", "Create a new map", writes=True)
-def map_new(path: str, grid: int = 8) -> dict:
+def map_new(path: str, grid: int = 8, discard_unsaved: bool = False) -> dict:
     """Create an empty `.map` holding only a worldspawn, and open it.
 
     The start of a map built from nothing: then `solid_commit` for geometry, `entity_place`
     for point entities, `map_save` to write. An existing file is never overwritten — open it
-    with `map_open` instead. Missing parent folders are created.
+    with `map_open` instead. Missing parent folders are created. A generated-solid sidecar
+    left beside the path by an earlier map describes none of this one's brushes: it is not
+    adopted, and `map_save` replaces it.
 
     Args:
         path: where to create it, ending in `.map`. Relative paths resolve against the repo root.
         grid: authoring grid, as for `map_open`.
+        discard_unsaved: as for `map_open`.
     """
+    _refuse_unsaved(discard_unsaved)
     p = Path(path)
     if not p.is_absolute():
         p = repo_root() / p
@@ -119,7 +140,14 @@ def map_new(path: str, grid: int = 8) -> dict:
             f.write(EMPTY_MAP)
     except FileExistsError as e:
         raise ToolError(f"{p} already exists; map_new never overwrites") from e
-    result = map_open(str(p), grid=grid)
+    result = map_open(str(p), grid=grid, discard_unsaved=True)
+    sidecar = solidsmod.sidecar_path(p)
+    if SESSION.read_file(sidecar) is not None:
+        SESSION.stage_file(sidecar, solidsmod.encode({"solids": {}}))
+        SESSION.warnings.append(
+            f"{sidecar.name} beside the new map belongs to an earlier one; it is not adopted, "
+            "and map_save replaces it"
+        )
     result["created"] = True
     result["next"] = "solid_commit for geometry, entity_place for point entities, then map_save"
     return result
@@ -153,8 +181,9 @@ def map_save(
     `map_open` and it is the one enforced here. A difference introduced since then is your
     edit, not a kernel failure, and does not block the write.
 
-    **The map.** The write is compared against the file it is about to replace, and refused
-    if it destroys playable space — an interior floor sealed off, or a surface you can now
+    **The map.** The write is compared against the open map's file on disk (for a Save As,
+    the file it was opened from: the destination must not exist yet), and refused if it
+    destroys playable space — an interior floor sealed off, or a surface you can now
     stand on top of a clip volume. Both are silent in every other check: the map still
     compiles, still seals, still validates, and is unplayable. See `playable_space_diff` for
     the same report on its own.
@@ -273,6 +302,7 @@ def map_save(
         SESSION.baseline_files.update(changes)
     SESSION.pending_files.clear()
     SESSION.checkpoints.clear()
+    SESSION.saved_source = m.source()
     written = str(target)
     out: dict[str, Any] = {
         "written": True,
@@ -902,7 +932,7 @@ def validate_profile(profile_id: str | None = None, severity_min: str = "info") 
         text = None
         if spec and SESSION.path:
             data = SESSION.read_file(mapscript.script_path(spec, SESSION.path))
-            text = data.decode("utf-8", errors="replace") if data is not None else ""
+            text = mapscript.decode(data) if data is not None else ""
         found += mapscript.check(pid, ents, SESSION.path, text=text)
         # And its speaker and sound scripts, and the names that point into them.
         found += soundscript.check(pid, ents, SESSION.path, script_text=text)
@@ -973,32 +1003,37 @@ def _script_spec() -> tuple[str, dict, Path]:
     return pid, spec, mapscript.script_path(spec, SESSION.path)
 
 
-def _action_text(action: mapscript.Action) -> str:
-    """An action as a script line, quoting arguments with spaces, so it can be written back."""
-    args = [f'"{x}"' if (not x or any(c.isspace() for c in x)) else x for x in action.args]
-    return " ".join([action.name, *args])
+def _script_text(path: Path) -> str:
+    """The open map's script, staged or on disk, one character per byte (`mapscript.decode`)."""
+    return mapscript.decode(SESSION.read_file(path))
 
 
 def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
-    """The script as blocks and events, which blocks run, and what the checker says."""
+    """The script as blocks and events, which blocks run, and what the checker says.
+
+    Each action is shown as a line `script_set_event` takes back unchanged: arguments quoted
+    where they need it and a brace action's list in its braces.
+    """
     ents = SESSION.map.entities()
     named = mapscript.names(spec, ents)
-    blocks = mapscript.parse(text, mapscript.brace_actions(spec)) if text.strip() else []
+    blocks = mapscript.parse_spec(text, spec) if text.strip() else []
     found = mapscript.check(pid, ents, SESSION.path, text=text)
+    braced = mapscript.brace_actions(spec)
+    shown = mapscript.to_user
     return {
         "path": str(path),
         "exists": SESSION.read_file(path) is not None,
         "staged": path.resolve() in SESSION.pending_files,
         "blocks": [
             {
-                "block": b.name,
+                "block": shown(b.name),
                 "line": b.line,
                 "runs_for_entities": named.get(b.name.lower(), []),
                 "events": [
                     {
-                        "event": " ".join([e.name, *e.params]),
+                        "event": shown(" ".join([e.name, *e.params])),
                         "line": e.line,
-                        "actions": [_action_text(a) for a in e.actions],
+                        "actions": [shown(mapscript.action_text(a, braced)) for a in e.actions],
                     }
                     for e in b.events
                 ],
@@ -1011,7 +1046,7 @@ def _script_report(pid: str, spec: dict, path: Path, text: str) -> dict:
 
 
 def _write_script(path: Path, text: str) -> None:
-    SESSION.stage_file(path, text.encode("utf-8"))
+    SESSION.stage_file(path, mapscript.encode(text))
 
 
 @tool("map", "Show the map script")
@@ -1020,12 +1055,12 @@ def script_show() -> dict:
 
     For a game whose maps carry a script beside the `.map` (the profile's `mapscript:`). A block
     with an empty `runs_for_entities` never runs: no entity names it. The findings are the same
-    ones `validate_profile` reports for the script.
+    ones `validate_profile` reports for the script. Every action is shown as a line
+    `script_set_event` takes back as it is.
     """
     pid, spec, path = _script_spec()
-    text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
     try:
-        return _script_report(pid, spec, path, text)
+        return _script_report(pid, spec, path, _script_text(path))
     except mapscript.ScriptSyntaxError as e:
         raise ToolError(f"{path.name}: {e}; fix it by hand, the engine stops on it too") from e
 
@@ -1040,22 +1075,26 @@ def script_set_event(
     `["wait 50", "setautospawn \"Axis Bunker\" 0"]`. They replace the event's current actions;
     the event, its block and the script file are created if they do not exist. `params` follow
     the event name, as in `trigger open`. Everything else in the file - comments, layout,
-    other blocks - is left exactly as it was.
+    line endings, other blocks, every byte - is left exactly as it was; setting the actions an
+    event already has changes nothing (`did: unchanged`).
 
-    Refused before anything is written: an event or action the profile does not list, and a
-    line the engine would misparse. Written, then reported in `findings`: references that
-    resolve to nothing yet, since the entity may be placed next. The script is staged
-    with the geometry; `map_save` saves both and checks for external changes.
+    Refused before anything is staged: an event or action the profile does not list, and a
+    line the engine would read differently from how it looks - a comment, an open quote, an
+    empty `""`, a brace among an action's arguments, text past ASCII outside quotes. The edited
+    script is parsed again and must read exactly as asked. Staged, then reported in
+    `findings`: references that resolve to nothing yet, since the entity may be placed next.
+    `map_save` saves the script with the map and checks for external changes.
     """
     pid, spec, path = _script_spec()
-    text = (SESSION.read_file(path) or b"").decode("utf-8", errors="replace")
+    text = _script_text(path)
     try:
         new, did = mapscript.set_event(text, spec, block, event, list(params or []), actions)
     except mapscript.ScriptEditError as e:
         raise ToolError(f"refused, nothing written: {e}") from e
     except mapscript.ScriptSyntaxError as e:
         raise ToolError(f"{path.name} does not parse ({e}); fix it by hand first") from e
-    _write_script(path, new)
+    if did != "unchanged":
+        _write_script(path, new)
     return {"did": did, **_script_report(pid, spec, path, new)}
 
 
@@ -1063,15 +1102,19 @@ def script_set_event(
 def script_remove(block: str, event: str | None = None, params: list[str] | None = None) -> dict:
     """Remove one event from a block of the open map's script, or the whole block.
 
-    Without `event`, the whole block goes. Everything else in the file is left as it was. The
-    script is staged until `map_save`.
+    Without `event`, the whole block goes, and with it every later block of the same name:
+    only the first of a name runs, so removing it alone would make a forgotten copy run
+    instead. `removed_blocks` says how many went. Everything else in the file is left as it
+    was. The script is staged until `map_save`.
     """
     pid, spec, path = _script_spec()
     if SESSION.read_file(path) is None:
         raise ToolError(f"there is no script at {path} to remove anything from")
-    text = SESSION.read_file(path).decode("utf-8", errors="replace")
+    text = _script_text(path)
     try:
+        before = len(mapscript.parse_spec(text, spec))
         new = mapscript.remove(text, spec, block, event, list(params or []))
+        after = len(mapscript.parse_spec(new, spec))
     except mapscript.ScriptEditError as e:
         raise ToolError(f"nothing removed: {e}") from e
     except mapscript.ScriptSyntaxError as e:
@@ -1079,6 +1122,7 @@ def script_remove(block: str, event: str | None = None, params: list[str] | None
     _write_script(path, new)
     return {
         "removed": " ".join([block, *([event] if event else []), *(params or [])]),
+        "removed_blocks": before - after,
         **_script_report(pid, spec, path, new),
     }
 
@@ -1549,7 +1593,7 @@ def objective_place(
         raise ToolError(f"{kind} has no `{'`, `'.join(extra)}` brushes; leave it out")
 
     # The script edit is worked out first, so a refusal there changes nothing in the map.
-    text = (SESSION.read_file(script_path) or b"").decode("utf-8", errors="replace")
+    text = _script_text(script_path)
     try:
         for ev in events:
             text, _ = mapscript.set_event(

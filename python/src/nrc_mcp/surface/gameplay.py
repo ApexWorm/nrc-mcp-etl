@@ -313,7 +313,7 @@ def balance_report(
         report = balancemod.enrich(
             report,
             grid,
-            script_text=data.decode("utf-8", errors="replace") if data is not None else None,
+            script_text=mapscript.decode(data) if data is not None else None,
             stages=stages,
             team_sizes=team_sizes,
             run_speed=run_speed,
@@ -766,7 +766,7 @@ def objective_playtests(
     text = ""
     if SESSION.path is not None and spec:
         raw = SESSION.read_file(mapscript.script_path(spec, SESSION.path))
-        text = (raw or b"").decode("utf-8", errors="replace")
+        text = mapscript.decode(raw)
     try:
         grid = _session_grid(cell, pid)
         report = testsmod.generate(pid, grid, text, only=objective)

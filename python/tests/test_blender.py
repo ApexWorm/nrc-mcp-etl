@@ -278,6 +278,12 @@ def test_placement_keys_come_from_the_profile(pid):
     assert keys[0][0] == "classname"
 
 
+def test_placement_keeps_every_digit_of_a_coordinate(pid):
+    """`:g` rounded to six significant figures (audit M-R7)."""
+    d = dict(blender.model_place_keys(pid, "m.obj", [1234.5678, 1234567.5, -0.125]))
+    assert d["origin"] == "1234.5678 1234567.5 -0.125"
+
+
 def test_negative_scale_is_allowed_because_this_compiler_supports_it(pid):
     d = dict(blender.model_place_keys(pid, "m.obj", [0, 0, 0], scale=-1))
     a = profiles.load(pid)["assets"]

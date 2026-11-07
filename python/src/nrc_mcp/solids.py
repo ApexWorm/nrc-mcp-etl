@@ -16,6 +16,7 @@ units wider" becomes one field change and a recompile, instead of moving brush f
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -69,9 +70,19 @@ def encode(store: dict[str, Any]) -> bytes:
 
 
 def save(map_path: str | Path, store: dict[str, Any]) -> Path:
+    """Write the sidecar directly, replacing it whole: a failure leaves the old one intact.
+
+    The tools never call this - they stage the sidecar and `map_save` writes it with the
+    map, refusing if it changed on disk since it was read. This is for scripts and tests.
+    """
     p = sidecar_path(map_path)
     store["version"] = SIDECAR_VERSION
-    p.write_bytes(encode(store))
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(encode(store))
+        os.replace(tmp, p)
+    finally:
+        tmp.unlink(missing_ok=True)
     return p
 
 

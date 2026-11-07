@@ -435,7 +435,7 @@ impl PyMap {
             if let Some(why) = unwritable_pair(k, v) {
                 return Err(err(why));
             }
-            if k == "classname" {
+            if k.eq_ignore_ascii_case("classname") {
                 check_classname(&self.inner, Some(entity), v)?;
             }
         }
@@ -584,10 +584,11 @@ impl PyMap {
         Ok(out)
     }
 
-    /// Remove keys from one entity, every occurrence of each. Returns `(key, removed)` pairs.
+    /// Remove keys from one entity, every occurrence of each in any spelling, since the engine
+    /// matches key names without regard to case. Returns `(key, removed)` pairs.
     fn remove_keys(&mut self, entity: usize, keys: Vec<String>) -> PyResult<Vec<(String, bool)>> {
         self.entity_index(entity)?;
-        if keys.iter().any(|k| k == "classname") {
+        if keys.iter().any(|k| k.eq_ignore_ascii_case("classname")) {
             return Err(err(
                 "refusing to remove classname: an entity without one is not an entity to the \
                  engine. Set a different classname instead.",
@@ -597,7 +598,7 @@ impl PyMap {
         Ok(keys
             .into_iter()
             .map(|k| {
-                let removed = e.remove(&k);
+                let removed = e.remove_effective(&k);
                 (k, removed)
             })
             .collect())
@@ -1459,9 +1460,12 @@ fn texture_spec_from(d: Option<&Bound<'_, PyDict>>) -> PyResult<nrc_solid::emit:
     Ok(spec)
 }
 
-/// Add primitives to the entity they belong to: a named one, a new one, or the first of the
-/// class (created if there is none). A second entity of a class needs `new_entity`, since the
-/// first-of-class rule would otherwise pile every door into one. Returns the entity's index.
+/// Add primitives to the entity they belong to: entity `target_entity`, the worldspawn, or a
+/// new entity of `target_classname`. Any class but the worldspawn gets a new entity every
+/// time: joining the first of the class silently made a second door or explosive part of the
+/// first one - one entity, both volumes, one set of keys and one script block. Adding to an
+/// existing brush entity takes its index. `new_entity` is kept for callers that pass it; for
+/// the worldspawn it is refused, as a second worldspawn is. Returns the entity's index.
 fn place_prims(
     map: &mut Map,
     prims: Vec<Primitive>,
@@ -1481,27 +1485,22 @@ fn place_prims(
         e.prims.extend(prims);
         return Ok(i);
     }
-    let found = if new_entity {
-        None
-    } else {
-        map.entities
-            .iter()
-            .position(|e| e.classname() == target_classname)
-    };
-    Ok(match found {
-        Some(i) => {
+    if target_classname == "worldspawn" && !new_entity {
+        if let Some(i) = map.entities.iter().position(|e| e.is_worldspawn()) {
             map.entities[i].prims.extend(prims);
-            i
+            return Ok(i);
         }
-        None => {
-            let mut e = nrc_core::model::Entity::default();
-            e.set("classname", target_classname);
-            e.prims = prims;
-            map.entities.push(e);
-            d.set_item("created_entity", target_classname)?;
-            map.entities.len() - 1
-        }
-    })
+    }
+    if let Some(why) = unwritable_pair("classname", target_classname) {
+        return Err(err(why));
+    }
+    check_classname(map, None, target_classname)?;
+    let mut e = nrc_core::model::Entity::default();
+    e.set("classname", target_classname);
+    e.prims = prims;
+    map.entities.push(e);
+    d.set_item("created_entity", target_classname)?;
+    Ok(map.entities.len() - 1)
 }
 
 /// Add a curved surface - a cylinder, an arch or a bevel - as a `patchDef2`.

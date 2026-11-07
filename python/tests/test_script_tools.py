@@ -104,8 +104,32 @@ def test_a_profile_without_map_scripts_says_so(nrcroom, monkeypatch):
 def test_script_show_quotes_arguments_so_actions_can_be_written_back(nrcroom):
     spawn = srv.script_show()["blocks"][0]["events"][0]["actions"]
     assert 'setautospawn "Axis Bunker" 0' in spawn
-    srv.script_set_event("game_manager", "spawn", spawn)
+    assert srv.script_set_event("game_manager", "spawn", spawn)["did"] == "unchanged"
     assert srv.validate_profile()["summary"]["error"] == 0, "round-trips without breaking names"
+
+
+def test_a_script_edit_saves_every_byte_it_did_not_touch(nrcroom):
+    """CRLF, UTF-8 and a byte that is not UTF-8 survive an edit and a save (audit S-F2)."""
+    raw = ("// café \x81\n".encode("latin-1") + nrcroom.read_bytes()).replace(b"\n", b"\r\n")
+    nrcroom.write_bytes(raw)
+    srv.map_open(str(nrcroom.with_suffix(".map")))
+    spawn = srv.script_show()["blocks"][0]["events"][0]["actions"]
+    assert srv.script_set_event("game_manager", "spawn", spawn)["did"] == "unchanged"
+    death = ['wm_announce "The gate is down!"']
+    assert srv.script_set_event("gate", "death", death)["did"] == "replaced event"
+    srv.map_save(check_playable_space=False)
+    assert nrcroom.read_bytes() == raw.replace(b"gate between the bunkers is", b"gate is")
+
+
+@pytest.mark.parametrize(
+    "actions", [["set {targetname foo}"], ['set { "a" "}b" }'], ["wait 50 /*"], ['wait ""']]
+)
+def test_an_edit_that_would_break_the_script_stages_nothing(nrcroom, actions):
+    """Refused before staging, so the script still parses and later edits still work (S-F1)."""
+    with pytest.raises(ToolError, match="refused, nothing written"):
+        srv.script_set_event("gate", "trigger", actions, params=["open"])
+    assert not srv.script_show()["staged"]
+    assert srv.script_set_event("gate", "trigger", ["wait 1"], params=["open"])["staged"]
 
 
 def test_staged_lifetime_findings_reach_script_and_profile_reports(nrcroom):

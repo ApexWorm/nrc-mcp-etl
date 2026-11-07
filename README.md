@@ -510,7 +510,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 
 | Tool | Does |
 | --- | --- |
-| `map_open` | Open a `.map` for analysis. Everything else works on it. |
+| `map_open` | Open a `.map` for analysis. Everything else works on it. Refuses while the open map has unsaved work unless `discard_unsaved`. |
 | `map_new` | Create an empty `.map` (just a worldspawn) and open it. Never overwrites an existing file. |
 | `map_stats` | Counts, bounds, shader histogram, grid alignment. |
 | `map_save` | Write it back. Refuses if the map did not round-trip when opened, or if the write would destroy playable space. |
@@ -543,7 +543,7 @@ honestly, and a client deciding whether to ask permission reads that annotation.
 | `solid_help` | Every operator, its fields, and the on-grid caveat. |
 | `solid_compile` | Compile geometry and report it, touching nothing. |
 | `solid_preview` | Compile and render, without committing. |
-| `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail; `new_entity` makes a second door or trigger of a class. |
+| `solid_commit` | Compile and add the brushes to the open map. `textures` picks a shader per face direction and can make them detail; any `target_classname` but the worldspawn makes a new entity each call, `target_entity` adds to one that exists. |
 | `solids_commit` | Commit many solids in one call, all or none (sidecar included); a shared `textures` default and a compact per-label reply. |
 | `brush_set_detail` | Mark existing brushes detail (or structural again); takes `structural_audit` findings directly. |
 | `patch_commit` | Curved surfaces as patches: a column, an arch, a quarter-round bevel. |

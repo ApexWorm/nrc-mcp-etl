@@ -4038,6 +4038,20 @@ mapscript:
   brace_actions: [set, create, delete]
   # Of those, the one that spawns an entity from its key/value list (g_script_actions.c:5127).
   spawning_actions: [create]
+  # How the engine's tokenizer reads the file (qcommon/q_shared.c COM_ParseExt): whitespace
+  # is every byte <= ' ' read through a plain `char` (SkipWhitespace :515-530, a word ends at
+  # `c > 32` failing :765-780), which is signed on the x86/x86_64 builds, so bytes 0x80-0xff
+  # split words outside quotes too. Only '\n' is a line break (:524-528; a lone '\r' is just
+  # whitespace), and the newlines inside a /* */ comment (:687-698) or a quoted string
+  # (:706-763) are not seen, so an action's arguments run on past them. `\"` inside quotes is
+  # a nested string (:713-745), and an empty "" token reads as the end of the script
+  # (g_script.c:386, 452, 475; an action's arguments end at one, :522). Checked in etlded
+  # 2.86.2 x86_64 with nrcroom: `wm_axis_respawntime<0xe9>10` loads (the byte separates), a
+  # \r-only file, a "" or a quoted "}x" in a block another entity skips each stop the game,
+  # and a line break inside /* */ leaves the next word an argument.
+  tokenizer:
+    high_bytes: whitespace
+    locus: "qcommon/q_shared.c:515-530,643-787; game/g_script.c:380-623"
   # gScriptEvents, game/g_script.c:160-179. An unknown one stops the game (g_script.c:437).
   events:
     [spawn, trigger, pain, death, activate, stopcam, playerstart, built, buildstart, decayed,
@@ -4109,6 +4123,9 @@ mapscript:
       arg: 0
       resolves: block
       special: [self, global, player, activator]
+      # `self` is the entity running the action, so its own block must have the event
+      # (g_script_actions.c:1749-1755); the other specials reach entities not known here.
+      self: [self]
       event: trigger
       event_label_arg: 1
       severity: warning
