@@ -21,15 +21,15 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import signal
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
-from . import profiles
+from . import gamepath, procs, profiles
 
 
 class EngineError(RuntimeError):
@@ -86,7 +86,8 @@ def read_log(text: str, eng: dict, mapname: str) -> dict[str, Any]:
 
 
 def _start_display() -> tuple[subprocess.Popen | None, dict[str, str]]:
-    if os.environ.get("DISPLAY"):
+    # Only an X11 desktop needs a display named; Windows and macOS clients open their own window.
+    if os.environ.get("DISPLAY") or os.name == "nt" or sys.platform == "darwin":
         return None, {}
     xvfb = shutil.which("Xvfb")
     if not xvfb:
@@ -109,25 +110,25 @@ def _start_display() -> tuple[subprocess.Popen | None, dict[str, str]]:
 
 
 def _run(cmd: list[str], cwd: Path, seconds: float, env: dict[str, str]) -> int | None:
-    """Run for `seconds`, then stop it. None if it was still running (that is the good case)."""
+    """Run for `seconds`, then stop it. None if it was still running (that is the good case).
+
+    However the wait ends - the timeout, an interrupt, an error - the engine and anything it
+    started are stopped before this returns (`procs.kill_tree`, which also works on Windows).
+    """
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
         env={**os.environ, **env},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=True,
+        **procs.group_kwargs(),
     )
     try:
         return proc.wait(timeout=seconds)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGTERM)
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
         return None
+    finally:
+        procs.kill_tree(proc)
 
 
 def smoke(
@@ -145,7 +146,7 @@ def smoke(
         raise EngineError(f"{pk3} does not exist; run pack_pk3 first")
     eng = spec(profile_id)
     pkg = profiles.load(profile_id).get("packaging") or {}
-    basepath = os.environ.get("NRC_FS_BASEPATH")
+    basepath = gamepath.basepath()
     if not basepath:
         raise EngineError("NRC_FS_BASEPATH is not set, so the engine has no game data")
     mapname = map_in(pk3)
@@ -159,6 +160,17 @@ def smoke(
         runs = []
 
         server = find_binary(eng["server"], basepath, os.environ.get("NRC_ENGINE_SERVER"))
+        # Find the client before the server runs: a client that cannot start must not turn the
+        # server's verdict into "could not run", which callers read as a skip, not a failure.
+        client_binary: Path | None = None
+        client_skipped: str | None = None
+        if client:
+            try:
+                client_binary = find_binary(
+                    eng["client"], basepath, os.environ.get("NRC_ENGINE_CLIENT")
+                )
+            except EngineError as e:
+                client_skipped = str(e)
         code = _run([str(server), *_expand(eng["server_args"], subs)], home, seconds, {})
         runs.append(
             {
@@ -170,14 +182,19 @@ def smoke(
             }
         )
 
-        if client:
+        display = env = None
+        if client_binary is not None:
+            try:
+                display, env = _start_display()
+            except EngineError as e:
+                client_skipped = str(e)
+        if client_binary is not None and env is not None:
+            binary = client_binary
             log.unlink(missing_ok=True)
             for f in eng.get("client_files") or []:
                 target = home / str(f["path"])
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(str(f["text"]))
-            binary = find_binary(eng["client"], basepath, os.environ.get("NRC_ENGINE_CLIENT"))
-            display, env = _start_display()
             try:
                 code = _run(
                     [str(binary), *_expand(eng["client_args"], subs)], home, client_seconds, env
@@ -216,11 +233,15 @@ def smoke(
             "package": str(pk3),
             "seconds": seconds,
             "runs": runs,
+            # Asked for, but it could not start: `ok` is the server's verdict alone.
+            "client_skipped": client_skipped,
             "home": str(home) if keep else None,
             "note": (
                 "the server only proves the map loads and its script starts; pass client=True "
                 "to also join as a spectator, which some errors need"
                 if not client
+                else f"the client could not start ({client_skipped}); only the server was checked"
+                if client_skipped
                 else "client connection and process exits are checked; this does not test objective completion"
             ),
         }

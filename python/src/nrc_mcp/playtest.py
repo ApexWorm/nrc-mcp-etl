@@ -12,7 +12,6 @@ import math
 import os
 import re
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
@@ -21,7 +20,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from . import engine, profiles
+from . import engine, gamepath, procs, profiles
 from .kernel import repo_root
 
 
@@ -564,24 +563,22 @@ def _inside(home: Path, relative: str) -> Path:
 
 
 def _stop(proc, *, group: bool):
+    """Give `proc` five seconds to exit, then end it: with everything it started when it was
+    started as a group (`procs.kill_tree`, which also works on Windows), else alone."""
     try:
         proc.wait(timeout=5)
         return
     except subprocess.TimeoutExpired:
         pass
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            if group:
-                os.killpg(proc.pid, sig)
-            else:
-                proc.send_signal(sig)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=5)
-            return
-        except subprocess.TimeoutExpired:
-            continue
+    if group:
+        procs.kill_tree(proc, grace=5)
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 
 
 def run(
@@ -614,7 +611,7 @@ def run(
         raise PlaytestError(
             "package map name must contain only letters, digits, underscores or hyphens"
         )
-    basepath = os.environ.get("NRC_FS_BASEPATH")
+    basepath = gamepath.basepath()
     if not basepath:
         raise PlaytestError("NRC_FS_BASEPATH is not set")
     eng = engine.spec(profile_id)
@@ -722,7 +719,7 @@ def _run(
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 text=True,
-                start_new_session=True,
+                **procs.group_kwargs(),
             )
             driver = Driver(
                 proc,

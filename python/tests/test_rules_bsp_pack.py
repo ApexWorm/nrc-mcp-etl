@@ -906,9 +906,11 @@ def packer(tmp_path, monkeypatch):
     """A fake game install and a fake q3map2 that, like the real one, packs into the install."""
     install = tmp_path / "install"
     (install / "basedir").mkdir(parents=True)
+    # Like the stock archives, it holds several maps (one of them named like ours): it is the
+    # base game, not an earlier build of this map.
     make_pk3(
         install / "basedir" / "pak0.pk3",
-        ["textures/base/wall.TGA", "maps/nrcroom.bsp", "scripts/shared.shader"],
+        ["textures/base/wall.TGA", "maps/nrcroom.bsp", "maps/stock.bsp", "scripts/shared.shader"],
     )
     work = tmp_path / "work"
     (work / "maps").mkdir(parents=True)
@@ -1057,6 +1059,123 @@ def test_pack_pk3_clears_a_stale_failure_marker_before_packing(packer):
     r = pack.pack_pk3(packer["bsp"], profile_id="test")
     assert r["ok"] and r["failed_packages"] == []
     assert not stale.exists()
+
+
+def test_pack_pk3_leaves_other_maps_archives_alone(packer):
+    """`nrcroom*.pk3` also matches other maps' archives; only this map's two names are its own.
+
+    Before, packing nrcroom rewrote nrcroombar's package with nrcroom's companions, failed on
+    nrcroom2's failure marker and moved a stray nrcroom_v1.pk3."""
+    work = packer["work"]
+    others = {
+        "nrcroombar_autopacked.pk3": ["maps/nrcroombar.bsp", "textures/bar/x.tga"],
+        f"nrcroom2{pack.FAILURE_SUFFIX}": ["maps/nrcroom2.bsp"],
+        "nrcroom_v1.pk3": ["maps/nrcroom.bsp"],
+    }
+    before = {}
+    for name, members in others.items():
+        before[name] = make_pk3(work / name, members).read_bytes()
+    (work / "maps" / "nrcroom.script").write_text("game_manager {}")
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["ok"], r
+    assert r["packages"] == [str(work / f"nrcroom{pack.SUCCESS_SUFFIX}")]
+    for name, data in before.items():
+        assert (work / name).read_bytes() == data, f"{name} must be untouched"
+    assert pack._find_packages(packer["bsp"]) == [work / f"nrcroom{pack.SUCCESS_SUFFIX}"]
+    # ship_check inspects this map's package, never a neighbour's.
+    assert pack.ship_check(packer["bsp"], "test")["package"] == r["packages"][0]
+
+
+def test_an_earlier_build_in_the_base_folder_is_not_the_base_game(packer):
+    """A test copy of the map in the game folder must not strip the new package's own assets:
+    the shipped package would then work only where that copy is installed."""
+    base = packer["install"] / "basedir"
+    make_pk3(base / "nrcroom_v1.pk3", ["maps/nrcroom.bsp", "textures/mine/door.tga"])
+    # Named for nothing, but holding only this map: still a build of it.
+    make_pk3(base / "zz_test.pk3", ["maps/nrcroom.bsp", "textures/mine/door.tga"])
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["dropped_basegame"] == ["textures/base/wall.tga"], "the real base game still counts"
+    assert "textures/mine/door.tga" in names(r["packages"][0])
+    assert "textures/mine/door.tga" not in pack.basegame_entries(base, "nrcroom")
+    assert "textures/mine/door.tga" in pack.basegame_entries(base), "no map named: all archives"
+
+
+def test_a_failure_part_way_leaves_no_temporary_file_and_nothing_in_the_install(
+    packer, monkeypatch
+):
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pack, "_companion_paths", broken)
+    with pytest.raises(OSError, match="disk full"):
+        pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert not list(packer["work"].glob("*.tmp"))
+    assert not list(packer["install"].glob("*.pk3")), "the packer's raw archive is not left"
+
+
+def test_the_archive_is_found_where_q3map2_writes_it_without_its_report(packer, monkeypatch):
+    """q3map2 writes `<basepath>/<map>_autopacked.pk3` (seen with 2.5.17n); output that lost the
+    `Saved to` line still finds it there."""
+
+    def quiet_q3map2(args, target, timeout=1800):
+        make_pk3(packer["install"] / f"{target.stem}{pack.SUCCESS_SUFFIX}", packer["packed"])
+        return {"ok": True, "returncode": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(pack, "_q3map2", quiet_q3map2)
+    r = pack.pack_pk3(packer["bsp"], profile_id="test")
+    assert r["ok"] and r["packages"] == [str(packer["work"] / f"nrcroom{pack.SUCCESS_SUFFIX}")]
+    assert not list(packer["install"].glob("*.pk3"))
+
+
+def test_a_windows_path_in_the_packers_report_is_opened_through_its_mount(monkeypatch):
+    """Under WSL q3map2.exe prints `Saved to C:\\...`, which never resolves as is."""
+    monkeypatch.setattr(pack.sys, "platform", "linux")
+    monkeypatch.setattr(pack.shutil, "which", lambda _name: None)
+    assert pack._local_path(r"C:\Users\me\AppData\nrcroom_autopacked.pk3") == Path(
+        "/mnt/c/Users/me/AppData/nrcroom_autopacked.pk3"
+    )
+    assert pack._local_path("/root/x_autopacked.pk3") == Path("/root/x_autopacked.pk3")
+
+
+def test_the_install_is_recognised_under_either_of_its_names(packer, monkeypatch, tmp_path):
+    """q3map2 reads URT_BASEPATH when NRC_FS_BASEPATH is unset; so must the packer, or a map
+    inside the install gets its package written into the install."""
+    monkeypatch.delenv("NRC_FS_BASEPATH")
+    monkeypatch.setenv("URT_BASEPATH", str(packer["install"]))
+    inside = packer["install"] / "basedir" / "maps"
+    inside.mkdir()
+    bsp = inside / "nrcroom.bsp"
+    bsp.write_bytes(b"IBSP")
+    monkeypatch.setattr(pack, "repo_root", lambda: tmp_path / "repo")
+    r = pack.pack_pk3(bsp, profile_id="test")
+    assert r["packages"] == [
+        str(tmp_path / "repo" / "out" / "nrcroom" / f"nrcroom{pack.SUCCESS_SUFFIX}")
+    ]
+    assert not list(packer["install"].rglob(f"*{pack.SUCCESS_SUFFIX}"))
+
+
+def test_the_packer_timing_out_is_a_failed_run_not_a_crash(monkeypatch, tmp_path):
+    def slow(cmd, *, timeout, **_k):
+        raise pack.subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(pack.procs, "run", slow)
+    r = pack._q3map2(["-pk3"], tmp_path / "m.bsp", timeout=3)
+    assert not r["ok"] and r["returncode"] is None and "3 s" in r["stderr"]
+
+
+def test_ship_check_wants_this_maps_own_arena_and_bsp(tmp_path: Path, pid):
+    pk3 = make_pk3(
+        tmp_path / "m.pk3", ["maps/other.bsp", "scripts/other.arena", "levelshots/m_cc.tga"]
+    )
+    r = pack.ship_check(tmp_path / "m.bsp", pid, pk3=pk3)
+    by_code = {f["code"]: f for f in r["findings"]}
+    assert by_code["SHIP_NO_BSP"]["severity"] == "error"
+    assert "maps/other.bsp" in by_code["SHIP_NO_BSP"]["message"]
+    assert "scripts/other.arena" in by_code["SHIP_NO_ARENA"]["message"]
+    assert "SHIP_NO_LEVELSHOT" in by_code, "the command map is not the levelshot"
+    good = make_pk3(tmp_path / "m2.pk3", ["maps/m.bsp", "scripts/m.arena"])
+    codes = {f["code"] for f in pack.ship_check(tmp_path / "m.bsp", pid, pk3=good)["findings"]}
+    assert "SHIP_NO_BSP" not in codes and "SHIP_NO_ARENA" not in codes
 
 
 # ---------------------------------------------------------------------------

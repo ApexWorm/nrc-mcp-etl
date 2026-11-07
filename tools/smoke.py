@@ -46,7 +46,10 @@ def main() -> int:
         print(json.dumps({"ok": False, "skipped": str(e)}, indent=2))
         return 2
     print(json.dumps(result, indent=2))
-    return 0 if result["ok"] else 1
+    if not result["ok"]:
+        return 1
+    # The server passed, but the client asked for could not start: not a full pass.
+    return 2 if result.get("client_skipped") else 0
 
 
 if __name__ == "__main__":

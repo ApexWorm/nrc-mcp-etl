@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import profiles
+from . import gamepath, profiles
 from .kernel import load_map, repo_root
 from .rules import Finding, parse_spawnflags
 
@@ -891,7 +891,7 @@ def shader_contents(profile_id: str, map_path: str | Path | None = None) -> Shad
                 for shader in parsed:
                     parms.setdefault(shader["name"].lower(), tuple(shader["surfaceparms"]))
                 sources.append(str(script))
-    base = os.environ.get("NRC_FS_BASEPATH")
+    base = gamepath.basepath()
     basegame = (data.get("packaging") or {}).get("basegame")
     if base and basegame and (Path(base) / str(basegame)).is_dir():
         directory = Path(base) / str(basegame)

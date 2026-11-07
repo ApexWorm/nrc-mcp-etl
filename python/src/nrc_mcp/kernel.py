@@ -12,10 +12,11 @@ what to run rather than surfacing a bare `ModuleNotFoundError`.
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
+
+from . import procs
 
 
 class KernelUnavailable(RuntimeError):
@@ -90,14 +91,13 @@ def run_mise_task(
     cmd = ["mise", "run", task]
     if args:
         cmd += ["--", *args]
-    proc = subprocess.run(
+    # A timeout ends the whole tree (mise, the wrapper, the compiler), not only mise.
+    proc = procs.run(
         cmd,
         cwd=repo_root(),
-        capture_output=True,
         text=True,
         errors="replace",
         timeout=timeout,
-        check=False,
         env={**os.environ, **(extra_env or {})},
     )
     return {

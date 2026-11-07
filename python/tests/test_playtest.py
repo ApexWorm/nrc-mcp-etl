@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from nrc_mcp import playtest, profiles
+from nrc_mcp import playtest, procs, profiles
 
 
 @pytest.fixture
@@ -335,12 +335,11 @@ def test_process_exit_race_during_group_cleanup_is_harmless(monkeypatch):
             raise result
         return result
 
-    proc = SimpleNamespace(pid=999999, wait=wait)
-
     def disappeared(*args):
         raise ProcessLookupError("already exited")
 
-    monkeypatch.setattr(playtest.os, "killpg", disappeared)
+    proc = SimpleNamespace(pid=999999, wait=wait, poll=lambda: None, send_signal=disappeared)
+    monkeypatch.setattr(procs.os, "killpg", disappeared)
     playtest._stop(proc, group=True)
 
 

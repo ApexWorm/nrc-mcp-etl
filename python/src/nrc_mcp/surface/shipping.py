@@ -60,7 +60,10 @@ def pack_pk3(
     The archive is then fixed up from the active profile: companion files and the arena that
     sit beside the map are added, with the sound files its speaker and sound scripts name,
     files the base game already ships are dropped, and it is written next to the folder that
-    holds `maps/`, never into the game install.
+    holds `maps/`, never into the game install. An earlier build of this map left in the game
+    folder (an archive holding this map's BSP and no other) is not the base game, so its files
+    are not dropped. Only this map's own `<map>_autopacked.pk3` / `_FAILEDpack.pk3` are touched;
+    other archives whose names begin with the map's are left alone.
 
     `depends` lists other archives the map is played alongside, whose textures, models and
     sounds it uses (a map built on another map's assets): what they hold counts as found and
@@ -106,7 +109,9 @@ def ship_check(
 
     Conventions come from the profile's `packaging` section, and unverified ones produce
     `info` rather than failures — the levelshot size and arena key list are community practice
-    rather than anything the gamepack documents.
+    rather than anything the gamepack documents. Files are matched by this map's name: the
+    package must hold `maps/<map>.bsp` (an error otherwise), and another map's arena or the
+    `_cc` command map does not stand in for this map's arena or levelshot.
     """
     t = target or (str(SESSION.path) if SESSION.path else None)
     if t is None:

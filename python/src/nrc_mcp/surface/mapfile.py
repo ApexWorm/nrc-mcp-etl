@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import itertools
 import math
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,7 @@ from typing import Any
 from mcp.server.mcpserver.exceptions import ToolError
 
 from .. import analysis as anamod
-from .. import mapscript, profiles, rules, soundscript
+from .. import gamepath, mapscript, profiles, rules, soundscript
 from .. import playspace as playspacemod
 from ..kernel import parse_map, repo_root
 from ..project_state import write_batch
@@ -933,9 +932,7 @@ def _missing_textures(m, pid: str) -> list[rules.Finding]:
 
     if SESSION.path is None:
         return []
-    basegame = _basegame_dir(
-        os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH"), pid
-    )
+    basegame = _basegame_dir(gamepath.basepath(), pid)
     if not basegame or not Path(basegame).is_dir():
         return []
     try:
