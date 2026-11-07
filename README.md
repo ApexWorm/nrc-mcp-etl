@@ -453,6 +453,22 @@ archive, so a definition the map or the game ships still wins. They are never pa
 `shader_audit` lists them under `compile_only`, `repack_analyze` and `pack_pk3` do not count them
 as missing, and the movement analysis treats the volumes as nonsolid, as the compiled map does.
 
+**Compile times.** On a full-size map, light takes almost all of the time. Measured on ET: Legacy's
+Supply Depot (`etl_supply.map`, 11.9 MB, 13 377 brushes). The machine had 32 cores shared with
+other jobs (load average 36-45), so a quiet machine of that size is faster:
+
+| Compile | -bsp | -vis | -light | total |
+| --- | --- | --- | --- | --- |
+| `draft` | 4.6 s | – | – | 5 s |
+| `quality` | 4.5 s | 1.7 s | 48 s | 54 s |
+| `final` | 4.7 s | 2.0 s | 1254 s | 21 min |
+| the author's release line (`_q3map2_cmdline` in the shipped BSP: `-samplesize 4`, `-bounce 6 -fastbounce`, `-samples 4`, `-dirty`, ...) | 4.4 s | 1.7 s | 900 s | 15 min |
+
+Light time scales with the cores q3map2 gets, so a laptop needs a multiple of these. `compile_map`
+waits up to 900 s for `draft`, 1800 s for `iterate`, 3600 s for `quality` and 7200 s for `final`.
+Pass `timeout_seconds` for anything longer. Before, one 1800 s limit covered every preset, and a
+`final` build of this map came within 10 minutes of it.
+
 **7 — Optimize, then ship.**
 
 ```json

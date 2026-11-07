@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -197,12 +198,22 @@ def _resolve(path: str) -> Path:
     return p if p.is_absolute() else repo_root() / p
 
 
+#: How long `compile_map` waits for a whole preset, in seconds. A release compile of a full-size
+#: map is mostly -light: ET: Legacy's Supply Depot with its author's own light line took 15
+#: minutes on 32 busy cores (README "Compile times"); a smaller machine needs a multiple of that.
+COMPILE_TIMEOUTS = {"draft": 900, "iterate": 1800, "quality": 3600, "final": 7200}
+
+
 @tool("compiling", "Compile with q3map2", writes=True)
-def compile_map(preset: str = "draft", path: str | None = None) -> dict:
+def compile_map(
+    preset: str = "draft", path: str | None = None, timeout_seconds: int | None = None
+) -> dict:
     """Compile a map with q3map2.
 
     Presets (§6.1): `draft` geometry-only seconds-long check, `iterate` playable test build,
-    `quality` review build, `final` release build.
+    `quality` review build, `final` release build. Light dominates the slow presets: on a
+    full-size map `final` can take tens of minutes. `timeout_seconds` overrides the preset's
+    limit (draft 900, iterate 1800, quality 3600, final 7200).
 
     On a WSL host where q3map2 is a Windows binary, the wrapper stages the map onto the
     Windows filesystem and copies artefacts back to `out/` — paths are handled for you.
@@ -215,8 +226,11 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
     to q3map2 on every compile, below everything else, so a definition the map or its packs
     carry wins. They are never packed; shader_audit lists them under `compile_only`.
     """
-    if preset not in ("draft", "iterate", "quality", "final"):
+    if preset not in COMPILE_TIMEOUTS:
         raise ToolError(f"unknown preset {preset!r} — choose draft, iterate, quality or final.")
+    limit = COMPILE_TIMEOUTS[preset] if timeout_seconds is None else int(timeout_seconds)
+    if limit < 1:
+        raise ToolError("timeout_seconds must be at least 1")
     explicit = Path(path) if path else None
     if explicit is not None and not explicit.is_absolute():
         explicit = repo_root() / explicit
@@ -273,11 +287,19 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
         )
     else:
         target = explicit
-    run = run_mise_task(
-        f"compile:{preset}",
-        [str(target)],
-        extra_env={"NRC_BUILD_OUTPUT": str(target.parent)} if receipt is not None else None,
-    )
+    try:
+        run = run_mise_task(
+            f"compile:{preset}",
+            [str(target)],
+            timeout=limit,
+            extra_env={"NRC_BUILD_OUTPUT": str(target.parent)} if receipt is not None else None,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ToolError(
+            f"the {preset} compile did not finish in {limit} seconds; a full-size map's light "
+            "stage can take longer on this machine. Pass a larger timeout_seconds, or use "
+            "quality/iterate while iterating."
+        ) from e
     if receipt is not None:
         run["revision"] = receipt
         run["build_directory"] = str(build)
