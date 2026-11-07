@@ -23,6 +23,7 @@ import json
 import re
 import shutil
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -145,6 +146,32 @@ def mirror_way(src: Path, dest: Path) -> dict:
     return {"waypoints": len(wf.waypoints), "file": str(dest)}
 
 
+def per_objective(generated_run: dict, receipt: dict) -> list[dict]:
+    """Each objective's outcome and engine seconds in one run: its steps end at the
+    `<name>_done` screenshot objective_playtests puts after each test (the templates take
+    none of their own). A receipt names each step's action; the scenario has the rest."""
+    rows, current = [], {"seconds": 0.0, "ok": True, "steps": 0}
+    names = iter(generated_run["objectives"])
+    planned = generated_run["scenario"]["steps"]
+    for s in receipt.get("steps", []):
+        index = s.get("index")
+        step = planned[index] if isinstance(index, int) and index < len(planned) else {}
+        current["seconds"] += float(s.get("seconds") or 0)
+        current["steps"] += 1
+        current["ok"] = current["ok"] and bool(s.get("ok"))
+        if not s.get("ok"):
+            current["failed"] = step.get("label") or step.get("action")
+            current["error"] = s.get("error")
+        if step.get("action") == "screenshot" and str(step.get("name", "")).endswith("_done"):
+            rows.append({"objective": next(names, "?"), **current})
+            current = {"seconds": 0.0, "ok": True, "steps": 0}
+    if current["steps"]:
+        rows.append({"objective": next(names, "?"), **current, "ok": False})
+    for row in rows:
+        row["seconds"] = round(row["seconds"], 1)
+    return rows
+
+
 async def main(args):
     source_map = Path(args.map).resolve()
     source_pk3 = Path(args.pk3).resolve()
@@ -250,9 +277,9 @@ async def main(args):
             )
             result["engine_smoke"] = {k: receipt.get(k) for k in ("ok", "error", "result_path")}
             run.artifact("result", result)
-            # The objective flow, hand-written (objective_playtests only reaches what the
-            # start-of-round grid connects to a spawn, so not the truck or the objectives
-            # behind the gates): escort the truck a little,
+            # The objective flow, hand-written (objective_playtests chains the objectives
+            # behind the gates after them, but does not escort the truck or respawn in the
+            # bunker): escort the truck a little,
             # dynamite the forward bunker gate, respawn in the bunker the script hands the
             # Allies, dynamite the depot gate. `position` is test setup, not a route.
             flow = json.loads(
@@ -282,10 +309,18 @@ async def main(args):
             run.artifact("result", result)
 
         if args.objectives:
+            started = time.monotonic()
             generated = await run.call("objective_playtests", cell=args.cell)
             result["objective_tests"] = {
+                "seconds": round(time.monotonic() - started, 1),
                 "tests": [
-                    {"objective": t["objective"], "kind": t["kind"]} for t in generated["tests"]
+                    {
+                        "objective": t["objective"],
+                        "kind": t["kind"],
+                        "requires": t.get("requires", []),
+                        "standing": t["standing"],
+                    }
+                    for t in generated["tests"]
                 ],
                 "skipped": generated["skipped"],
                 "runs": [],
@@ -310,6 +345,7 @@ async def main(args):
                         "ok": receipt.get("ok"),
                         "error": receipt.get("error"),
                         "failed_step": failed,
+                        "per_objective": per_objective(r, receipt),
                         "result_path": receipt.get("result_path"),
                     }
                 )

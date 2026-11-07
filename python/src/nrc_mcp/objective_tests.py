@@ -15,7 +15,13 @@ a few macros this module expands from the map's geometry:
 Nothing here knows a classname, key or script action: they are all the profile's. Positions
 come from the navigation grid: a floor the player box rests on with headroom
 (`spawns.resting_floor`), on the walkable grid, and connected to one of the team's spawns by a
-walkable route (`analysis.path_distance`).
+walkable route, searched from all of them at once in the kernel (`routesearch`).
+
+An objective no spawn reaches at the start of the round may sit behind another one that opens
+the way (the profile's `objectives.playtest.state.opens`: a destroyed explosive frees its
+brushes). Its test is then looked for again on the map with those destroyed, and `requires`
+them: `pack` plays them first, in the same run. Entities the script hides as the round starts
+(`state.start_hidden`) are neither spawns nor collision.
 """
 
 from __future__ import annotations
@@ -26,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import analysis as anamod
-from . import mapscript, profiles
+from . import mapscript, profiles, routesearch
 from . import playtest as playtestmod
 from . import spawns as spawnsmod
 
@@ -34,6 +40,10 @@ from . import spawns as spawnsmod
 CLEAR_MARGIN = 8.0
 #: How far outside a spawn set a respawned player may stand and still count as there.
 SPAWN_MARGIN = 32.0
+#: How far the player box reaches into a trigger from a place beside it. A player touches a
+#: trigger its box (as a capsule) overlaps (G_TouchTriggers, game/g_active.c:436-499), so its
+#: origin may stand up to half its width outside the trigger's side.
+TOUCH_DEPTH = 6.0
 #: Reachability is checked for at most this many candidate spots per position.
 MAX_ROUTE_TRIES = 12
 #: Seconds the engine needs to start, before the first step (engine_playtest's connect wait).
@@ -42,6 +52,10 @@ STARTUP_SECONDS = 60
 
 class Untestable(Exception):
     """No test can be made for this objective; the message says why."""
+
+
+class Unreachable(Untestable):
+    """No place to play it is reachable from the team's spawns, on the map as it stands."""
 
 
 @dataclass
@@ -253,6 +267,8 @@ class Spot:
     y: float
     floor: float
     route: dict | None = None
+    #: The route's grid cells, when the search gives them (to tell what it passes through).
+    cells: list | None = None
 
     def origin(self, height: float) -> list[float]:
         return [_num(self.x), _num(self.y), _num(self.floor + height)]
@@ -270,8 +286,20 @@ def _yaw(a: tuple[float, float], b: tuple[float, float]) -> float:
 class Geometry:
     """Standing positions on the navigation grid, each reachable from a team's spawns."""
 
-    def __init__(self, grid: anamod.NavGrid, profile_id: str, meta: dict):
+    def __init__(
+        self,
+        grid: anamod.NavGrid,
+        profile_id: str,
+        meta: dict,
+        hidden: frozenset[int] = frozenset(),
+    ):
         self.grid = grid
+        #: Entities the script hides as the round starts: no spawn among them is used.
+        self.hidden = hidden
+        self._sources: dict[str, dict[tuple[int, int, int], list[float]]] = {}
+        self._learned = False
+        #: Objective entities left out of this grid because earlier tests destroy them.
+        self.opened: frozenset[int] = frozenset()
         self.game_map = grid.game_map
         self.meta = meta
         width = grid.movement.player_width
@@ -313,6 +341,8 @@ class Geometry:
 
     def active(self, entity: dict) -> bool:
         rule = (self.meta.get("spawns") or {}).get("active")
+        if entity["index"] in self.hidden:
+            return False
         if not rule:
             return True
         return bool(_flags(entity, str(rule["key"])) & int(rule["bit"]))
@@ -327,8 +357,49 @@ class Geometry:
             return None
         return floor
 
+    def sources(self, label: str) -> dict[tuple[int, int, int], list[float]]:
+        """The walkable cells the team's starting spawns stand on, each with its spawn."""
+        if label not in self._sources:
+            cells: dict[tuple[int, int, int], list[float]] = {}
+            for p in self.homes(label):
+                snap = self.grid.nearest_walkable((p[0], p[1], p[2] - self.stand_height))
+                if snap is not None:
+                    cells.setdefault(snap[0], p)
+            self._sources[label] = cells
+        return self._sources[label]
+
     def reach(self, spot: Spot, label: str) -> dict | None:
-        """A walkable route from one of the team's spawns (nearest first) to the spot."""
+        """A walkable route from the team's starting spawns to the spot: one search from all of
+        them at once, in the kernel, which learns each cell's moves once per grid (all of them
+        up front, in worker processes, before the first search)."""
+        if not routesearch.available():
+            return self._reach_python(spot, label)
+        goal = self.grid.nearest_walkable((spot.x, spot.y, spot.floor))
+        sources = self.sources(label)
+        if goal is None or not sources:
+            return None
+        cells = sum(len(c) for c in self.grid.columns.values())
+        with routesearch.LOCK:
+            graph, expand = routesearch.step_graph(self.grid)
+            if not self._learned:
+                self._learned = True
+                routesearch.learn(graph, expand, [(0, *c) for c in self.grid.walkable_cells()])
+            status, _expanded, _pruned, cost, path = graph.search(
+                [(0, *c) for c in sources],
+                [(0, *goal[0])],
+                [self.grid.centre(goal[0])],
+                expand,
+                max_nodes=max(anamod.MAX_A_STAR_NODES, cells + 1),
+                budget="after_goal_test",
+            )
+        if status != "found" or cost is None or not path:
+            return None
+        start = sources[tuple(path[0][1:])]
+        spot.cells = [tuple(k[1:]) for k in path]
+        return {"from": [_num(c) for c in start], "distance": round(cost, 2)}
+
+    def _reach_python(self, spot: Spot, label: str) -> dict | None:
+        """`reach` for a kernel without the native search: nearest spawns first."""
         starts = sorted(self.homes(label), key=lambda p: math.dist(p[:2], (spot.x, spot.y)))
         for start in starts[:3]:
             feet = (start[0], start[1], start[2] - self.stand_height)
@@ -360,30 +431,41 @@ class Geometry:
         clo, chi = clear
         pad = self.half + CLEAR_MARGIN
         rejected = {"no_floor": 0, "in_the_way": 0}
-        spots = []
         xs, ys = axis(lo[0], hi[0]), axis(lo[1], hi[1])
         # The lattice, and a ring just clear of the objective: a tight trigger leaves only that.
         ring_x = [v for v in (clo[0] - pad - 1, chi[0] + pad + 1) if lo[0] < v < hi[0]]
         ring_y = [v for v in (clo[1] - pad - 1, chi[1] + pad + 1) if lo[1] < v < hi[1]]
         candidates = [(x, y) for y in ys for x in xs]
         candidates += [(x, y) for x in ring_x for y in ys] + [(x, y) for y in ring_y for x in xs]
-        for x, y in candidates:
-            floor = self.standable(x, y, lo[2] - self.step, hi[2])
-            if floor is None:
-                rejected["no_floor"] += 1
-                continue
-            if (
-                clo[0] - pad < x < chi[0] + pad
-                and clo[1] - pad < y < chi[1] + pad
-                and floor <= chi[2] + self.step
-                and floor + self.height > clo[2]
-            ):
-                rejected["in_the_way"] += 1
-                continue
-            spots.append(Spot(x, y, floor))
-        if not spots:
+        # Then a band just outside each side, where the player box still reaches TOUCH_DEPTH
+        # into the box: a trigger filled by what it builds (a pile of materials) is touched
+        # from beside it, the way a player stands.
+        out = self.half - TOUCH_DEPTH
+        band = [(x, y) for x in (lo[0] - out, hi[0] + out) for y in ys]
+        band += [(x, y) for y in (lo[1] - out, hi[1] + out) for x in xs]
+
+        def standing(points) -> list[Spot]:
+            spots = []
+            for x, y in points:
+                floor = self.standable(x, y, lo[2] - self.step, hi[2])
+                if floor is None:
+                    rejected["no_floor"] += 1
+                    continue
+                if (
+                    clo[0] - pad < x < chi[0] + pad
+                    and clo[1] - pad < y < chi[1] + pad
+                    and floor <= chi[2] + self.step
+                    and floor + self.height > clo[2]
+                ):
+                    rejected["in_the_way"] += 1
+                    continue
+                spots.append(Spot(x, y, floor))
+            return spots
+
+        tiers = [standing(candidates), standing(band)]
+        if not any(tiers):
             raise Untestable(
-                f"no floor a player can stand on inside its box clear of the objective ({rejected})"
+                f"no floor a player can stand on in its box clear of the objective ({rejected})"
             )
 
         def gap(s: Spot) -> float:
@@ -397,14 +479,15 @@ class Geometry:
         def home(s: Spot) -> float:
             return min((math.dist(p[:2], (s.x, s.y)) for p in homes), default=0.0)
 
-        spots.sort(key=lambda s: (round(gap(s) / cell), home(s)))
-        chosen = self.first_reachable(spots, label)
-        if chosen is None:
-            raise Untestable(
-                f"none of the {len(spots)} places to stand inside its box is reachable from the "
-                f"{label} spawns"
-            )
-        return chosen
+        for spots in tiers:
+            spots.sort(key=lambda s: (round(gap(s) / cell), home(s)))
+            chosen = self.first_reachable(spots, label)
+            if chosen is not None:
+                return chosen
+        raise Unreachable(
+            f"none of the {sum(map(len, tiers))} places to stand in its box is reachable from "
+            f"the {label} spawns"
+        )
 
     def approach(self, target: dict, distance: float, label: str) -> tuple[Spot, list[float]]:
         """A spot `distance` from a point (or from a box's side) with a clear walk to it."""
@@ -451,7 +534,7 @@ class Geometry:
         spots.sort(key=lambda t: t[0])
         chosen = self.first_reachable([s for _n, s in spots], label)
         if chosen is None:
-            raise Untestable(
+            raise Unreachable(
                 f"no reachable floor {distance:g} units from it with a clear walk in "
                 f"({len(spots)} clear of {16} directions)"
             )
@@ -499,6 +582,29 @@ class Script:
             arg = int(rule["arg"])
             return action.args[arg] if arg < len(action.args) else None
         return None
+
+    def start_hidden(self, rule: dict | None) -> set[str]:
+        """Target names a spawn event hides as the round starts (folded; the engine looks
+        them up without case)."""
+        if not rule:
+            return set()
+        event, action = str(rule["event"]).casefold(), str(rule["action"]).casefold()
+        name_arg, state_arg = int(rule.get("name_arg", 0)), int(rule.get("state_arg", 1))
+        states = {str(v).casefold() for v in rule.get("states") or []}
+        hidden: set[str] = set()
+        for block in self.blocks.values():
+            for ev in block.events:
+                if ev.name != event or ev.params:
+                    continue
+                for a in ev.actions:
+                    if a.name != action or len(a.args) <= max(name_arg, state_arg):
+                        continue
+                    name = a.args[name_arg].casefold()
+                    if a.args[state_arg].casefold() in states:
+                        hidden.add(name)
+                    else:
+                        hidden.discard(name)
+        return hidden
 
     def outcome(self, events: list[dict]) -> dict:
         """Whether these events lead, through calls, to a round end, and the winners set."""
@@ -551,6 +657,8 @@ class Builder:
         self.pid, self.adapter = ctx["profile"], ctx["adapter"]
         self.notes: list[str] = []
         self.standing: list[dict] = []
+        #: Each standing position's route, as grid cells (None when the search gives none).
+        self.paths: list[list | None] = []
         self.ends_round = False
         self.team: str | None = None
         self.role: str | None = None
@@ -586,6 +694,11 @@ class Builder:
         return b
 
     def build(self) -> dict:
+        rule = self.spec.get("untestable_if")
+        if isinstance(rule, dict):
+            ents = self.found.parts.get(str(rule["part"])) or []
+            if ents and _flags(ents[0], str(rule["key"])) & int(rule["bit"]):
+                raise Untestable(" ".join(str(rule["reason"]).split()))
         actor = self.fill(self.spec.get("actor") or {})
         steps: list[dict] = []
         if actor:
@@ -594,7 +707,8 @@ class Builder:
             if "macro" in raw:
                 steps += getattr(self, "macro_" + str(raw["macro"]))(raw)
             else:
-                step = self.fill(raw)
+                # A step may state its own confidence in the profile; that is not a step field.
+                step = self.fill({k: v for k, v in raw.items() if k != "confidence"})
                 if step.get("action") == "join":
                     steps += self.join(self.side(step["team"]), step["role"], step.get("label"))
                 else:
@@ -616,6 +730,7 @@ class Builder:
         angles = [float(raw.get("pitch", 0)), _yaw((spot.x, spot.y), face), 0]
         origin = spot.origin(self.geo.stand_height)
         self.standing.append({"origin": origin, "inside": raw["in"], "route": spot.route})
+        self.paths.append(spot.cells)
         return [self._labelled({"action": "position", "origin": origin, "angles": angles}, raw)]
 
     def macro_walk_to(self, raw: dict) -> list[dict]:
@@ -625,6 +740,7 @@ class Builder:
         self.standing.append(
             {"origin": origin, "walks_to": [_num(c) for c in goal], "route": spot.route}
         )
+        self.paths.append(spot.cells)
         hold: dict[str, Any] = {"action": "hold", "controls": list(raw.get("controls") or [])}
         if "until" in raw:
             hold["until"] = self.fill(raw["until"])
@@ -787,7 +903,7 @@ class Builder:
                         spots.append(Spot(x, y, floor))
             chosen = self.geo.first_reachable(spots, self.team or "")
             if chosen is None:
-                raise Untestable(f"there is no reachable floor beside its path at point {i}")
+                raise Unreachable(f"there is no reachable floor beside its path at point {i}")
             return chosen
 
         def passed(i: int, op_forward: bool = True) -> dict:
@@ -818,6 +934,7 @@ class Builder:
         for i, spot in enumerate(spots):
             origin = spot.origin(self.geo.stand_height)
             self.standing.append({"origin": origin, "beside_path_point": i, "route": spot.route})
+            self.paths.append(spot.cells)
             p = chain[i][0]
             steps.append(
                 {
@@ -962,6 +1079,47 @@ def _budget(steps: list[dict]) -> float:
     return total
 
 
+def _hidden(script: Script, meta: dict, game_map: Any) -> frozenset[int]:
+    """Entities the script hides as the round starts (`state.start_hidden`)."""
+    names = script.start_hidden((meta.get("state") or {}).get("start_hidden"))
+    if not names:
+        return frozenset()
+    return frozenset(
+        e["index"]
+        for e in game_map.entities()
+        if (_keys(e).get("targetname") or "").casefold() in names
+    )
+
+
+def _regrid(grid: anamod.NavGrid, profile_id: str, nonsolid: frozenset[int]) -> anamod.NavGrid:
+    """The same grid with these entities' brushes left out (hidden, or destroyed)."""
+    if not nonsolid:
+        return grid
+    return anamod.build_navgrid(
+        grid.map_path,
+        cell=grid.cell,
+        profile_id=profile_id,
+        game_map=grid.game_map,
+        stance=grid.stance,
+        nonsolid_entities=nonsolid,
+    )
+
+
+def _crosses(geo: Geometry, cells: list, box) -> bool:
+    """Whether a route's cells pass through a box (grown by the player's half width)."""
+    pad = geo.half + geo.grid.cell
+    lo, hi = box
+    for c in cells:
+        x, y, z = geo.grid.centre(tuple(c))
+        if (
+            lo[0] - pad <= x <= hi[0] + pad
+            and lo[1] - pad <= y <= hi[1] + pad
+            and lo[2] - geo.height <= z <= hi[2] + geo.step
+        ):
+            return True
+    return False
+
+
 def generate(
     profile_id: str,
     grid: anamod.NavGrid,
@@ -969,78 +1127,169 @@ def generate(
     *,
     only: str | None = None,
 ) -> dict:
-    """Tests for every recognised objective, packed into as few engine runs as possible."""
+    """Tests for every recognised objective, packed into as few engine runs as possible.
+
+    Round 0 walks the map as the round starts. Each later round leaves out the brushes of the
+    objectives earlier tests destroy (`state.opens`) and retries what was out of reach; a test
+    found there `requires` the destroyed objectives its routes pass through.
+    """
     data = profiles.load(profile_id)
     recipes = data.get("objectives") or {}
     meta = recipes.get("playtest") or {}
     adapter = playtestmod.spec(profile_id)
     spec = data.get("mapscript") or {}
     found, leftover = recognise(profile_id, grid.game_map)
-    if only is not None:
-        found = [f for f in found if f.name.casefold() == only.casefold()]
-        leftover = []
     script = Script(script_text, spec, meta)
+    opens = set((meta.get("state") or {}).get("opens") or [])
+    hidden = _hidden(script, meta, grid.game_map)
+    hidden_brushes = frozenset(
+        e["index"]
+        for e in grid.game_map.entities()
+        if e["index"] in hidden and int(e.get("brushes") or 0)
+    )
+    wanted = None
+    if only is not None:
+        wanted = {f.name for f in found if f.name.casefold() == only.casefold()}
+        leftover = []
     skipped = list(leftover)
-    tests = []
     try:
-        geo = Geometry(grid, profile_id, meta)
+        geo = Geometry(_regrid(grid, profile_id, hidden_brushes), profile_id, meta, hidden)
     except Untestable as e:
         return {
             "tests": [],
             "runs": [],
-            "skipped": [f.describe() | {"reason": str(e)} for f in found],
+            "skipped": [
+                f.describe() | {"reason": str(e)}
+                for f in found
+                if wanted is None or f.name in wanted
+            ],
         }
     ctx = {"profile": profile_id, "adapter": adapter}
-    for f in found:
-        template = recipes["kinds"][f.kind]["playtest"]
-        builder = Builder(f, template, geo, script, ctx)
-        try:
-            scenario = builder.build()
-            playtestmod.validate(scenario, adapter)
-        except Untestable as e:
-            skipped.append(f.describe() | {"reason": str(e)})
-            continue
-        except playtestmod.PlaytestError as e:
-            skipped.append(f.describe() | {"reason": f"the generated steps are invalid: {e}"})
-            continue
-        tests.append(
-            {
+    built: dict[str, dict] = {}  # objective name -> test
+    reasons: dict[str, str] = {}
+    destroyed: dict[str, tuple[Found, Any]] = {}  # name -> (objective, brush box)
+    pending = list(found)
+    rounds = 0
+    while pending:
+        progress = False
+        retry = []
+        for f in pending:
+            template = recipes["kinds"][f.kind]["playtest"]
+            builder = Builder(f, template, geo, script, ctx)
+            try:
+                scenario = builder.build()
+                playtestmod.validate(scenario, adapter)
+            except Unreachable as e:
+                reasons[f.name] = str(e)
+                retry.append(f)
+                continue
+            except Untestable as e:
+                reasons[f.name] = str(e)
+                continue
+            except playtestmod.PlaytestError as e:
+                reasons[f.name] = f"the generated steps are invalid: {e}"
+                continue
+            requires: list[str] = []
+            if rounds:
+                through = [
+                    name
+                    for name, (_d, box) in destroyed.items()
+                    if any(p is None or _crosses(geo, p, box) for p in builder.paths)
+                ]
+                for name in through:
+                    for r in [*built[name]["requires"], name]:
+                        if r not in requires:
+                            requires.append(r)
+                if requires:
+                    builder.notes.append(
+                        "out of reach as the round starts; played in the same run after "
+                        + ", ".join(requires)
+                        + " (destroyed, they open the way)"
+                    )
+            built[f.name] = {
                 **f.describe(),
                 "proves": template.get("proves", ""),
                 "ends_round": builder.ends_round,
+                "requires": requires,
+                "round": rounds,
                 "standing": builder.standing,
                 "notes": builder.notes,
                 "watch": scenario["watch"],
                 "steps": scenario["steps"],
             }
-        )
+            progress = True
+            box = geo.bounds(f.anchor)
+            if f.kind in opens and not builder.ends_round and box is not None:
+                destroyed[f.name] = (f, box)
+        pending = retry
+        opened = frozenset(d[0].anchor["index"] for d in destroyed.values())
+        if not pending or not progress or opened == geo.opened:
+            break
+        rounds += 1
+        geo = Geometry(_regrid(grid, profile_id, hidden_brushes | opened), profile_id, meta, hidden)
+        geo.opened = opened
+    for f in pending:
+        reason = reasons.get(f.name, "")
+        if rounds and destroyed:
+            reason += " (also with " + ", ".join(destroyed) + " destroyed first)"
+        skipped.append(f.describe() | {"reason": reason})
+    for f in found:
+        if f.name in reasons and f.name not in built and f not in pending:
+            skipped.append(f.describe() | {"reason": reasons[f.name]})
+    tests = list(built.values())
+    if wanted is not None:
+        keep = set(wanted)
+        for t in tests:
+            if t["objective"] in wanted:
+                keep |= set(t["requires"])
+        tests = [t for t in tests if t["objective"] in keep]
+        skipped = [s for s in skipped if s.get("objective") in wanted]
     return {"tests": tests, "runs": pack(tests, adapter), "skipped": skipped}
 
 
 def pack(tests: list[dict], adapter: dict) -> list[dict]:
     """Runs for `engine_playtest`: tests that leave the round going first, one round end last.
 
-    A test that ends the round must close its run: nothing after intermission can play.
+    A test that ends the round must close its run: nothing after intermission can play. A
+    test that `requires` others plays after them in the same run; one already played as
+    another's requirement is not played again on its own.
     """
-    order = [t for t in tests if not t["ends_round"]] + [t for t in tests if t["ends_round"]]
+    by_name = {t["objective"]: t for t in tests}
+    first = sorted(range(len(tests)), key=lambda i: (tests[i].get("round", 0), i))
+    order = [tests[i] for i in first if not tests[i]["ends_round"]]
+    order += [tests[i] for i in first if tests[i]["ends_round"]]
     runs: list[dict] = []
     current: dict | None = None
-    for t in order:
+    played: set[str] = set()
+
+    def steps_of(t: dict) -> list[dict]:
         name = re.sub(r"[^A-Za-z0-9_-]", "_", t["objective"])[:56]
-        steps = [*t["steps"], {"action": "screenshot", "name": f"{name}_done"}]
-        fits = (
-            current is not None
-            and not current["closed"]
-            and len(current["steps"]) + len(steps) <= 128
-            and len(set(current["watch"]) | set(t["watch"])) <= 32
-            and STARTUP_SECONDS + _budget(current["steps"] + steps) <= 600
-        )
-        if not fits:
+        return [*t["steps"], {"action": "screenshot", "name": f"{name}_done"}]
+
+    def fits(run: dict | None, chain: list[dict]) -> bool:
+        if run is None or run["closed"]:
+            return False
+        steps = run["steps"] + [s for t in chain for s in steps_of(t)]
+        watch = set(run["watch"]) | {w for t in chain for w in t["watch"]}
+        return len(steps) <= 128 and len(watch) <= 32 and STARTUP_SECONDS + _budget(steps) <= 600
+
+    for t in order:
+        if t["objective"] in played:
+            continue
+        needs = [by_name[r] for r in t.get("requires") or [] if r in by_name]
+        if any(n["ends_round"] for n in needs) or len(needs) != len(t.get("requires") or []):
+            continue  # cannot be reached in a run that is still going
+        chain = [n for n in needs if current is None or n["objective"] not in current["objectives"]]
+        chain.append(t)
+        if not fits(current, chain):
             current = {"objectives": [], "watch": [], "steps": [], "closed": False}
             runs.append(current)
-        current["objectives"].append(t["objective"])
-        current["watch"] = list(dict.fromkeys(current["watch"] + t["watch"]))
-        current["steps"] += steps
+            chain = [*needs, t]
+        for c in chain:
+            current["objectives"].append(c["objective"])
+            current["watch"] = list(dict.fromkeys(current["watch"] + c["watch"]))
+            current["steps"] += steps_of(c)
+            played.add(c["objective"])
         current["closed"] = t["ends_round"]
     out = []
     for r in runs:

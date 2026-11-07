@@ -428,6 +428,10 @@ objectives:
       # plants dynamite, arms it with pliers (aimed at the charge where it landed) and sees the
       # explosive freed. Pliers reach 64 units (CH_BREAKABLE_DIST, bg_public.h:3160) along the
       # view (g_weapon.c:2430-2545), so the charge is thrown steeply down to land within reach.
+      # The engineer first waits for a full charge bar (an earlier build in the same run spends
+      # it; waiting is cheaper than a respawn, which costs a team switch and a respawn wave),
+      # and aims only once the charge has stopped bouncing: aimed while it still fell, the
+      # pliers trace passed over where it came to rest. Steps marked unverified are newer.
       playtest:
         find:
           anchor: {classname: func_explosive, name_key: targetname}
@@ -439,9 +443,11 @@ objectives:
         proves: the other team's dynamite, armed in the trigger, destroys it
         steps:
           - {macro: stand, in: trigger, clear_of: anchor, face: anchor, pitch: 65, label: "stand in the objective trigger, facing it"}
+          - {action: wait, confidence: unverified, timeout: 35, label: "wait for a full charge bar: dynamite needs one (bg_pmove.c:3732-3743)", until: [{scope: player, field: charge, op: gte, value: 1}]}
           - {action: weapon, name: dynamite}
           - {action: hold, controls: [attack], seconds: 0.25, timeout: 5, label: "plant the dynamite"}
           - {action: wait, timeout: 5, label: "a charge lies in the world", until: [{scope: game, field: charge_count, op: gte, value: 1}]}
+          - {action: wait, confidence: unverified, timeout: 5, label: "the charge has landed", until: [{scope: game, field: charge_resting, value: true}]}
           - {action: aim, at: {scope: game, field: charge_position, offset: [0, 0, 4]}, label: "look at the charge"}
           - {action: weapon, name: pliers}
           - {action: hold, controls: [attack], timeout: 15, label: "arm it", until: [{scope: game, field: armed_charges, op: gte, value: 1}]}
@@ -477,12 +483,25 @@ objectives:
           parts:
             trigger: {classname: trigger_objective_info, key: target, value: "{name}"}
           team: {part: anchor, key: spawnflags, value: builder_flag}
+        # One that starts built (START_BUILT, spawnflags 1) is built at round start
+        # (s.angles2[1] = 1, g_mover.c:5482-5497) and pliers build nothing while it stands
+        # (g_weapon.c:1034-1037); it is buildable only once destroyed, which a test of it alone
+        # never reaches. Stock etl_supply's truck_construct is one: the truck must be damaged.
+        untestable_if:
+          confidence: unverified
+          part: anchor
+          key: spawnflags
+          bit: 1
+          reason: >-
+            it starts built (START_BUILT): it can only be built again after it is destroyed,
+            which this test does not do
         actor: {team: "{team}", role: engineer}
         watch: ["{name}"]
         proves: the builder team's engineer builds it with pliers
         steps:
           - {macro: stand, in: trigger, clear_of: anchor, face: anchor, pitch: 30, label: "stand in the objective trigger, clear of what it builds"}
           - {action: weapon, name: pliers}
+          - {action: wait, confidence: unverified, timeout: 35, label: "wait for a full charge bar: building spends it (g_active.c:302-345)", until: [{scope: player, field: charge, op: gte, value: 1}]}
           - {action: hold, controls: [attack], timeout: 60, label: "build it", until: [{scope: entity, name: "{name}", field: built, value: true}]}
           - {macro: round_end, events: [{block: "{anchor.scriptname}", event: built, params: [final]}]}
     # The stock command post (battery, goldrush, railgun: neutral; fueldump, oasis: one
@@ -583,6 +602,7 @@ objectives:
         steps:
           - {macro: stand, in: anchor, clear_of: objective, face: objective, pitch: 30, label: "stand in the command post's trigger"}
           - {action: weapon, name: pliers}
+          - {action: wait, confidence: unverified, timeout: 35, label: "wait for a full charge bar: building spends it (g_active.c:302-345)", until: [{scope: player, field: charge, op: gte, value: 1}]}
           - {action: hold, controls: [attack], timeout: 60, label: "build the command post", until: [{scope: entity, name: "{objective.scriptname}", field: built, value: true}]}
           - {macro: round_end, events: [{block: "{objective.scriptname}", event: built, params: [final]}]}
     # The stock forward spawn flag (oasis Old City, radar Forward Bunker). With SPAWNPOINT the
@@ -898,6 +918,19 @@ objectives:
     # Classes that make up objectives: one that no kind recognises is reported as untested.
     classnames: [trigger_objective_info, func_explosive, func_constructible, team_WOLF_checkpoint,
                  team_CTF_redflag, team_CTF_blueflag, trigger_flagonly_multiple]
+    # What a map's script changes before anyone plays, and what playing an objective changes,
+    # for where a test may stand and walk from. Newer than the rest of this section.
+    state:
+      confidence: unverified
+      # `setstate <targetname> invisible` in a spawn event runs as the round starts
+      # (g_script.c:162, "spawn") and unlinks every entity of that targetname
+      # (g_script_actions.c:4015-4090): an invisible spawn point is never used
+      # (g_team.c:501-505) and invisible brushes do not collide. Supply Depot hides its
+      # command-post spawns this way until the command post is built.
+      start_hidden: {event: spawn, action: setstate, name_arg: 0, state_arg: 1, states: [invisible]}
+      # A destroyed explosive frees its brushes (func_explosive, BecomeExplosion,
+      # g_mover.c:4280-4289): an objective behind one is tested after it, in the same run.
+      opens: [dynamite]
 
 # ---------------------------------------------------------------------------
 # spawn_cluster - what spawn_cluster writes for a group of team spawns and its region marker
@@ -4447,6 +4480,16 @@ engine:
              charge_position.0, charge_position.1, charge_position.2]
       entity: [present, seen, count, health, state, classname, progress, built,
                position.0, position.1, position.2]
+    # Fields observed since the list above was verified, joined into it per scope.
+    more_fields:
+      confidence: unverified
+      # charge: the player's class charge bar, 0..1 (1 = full). Dynamite throws only on a full
+      # bar at skill 0 (bg_pmove.c:3732-3743, chargeTimeCoeff 1, bg_misc.c:177); building takes
+      # a share of it each frame (g_active.c:302-345). A respawn fills it (g_client.c:3205-3208).
+      player: [charge]
+      # charge_resting: the charge in charge_position has stopped bouncing (TR_STATIONARY,
+      # g_missile.c:126-140). Aim at it only then: it is still falling a moment after it appears.
+      game: [charge_resting]
     example:
       watch: [workshop_bridge]
       steps:
