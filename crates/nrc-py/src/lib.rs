@@ -1105,7 +1105,8 @@ fn convex_from(rows: Vec<(PyPlanes, PyBounds, PyBounds)>) -> Vec<navgrid::Convex
 ///
 /// `brushes` and `clearance` are `(planes, mins, maxs)`; `facets` are `(normal, corners)`.
 /// Returns a dict: `offsets` and `bounds` (native `u32` bytes: per column, flattened
-/// half-open solid runs), `walkable` `[(ix, iy, [z...], [rest height...])]`, `restricted` and
+/// half-open solid runs), `walk_offsets` (native `u32`, per column) into `walk_z` (native
+/// `u32` standing cells) and `walk_rest` (native `f64` rest heights), `restricted` and
 /// `clearance_restricted` samples, and the floor counts.
 #[pyfunction]
 #[pyo3(signature = (brushes, facets, clearance, origin, dims, cell, headroom_cells, crouch_cells, sample_cap, facet_shift, step))]
@@ -1147,14 +1148,20 @@ fn navgrid_voxelize<'py>(
         step,
     };
     let v = py.detach(|| navgrid::voxelize(brushes, facets, clearance, &params));
-    if v.bounds.len() >= u32::MAX as usize {
+    if v.bounds.len() >= u32::MAX as usize || v.walk_z.len() >= u32::MAX as usize {
         return Err(err("too many solid runs for the u32 run encoding"));
     }
     let bytes = |xs: &[u32]| -> Vec<u8> { xs.iter().flat_map(|x| x.to_ne_bytes()).collect() };
     let d = PyDict::new(py);
     d.set_item("offsets", pyo3::types::PyBytes::new(py, &bytes(&v.offsets)))?;
     d.set_item("bounds", pyo3::types::PyBytes::new(py, &bytes(&v.bounds)))?;
-    d.set_item("walkable", v.walkable)?;
+    d.set_item(
+        "walk_offsets",
+        pyo3::types::PyBytes::new(py, &bytes(&v.walk_offsets)),
+    )?;
+    d.set_item("walk_z", pyo3::types::PyBytes::new(py, &bytes(&v.walk_z)))?;
+    let rest: Vec<u8> = v.walk_rest.iter().flat_map(|x| x.to_ne_bytes()).collect();
+    d.set_item("walk_rest", pyo3::types::PyBytes::new(py, &rest))?;
     d.set_item("restricted", v.restricted)?;
     d.set_item("clearance_restricted", v.clearance_restricted)?;
     d.set_item("solid_cells", v.solid_cells)?;

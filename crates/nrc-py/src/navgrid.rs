@@ -50,8 +50,12 @@ pub struct Voxels {
     pub offsets: Vec<u32>,
     /// Flattened half-open runs `[start, end)` of solid cells, ascending, maximal.
     pub bounds: Vec<u32>,
-    /// `(ix, iy, standing z's, the height the body rests at on each)` in column order.
-    pub walkable: Vec<(u32, u32, Vec<u32>, Vec<f64>)>,
+    /// `walk_offsets[ix * ny + iy] .. walk_offsets[ix * ny + iy + 1]` index `walk_z` and
+    /// `walk_rest`: that column's standing cells, ascending, and the height the body rests
+    /// at on each. Flat, so a full-size map's floors cost 12 bytes a cell, not an object each.
+    pub walk_offsets: Vec<u32>,
+    pub walk_z: Vec<u32>,
+    pub walk_rest: Vec<f64>,
     pub restricted: Vec<(u32, u32, u32)>,
     pub clearance_restricted: Vec<(u32, u32, u32)>,
     pub solid_cells: u64,
@@ -308,9 +312,11 @@ pub fn voxelize(
 
     let mut out = Voxels {
         offsets: Vec::with_capacity(nx * ny + 1),
+        walk_offsets: Vec::with_capacity(nx * ny + 1),
         ..Default::default()
     };
     out.offsets.push(0);
+    out.walk_offsets.push(0);
     let mut slab = vec![0u8; ny * nz];
     // The exact top of the solid ending in each cell, so a floor is judged at its surface
     // rather than at the cell boundary voxel rounding put it on.
@@ -425,8 +431,6 @@ pub fn voxelize(
                 out.solid_cells += (z - start) as u64;
             }
             let runs = &out.bounds[first..];
-            let mut walkable = Vec::new();
-            let mut rests = Vec::new();
             for k in (0..runs.len()).step_by(2) {
                 let stand_on = runs[k + 1] as usize;
                 if stand_on >= nz {
@@ -452,8 +456,8 @@ pub fn voxelize(
                     };
                     match rest {
                         Some(z) => {
-                            walkable.push(stand_on as u32);
-                            rests.push(z);
+                            out.walk_z.push(stand_on as u32);
+                            out.walk_rest.push(z);
                         }
                         None => {
                             out.body_blocked += 1;
@@ -473,10 +477,8 @@ pub fn voxelize(
                     out.restricted.push(at);
                 }
             }
-            if !walkable.is_empty() {
-                out.walkable.push((ix as u32, iy as u32, walkable, rests));
-            }
             out.offsets.push(out.bounds.len() as u32);
+            out.walk_offsets.push(out.walk_z.len() as u32);
         }
     }
     out
@@ -485,6 +487,19 @@ pub fn voxelize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `(ix, iy, standing z's, rest heights)` for every column with a standing cell.
+    fn walkable(v: &Voxels, ny: usize) -> Vec<(u32, u32, Vec<u32>, Vec<f64>)> {
+        (0..v.walk_offsets.len() - 1)
+            .filter_map(|k| {
+                let (a, b) = (v.walk_offsets[k] as usize, v.walk_offsets[k + 1] as usize);
+                (a < b).then(|| {
+                    let (ix, iy) = ((k / ny) as u32, (k % ny) as u32);
+                    (ix, iy, v.walk_z[a..b].to_vec(), v.walk_rest[a..b].to_vec())
+                })
+            })
+            .collect()
+    }
 
     fn cube(mins: [f64; 3], maxs: [f64; 3]) -> Convex {
         Convex {
@@ -519,9 +534,10 @@ mod tests {
         // A 64-unit floor slab, 128 units of air above it.
         let floor = cube([0.0, 0.0, 0.0], [64.0, 64.0, 16.0]);
         let v = voxelize(vec![floor], vec![], None, &params([4, 4, 9]));
-        assert_eq!(v.walkable.len(), 16);
-        assert!(v
-            .walkable
+        let w = walkable(&v, 4);
+        assert_eq!(w.len(), 16);
+        assert_eq!(v.walk_offsets.len(), 17);
+        assert!(w
             .iter()
             .all(|(_, _, z, r)| z == &vec![1] && r == &vec![16.0]));
         assert_eq!(v.solid_cells, 16);
@@ -544,20 +560,13 @@ mod tests {
         assert_eq!(v.crouch_only, 8);
         assert_eq!(v.body_blocked, 4);
         let on_floor = |w: &&(u32, u32, Vec<u32>, Vec<f64>)| w.2.contains(&1);
+        let w = walkable(&v, 4);
         assert_eq!(
-            v.walkable
-                .iter()
-                .filter(on_floor)
-                .map(|w| w.0)
-                .collect::<Vec<_>>(),
+            w.iter().filter(on_floor).map(|w| w.0).collect::<Vec<_>>(),
             vec![2; 4]
         );
         // The ceiling's own roof, with 5 cells of air, is walkable.
-        assert!(v
-            .walkable
-            .iter()
-            .filter(|w| w.0 < 2)
-            .all(|w| w.2 == vec![4]));
+        assert!(w.iter().filter(|w| w.0 < 2).all(|w| w.2 == vec![4]));
         assert_eq!(v.restricted.len(), 8);
     }
 
@@ -593,12 +602,8 @@ mod tests {
         let mut p = params([4, 4, 9]);
         p.origin = [0.0, 0.0, -32.0];
         let v = voxelize(vec![floor, rubble, wall], vec![], Some(body), &p);
-        let rest = |ix: u32| {
-            v.walkable
-                .iter()
-                .find(|w| w.0 == ix && w.1 == 1)
-                .map(|w| w.3[0])
-        };
+        let w = walkable(&v, 4);
+        let rest = |ix: u32| w.iter().find(|w| w.0 == ix && w.1 == 1).map(|w| w.3[0]);
         // x=8 and x=24 and x=40 are within 18 of the rubble (2..42): the body rests on it.
         assert_eq!(rest(0), Some(6.0));
         assert_eq!(rest(1), Some(6.0));
