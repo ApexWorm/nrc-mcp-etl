@@ -1054,6 +1054,7 @@ fn round_trip_check<'py>(py: Python<'py>, source: &str) -> PyResult<Bound<'py, P
 #[pymodule]
 fn nrc_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMap>()?;
+    m.add_class::<PyRouteGraph>()?;
     m.add_function(wrap_pyfunction!(round_trip_check, m)?)?;
     m.add_function(wrap_pyfunction!(solid_compile, m)?)?;
     m.add_function(wrap_pyfunction!(solid_commit, m)?)?;
@@ -1726,4 +1727,148 @@ fn solid_commit<'py>(
     d.set_item("committed", true)?;
     d.set_item("map_brushes_now", m.inner.brush_count())?;
     Ok(d)
+}
+
+// ---------------------------------------------------------------------------
+// Route search over a walk grid
+// ---------------------------------------------------------------------------
+
+use nrc_core::navsearch::{Budget as SearchBudget, Graph as SearchGraph, Key as NodeKey};
+use nrc_core::navsearch::{Move as SearchMove, Query as SearchQuery, Status as SearchStatus};
+
+/// A* over a walk grid whose edges come from a Python callable, learned once per node.
+///
+/// `expand(layer, ix, iy, iz)` returns that node's outgoing moves as
+/// `[(layer, ix, iy, iz, length, change), ...]`, in the grid's own neighbour order; it is
+/// called the first time a search expands the node and never again for this graph.
+#[pyclass(name = "RouteGraph", module = "nrc_py")]
+pub struct PyRouteGraph {
+    inner: SearchGraph,
+}
+
+#[pymethods]
+impl PyRouteGraph {
+    #[new]
+    fn new(origin: (f64, f64, f64), cell: f64) -> PyResult<Self> {
+        if !(cell.is_finite() && cell > 0.0) {
+            return Err(err("cell must be a positive finite number"));
+        }
+        Ok(PyRouteGraph {
+            inner: SearchGraph::new([origin.0, origin.1, origin.2], cell),
+        })
+    }
+
+    /// `(nodes seen, nodes expanded, edges)`.
+    fn sizes(&self) -> (usize, usize, usize) {
+        self.inner.sizes()
+    }
+
+    /// Whether a node's moves are already known.
+    fn knows(&self, node: NodeKey) -> bool {
+        self.inner.knows(node)
+    }
+
+    /// Record moves computed elsewhere, packed little-endian: `nodes` is `4 x i32` per node
+    /// (layer, ix, iy, iz), `counts` one `u32` per node, and `moves` per move `4 x i32`
+    /// (layer, ix, iy, iz), an `f64` length and a `u8` change flag (25 bytes). Returns how
+    /// many nodes were new.
+    fn learn_packed(&mut self, nodes: &[u8], counts: &[u8], moves: &[u8]) -> PyResult<usize> {
+        const MOVE: usize = 25;
+        if nodes.len() % 16 != 0 || counts.len() * 4 != nodes.len() || moves.len() % MOVE != 0 {
+            return Err(err("learn_packed: buffer sizes do not agree"));
+        }
+        let i32_at = |b: &[u8], at: usize| i32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let key_at = |b: &[u8], at: usize| -> PyResult<NodeKey> {
+            let layer = u8::try_from(i32_at(b, at)).map_err(|_| err("learn_packed: bad layer"))?;
+            Ok((
+                layer,
+                i32_at(b, at + 4),
+                i32_at(b, at + 8),
+                i32_at(b, at + 12),
+            ))
+        };
+        let mut offset = 0usize;
+        let mut learned = 0usize;
+        let mut buffer = Vec::new();
+        for n in 0..counts.len() / 4 {
+            let count = u32::from_le_bytes(counts[n * 4..n * 4 + 4].try_into().unwrap()) as usize;
+            if (offset + count) * MOVE > moves.len() {
+                return Err(err("learn_packed: counts exceed the moves given"));
+            }
+            buffer.clear();
+            for m in offset..offset + count {
+                let at = m * MOVE;
+                buffer.push(SearchMove {
+                    to: key_at(moves, at)?,
+                    length: f64::from_le_bytes(moves[at + 16..at + 24].try_into().unwrap()),
+                    change: moves[at + 24] != 0,
+                });
+            }
+            offset += count;
+            if self.inner.learn(key_at(nodes, n * 16)?, &buffer) {
+                learned += 1;
+            }
+        }
+        if offset * MOVE != moves.len() {
+            return Err(err("learn_packed: more moves than the counts describe"));
+        }
+        Ok(learned)
+    }
+
+    /// One search. Returns `(status, expanded, pruned, cost, path)`; status is `found`,
+    /// `exhausted` or `budget`.
+    #[pyo3(signature = (
+        sources, goals, goal_points, expand, *, h_weight = 1.0, layer_weights = vec![1.0],
+        transition_cost = 0.0, max_nodes = 400_000, budget = "after_goal_test", bound = None
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn search(
+        &mut self,
+        sources: Vec<NodeKey>,
+        goals: Vec<NodeKey>,
+        goal_points: Vec<[f64; 3]>,
+        expand: &Bound<'_, PyAny>,
+        h_weight: f64,
+        layer_weights: Vec<f64>,
+        transition_cost: f64,
+        max_nodes: usize,
+        budget: &str,
+        bound: Option<f64>,
+    ) -> PyResult<(&'static str, usize, bool, Option<f64>, Vec<NodeKey>)> {
+        let budget = match budget {
+            "after_goal_test" => SearchBudget::AfterGoalTest,
+            "before_close" => SearchBudget::BeforeClose,
+            other => return Err(err(format!("unknown budget mode {other:?}"))),
+        };
+        let query = SearchQuery {
+            sources,
+            goals,
+            goal_points,
+            h_weight,
+            layer_weights,
+            transition_cost,
+            max_nodes,
+            budget,
+            bound,
+        };
+        let mut expander = |key: NodeKey| -> PyResult<Vec<SearchMove>> {
+            let rows: Vec<(u8, i32, i32, i32, f64, bool)> =
+                expand.call1((key.0, key.1, key.2, key.3))?.extract()?;
+            Ok(rows
+                .into_iter()
+                .map(|(l, x, y, z, length, change)| SearchMove {
+                    to: (l, x, y, z),
+                    length,
+                    change,
+                })
+                .collect())
+        };
+        let out = self.inner.search(&query, &mut expander)?;
+        let status = match out.status {
+            SearchStatus::Found => "found",
+            SearchStatus::Exhausted => "exhausted",
+            SearchStatus::Budget => "budget",
+        };
+        Ok((status, out.expanded, out.pruned, out.cost, out.path))
+    }
 }

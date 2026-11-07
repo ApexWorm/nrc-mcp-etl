@@ -38,6 +38,7 @@ pub mod lex;
 pub mod math;
 pub mod mirror;
 pub mod model;
+pub mod navsearch;
 pub mod num;
 pub mod parse;
 pub mod stats;

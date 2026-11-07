@@ -201,19 +201,118 @@ def _length(points):
     return sum(math.dist(a, b) for a, b in zip(points, points[1:], strict=False))
 
 
-def find_route(
+def _sweep_length(grid, source, target):
+    return _length(_sweep(grid, source, target))
+
+
+def search(
     grids: dict[str, analysis.NavGrid],
-    start: dict,
-    end: dict,
+    allowed: tuple[str, ...],
+    costs: dict[str, float],
+    transition_cost: float,
+    sources: list,
+    goals: set,
+    max_nodes: int,
     *,
-    start_stance: str | None = None,
-    end_stance: str | None = None,
-    stance_costs: dict | None = None,
-    transition_cost: float = 32,
-    max_nodes: int = 100_000,
-    snap_radius: float | None = None,
-) -> dict:
-    """A* over (stance, cell), with directed walking edges and safe stance changes."""
+    bound: float | None = None,
+    engine: str = "auto",
+) -> tuple[str, int, bool, float | None, list]:
+    """The (stance, cell) A*: `(status, expanded, pruned, cost, states)`.
+
+    `status` is found, exhausted or budget. The native search (`routesearch`) and the
+    Python one below are the same algorithm, step for step; `engine` picks auto, native
+    or python. Only the native one takes a `bound`.
+    """
+    from . import routesearch  # noqa: PLC0415
+
+    goal_points = [grids[s].centre(c) for s, c in goals]
+    min_weight = min(costs.values())
+    if engine == "native" or (engine == "auto" and routesearch.available()):
+        with routesearch.LOCK:
+            graph, expand = routesearch.stance_graph(grids, STANCES, allowed, _sweep_length)
+            status, expanded, pruned, cost, path = graph.search(
+                [(STANCES.index(s), *c) for s, c in sources],
+                [(STANCES.index(s), *c) for s, c in goals],
+                goal_points,
+                expand,
+                h_weight=min_weight,
+                layer_weights=[costs.get(s, 1.0) for s in STANCES],
+                transition_cost=transition_cost,
+                max_nodes=max_nodes,
+                budget="before_close",
+                bound=bound,
+            )
+        return (
+            status,
+            expanded,
+            pruned,
+            cost,
+            [(STANCES[layer], (x, y, z)) for layer, x, y, z in path],
+        )
+    if bound is not None:
+        raise ValueError("max_detour needs the native route search; rebuild the kernel")
+
+    def heuristic(state):
+        point = grids[state[0]].centre(state[1])
+        return min(math.dist(point, target) for target in goal_points) * min_weight
+
+    best = {state: 0.0 for state in sources}
+    came = {}
+    queue = [
+        (heuristic(state), 0, STANCES.index(state[0]), n, state) for n, state in enumerate(sources)
+    ]
+    heapq.heapify(queue)
+    tie = len(queue)
+    closed = set()
+    changes = dict.fromkeys(sources, 0)
+    reached = None
+    while queue:
+        _, _, _, _, current = heapq.heappop(queue)
+        if current in closed:
+            continue
+        if len(closed) >= max_nodes:
+            return "budget", len(closed), False, None, []
+        closed.add(current)
+        if current in goals:
+            reached = current
+            break
+        stance, cell = current
+        edges = [
+            ((stance, dest), _sweep_length(grids[stance], cell, dest) * costs[stance], False)
+            for dest, _ in grids[stance].neighbours(cell)
+        ]
+        edges += [
+            ((other, cell), transition_cost, True)
+            for other in allowed
+            if other != stance and grids[other].is_walkable(cell)
+        ]
+        for nxt, edge_cost, change in edges:
+            if nxt in closed:
+                continue
+            candidate = best[current] + edge_cost
+            change_count = changes[current] + int(change)
+            if candidate < best.get(nxt, math.inf) or (
+                candidate == best.get(nxt) and change_count < changes[nxt]
+            ):
+                best[nxt] = candidate
+                changes[nxt] = change_count
+                came[nxt] = current
+                tie += 1
+                heapq.heappush(
+                    queue,
+                    (candidate + heuristic(nxt), change_count, STANCES.index(nxt[0]), tie, nxt),
+                )
+    if reached is None:
+        return "exhausted", len(closed), False, None, []
+    states = [reached]
+    while states[-1] in came:
+        states.append(came[states[-1]])
+    states.reverse()
+    return "found", len(closed), False, best[reached], states
+
+
+def _aligned(grids: dict[str, analysis.NavGrid]) -> analysis.NavGrid:
+    """The reference grid, once every stance grid is shown to share its snapshot."""
     if not grids:
         raise ValueError("at least one stance grid is required")
     reference = next(iter(grids.values()))
@@ -228,12 +327,127 @@ def find_route(
             reference.profile,
         ):
             raise ValueError("all stance grids must describe the same aligned snapshot")
-        if (
-            grid.map_path != reference.map_path
-            or grid.movement != reference.movement
-            or (grid.game_map is not None and grid.game_map.source() != source)
-        ):
+        if grid.map_path != reference.map_path or grid.movement != reference.movement:
             raise ValueError("all stance grids must describe the same aligned snapshot")
+        if grid is not reference and grid.game_map is not None and grid.game_map.source() != source:
+            raise ValueError("all stance grids must describe the same aligned snapshot")
+    return reference
+
+
+def find_route(
+    grids: dict[str, analysis.NavGrid],
+    start: dict,
+    end: dict,
+    *,
+    start_stance: str | None = None,
+    end_stance: str | None = None,
+    stance_costs: dict | None = None,
+    transition_cost: float = 32,
+    max_nodes: int = 100_000,
+    snap_radius: float | None = None,
+    max_detour: float | None = None,
+    engine: str = "auto",
+) -> dict:
+    """A* over (stance, cell), with directed walking edges and safe stance changes.
+
+    `max_detour` bounds the search: no route costing more than `max_detour` times the
+    straight line between the requested positions (times the cheapest stance weight) is
+    looked for, so a failed short link explores only the ellipse around it and reports
+    `status="exceeds_max_detour"`. A route inside the bound is the unbounded answer.
+    """
+    reference = _aligned(grids)
+    return _route(
+        grids,
+        reference,
+        start,
+        end,
+        start_stance=start_stance,
+        end_stance=end_stance,
+        stance_costs=stance_costs,
+        transition_cost=transition_cost,
+        max_nodes=max_nodes,
+        snap_radius=snap_radius,
+        max_detour=max_detour,
+        engine=engine,
+    )
+
+
+#: Most links one `find_routes` call checks.
+MAX_LINKS = 20_000
+
+
+def find_routes(
+    grids: dict[str, analysis.NavGrid],
+    links: list[tuple[dict, dict]],
+    *,
+    with_paths: bool = False,
+    workers: int | None = None,
+    **options: Any,
+) -> list[dict]:
+    """`find_route` for many `(start, end)` endpoint pairs over the same grids, in order.
+
+    The grids are checked once, each cell's edges are learned once for every link, and an
+    endpoint that repeats snaps once. Each row is the `find_route` report without the
+    per-grid constants and caveats (identical for every link; `find_route` gives them),
+    and without `path`/`segments`/`transitions` unless `with_paths`.
+
+    A large batch first learns the cells around its links in `workers` forked processes
+    (see `analysis.path_distances`); the answers are the same as learning lazily.
+    """
+    from . import routesearch  # noqa: PLC0415
+
+    if len(links) > MAX_LINKS:
+        raise ValueError(f"at most {MAX_LINKS:,} links per call, got {len(links):,}")
+    reference = _aligned(grids)
+    if (
+        options.get("engine", "auto") != "python"
+        and routesearch.available()
+        and len(links) >= analysis.PREFETCH_MIN_LINKS
+    ):
+        allowed = tuple(s for s in STANCES if s in grids)
+        graph, expand = routesearch.stance_graph(grids, STANCES, allowed, _sweep_length)
+        pairs = [
+            (start["points"][0], end["points"][0])
+            for start, end in links
+            if start.get("points") and end.get("points")
+        ]
+        pad = routesearch.link_pad(reference, options.get("max_detour"))
+        keys = [
+            (STANCES.index(s), *c)
+            for s in allowed
+            for c in routesearch.cells_near(grids[s], pairs, pad)
+        ]
+        routesearch.learn(graph, expand, keys, processes=workers)
+    snaps: dict = {}
+    rows = []
+    for start, end in links:
+        row = _route(grids, reference, start, end, light=True, snap_cache=snaps, **options)
+        dropped = ("notes", "grids")
+        if not with_paths:
+            dropped += ("path", "segments", "transitions")
+        for key in dropped:
+            row.pop(key, None)
+        rows.append(row)
+    return rows
+
+
+def _route(
+    grids: dict[str, analysis.NavGrid],
+    reference: analysis.NavGrid,
+    start: dict,
+    end: dict,
+    *,
+    start_stance: str | None = None,
+    end_stance: str | None = None,
+    stance_costs: dict | None = None,
+    transition_cost: float = 32,
+    max_nodes: int = 100_000,
+    snap_radius: float | None = None,
+    max_detour: float | None = None,
+    engine: str = "auto",
+    light: bool = False,
+    snap_cache: dict | None = None,
+) -> dict:
     allowed = tuple(s for s in STANCES if s in grids)
     start_stance = allowed[0] if start_stance is None else start_stance
     end_stance = allowed[0] if end_stance is None else end_stance
@@ -264,17 +478,26 @@ def find_route(
         )
         for s in allowed
     }
+
+    def snaps(stance: str, target: dict) -> dict:
+        if snap_cache is None or target.get("bounds") is not None:
+            return _snaps(grids[stance], target, radius)
+        key = (stance, radius, tuple(target["points"]))
+        if key not in snap_cache:
+            snap_cache[key] = _snaps(grids[stance], target, radius)
+        return snap_cache[key]
+
     sources = {
         (s, cell): snap
         for s in allowed
         if start_stance in (s, "any")
-        for cell, snap in _snaps(grids[s], start, radius).items()
+        for cell, snap in snaps(s, start).items()
     }
     goals = {
         (s, cell): snap
         for s in allowed
         if end_stance in (s, "any")
-        for cell, snap in _snaps(grids[s], end, radius).items()
+        for cell, snap in snaps(s, end).items()
     }
     notes = list(dict.fromkeys(note for grid in grids.values() for note in grid.notes))
     notes += [
@@ -300,8 +523,8 @@ def find_route(
         "start": {k: v for k, v in start.items() if k != "points"},
         "end": {k: v for k, v in end.items() if k != "points"},
         "snap_radius": radius,
-        "notes": notes,
-        "grids": {s: g.as_dict() for s, g in grids.items()},
+        "notes": [] if light else notes,
+        "grids": {} if light else {s: g.as_dict() for s, g in grids.items()},
         "reachable": False,
         "distance": None,
         "cost": None,
@@ -316,76 +539,54 @@ def find_route(
             reason=f"no visible walkable {'start' if not sources else 'end'} cell within the snap radius in its requested stance",
         )
         return report
-    goal_points = [grids[s].centre(c) for s, c in goals]
-    min_weight = min(costs.values())
-
-    def heuristic(state):
-        point = grids[state[0]].centre(state[1])
-        return min(math.dist(point, target) for target in goal_points) * min_weight
-
-    best = {state: 0.0 for state in sources}
-    came = {}
-    queue = [
-        (heuristic(state), 0, STANCES.index(state[0]), n, state) for n, state in enumerate(sources)
-    ]
-    heapq.heapify(queue)
-    tie = len(queue)
-    closed = set()
-    changes = dict.fromkeys(sources, 0)
-    reached = None
-    while queue:
-        _, _, _, _, current = heapq.heappop(queue)
-        if current in closed:
-            continue
-        if len(closed) >= max_nodes:
-            report.update(
-                status="budget_exhausted",
-                reachable=None,
-                nodes_expanded=len(closed),
-                reason=f"search reached max_nodes={max_nodes}; reachability remains unknown",
-            )
-            return report
-        closed.add(current)
-        if current in goals:
-            reached = current
-            break
-        stance, cell = current
-        edges = [
-            ((stance, dest), _length(_sweep(grids[stance], cell, dest)) * costs[stance], False)
-            for dest, _ in grids[stance].neighbours(cell)
-        ]
-        edges += [
-            ((other, cell), transition_cost, True)
-            for other in allowed
-            if other != stance and grids[other].is_walkable(cell)
-        ]
-        for nxt, edge_cost, change in edges:
-            if nxt in closed:
-                continue
-            candidate = best[current] + edge_cost
-            change_count = changes[current] + int(change)
-            if candidate < best.get(nxt, math.inf) or (
-                candidate == best.get(nxt) and change_count < changes[nxt]
-            ):
-                best[nxt] = candidate
-                changes[nxt] = change_count
-                came[nxt] = current
-                tie += 1
-                heapq.heappush(
-                    queue,
-                    (candidate + heuristic(nxt), change_count, STANCES.index(nxt[0]), tie, nxt),
-                )
-    report["nodes_expanded"] = len(closed)
-    if reached is None:
+    bound = None
+    if max_detour is not None:
+        max_detour = number(max_detour, "max_detour", maximum=1_000_000)
+        if not start["points"] or not end["points"]:
+            raise ValueError("max_detour needs position endpoints, not brush approach areas")
+        straight = math.dist(start["points"][0], end["points"][0])
+        floor = min(
+            math.dist(grids[a].centre(ca), grids[b].centre(cb))
+            for a, ca in sources
+            for b, cb in goals
+        )
+        bound = max(max_detour * straight, floor) * min(costs.values())
+    status, expanded, pruned, cost, states = search(
+        grids,
+        allowed,
+        costs,
+        transition_cost,
+        list(sources),
+        set(goals),
+        max_nodes,
+        bound=bound,
+        engine=engine,
+    )
+    report["nodes_expanded"] = expanded
+    if status == "budget":
+        report.update(
+            status="budget_exhausted",
+            reachable=None,
+            reason=f"search reached max_nodes={max_nodes}; reachability remains unknown",
+        )
+        return report
+    if status == "exhausted" and pruned:
+        report.update(
+            status="exceeds_max_detour",
+            reason=(
+                f"no route costs at most {bound:.2f} (max_detour={max_detour:g}); "
+                "a costlier one was not looked for"
+            ),
+        )
+        return report
+    if status == "exhausted":
         report.update(
             status="unreachable",
             reason="no directed route connects the snapped endpoints in the allowed stances",
         )
         return report
-    states = [reached]
-    while states[-1] in came:
-        states.append(came[states[-1]])
-    states.reverse()
+    best = {states[-1]: cost}
+    reached = states[-1]
     first = states[0]
     report["start"].update(sources[first], stance=first[0], cell=list(first[1]))
     report["end"].update(goals[reached], stance=reached[0], cell=list(reached[1]))
