@@ -9,7 +9,7 @@ import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from nrc_mcp import analysis, routes, server
 from nrc_mcp.surface import gameplay
-from test_analysis import box, point_entity, room, write_map
+from test_analysis import box, point_entity, room, wedge, write_map
 
 
 def grids(path, stances=("stand", "crouch", "prone"), cell=8):
@@ -160,6 +160,40 @@ def test_endpoint_snap_cannot_jump_a_pit_from_an_unsampled_small_platform(tmp_pa
     built = grids(write_map(tmp_path, brushes))
     result = query(built, start=(128, 128, 0), snap_radius=128)
     assert result["status"] == "no_endpoint"
+
+
+@pytest.mark.parametrize("cell", [8, 16])
+def test_an_endpoint_on_a_slope_snaps_where_the_body_rests(tmp_path, cell):
+    """On a slope the box rests above the floor's top under its centre (the uphill side
+    holds it), so a point at that top is inside the expanded slope. The snap stands it
+    where the grid does instead of refusing it. Two links, as `route_report(links=...)`
+    and a single route both snap through `_snaps`."""
+    built = grids(write_map(tmp_path, [*room(0, 0, 512, 256), wedge()]), ("stand",), cell)
+    grid = built["stand"]
+    on_slope = (72, 64, 64 * (1 - 72 / 128))  # the wedge's surface
+    assert not analysis.segment_clear(
+        grid.clearance_solids, grid.clearance_index, on_slope, on_slope
+    ), "the floor point itself is inside the body obstacle: the case being fixed"
+    result = query(built, start=on_slope, end=(400, 128, 0))
+    assert result["status"] == "found", result.get("reason")
+    rest = result["start"]["position"]
+    assert 0 <= rest[2] - on_slope[2] <= grid.movement.step_height.value
+    assert math.dist(rest[:2], on_slope[:2]) <= cell
+    game_map = grid.game_map
+    rows = routes.find_routes(
+        built,
+        [
+            (
+                routes.endpoint(game_map, "etl", on_slope, None, "start"),
+                routes.endpoint(game_map, "etl", (400, 128, 0), None, "end"),
+            ),
+            (
+                routes.endpoint(game_map, "etl", (400, 128, 0), None, "start"),
+                routes.endpoint(game_map, "etl", on_slope, None, "end"),
+            ),
+        ],
+    )
+    assert [r["status"] for r in rows] == ["found", "found"]
 
 
 def test_objective_entity_alias_uses_the_same_approach_area(tmp_path):

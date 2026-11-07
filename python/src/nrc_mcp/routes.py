@@ -89,10 +89,21 @@ def _snaps(grid: analysis.NavGrid, target: dict, radius: float):
             if floor is None:
                 continue
             anchor = (point[0], point[1], floor)
-        if grid.clearance_index is not None and not analysis.segment_clear(
-            grid.clearance_solids, grid.clearance_index, anchor, anchor
-        ):
-            continue
+        if grid.clearance_index is not None:
+            # Stand the body where the grid does (`NavGrid.stand_z`): on a slope or beside a
+            # floor plate the box rests above the floor's top under its centre, and at that
+            # top it would be inside the slope. Not standable within a step: no anchor here.
+            rest = analysis._rest_height(
+                grid.clearance_solids,
+                grid.clearance_index.column(anchor[0], anchor[1]),
+                anchor[0],
+                anchor[1],
+                anchor[2],
+                grid.movement.step_height.value,
+            )
+            if rest is None:
+                continue
+            anchor = (anchor[0], anchor[1], rest)
         ix, iy, _ = grid.cell_at(point)
         best = None
         for x in range(ix - rings, ix + rings + 1):
@@ -126,12 +137,12 @@ def _snaps(grid: analysis.NavGrid, target: dict, radius: float):
                         )
                         supported = True
                         for part in range(1, samples):
-                            x, y = (
+                            sx, sy = (
                                 anchor[i] + (snapped[i] - anchor[i]) * part / samples
                                 for i in (0, 1)
                             )
                             floor, _ = analysis.floor_and_ceiling(
-                                analysis.column_intervals(grid.solids, grid.index, x, y),
+                                analysis.column_intervals(grid.solids, grid.index, sx, sy),
                                 max(anchor[2], snapped[2]),
                             )
                             if floor is None or min(
