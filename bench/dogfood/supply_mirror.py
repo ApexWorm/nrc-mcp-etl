@@ -116,25 +116,14 @@ def objective_texts(objdata: str) -> tuple[dict, dict]:
     return desc, objs
 
 
-_NUM = r"\s*(-?[0-9.]+)\s*"
+def mirror_gm(text: str) -> tuple[str, dict]:
+    """An Omni-bot script mirrored in x with the repo's GameMonkey reader: every literal
+    coordinate the profile names (bots.coordinates: Vec3, AABB, Util.SetGoalPosition, ...) has
+    its x negated in place, the rest of the file byte for byte."""
+    sys.path.insert(0, str(REPO / "python/src"))
+    from nrc_mcp import botgoals, profiles  # noqa: PLC0415
 
-
-def mirror_gm(text: str) -> str:
-    """An Omni-bot map script with its `Vec3(x, y, z)` and `AABB(x1, ..., z2)` mirrored in x."""
-
-    def neg(v: str) -> str:
-        return f"{-float(v):.3f}"
-
-    text = re.sub(
-        rf"Vec3\({_NUM},{_NUM},{_NUM}\)",
-        lambda m: f"Vec3({neg(m[1])}, {m[2]}, {m[3]})",
-        text,
-    )
-    return re.sub(
-        rf"AABB\({_NUM},{_NUM},{_NUM},{_NUM},{_NUM},{_NUM}\)",
-        lambda m: f"AABB({neg(m[4])},{m[2]},{m[3]},{neg(m[1])},{m[5]},{m[6]})",
-        text,
-    )
+    return botgoals.gm_mirror(text, profiles.load("etl")["bots"]["coordinates"], 0)
 
 
 def mirror_way(src: Path, dest: Path) -> dict:
@@ -337,7 +326,13 @@ async def main(args):
                 src = stock_dir / f"{SOURCE}{suffix}"
                 if src.is_file():
                     dest = mirrored / f"{NAME}{suffix}"
-                    dest.write_text(mirror_gm(src.read_text(errors="replace")))
+                    text, report = mirror_gm(src.read_bytes().decode("latin-1"))
+                    dest.write_bytes(text.encode("latin-1"))
+                    result.setdefault("stock_gm_mirrored", {})[dest.name] = {
+                        "points": report["points"],
+                        "boxes": report["boxes"],
+                        "not_mirrored": report["not_mirrored"],
+                    }
                     gm.append(str(dest))
             plays = {"seeded": (None, [])}
             if args.bots_with_gm and gm:
