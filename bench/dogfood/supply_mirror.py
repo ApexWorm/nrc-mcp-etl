@@ -159,16 +159,20 @@ def mirror_way(src: Path, dest: Path) -> dict:
 
 def per_objective(generated_run: dict, receipt: dict) -> list[dict]:
     """Each objective's outcome and engine seconds in one run: its steps end at the
-    `<name>_done` screenshot objective_playtests puts after each test."""
+    `<name>_done` screenshot objective_playtests puts after each test (the templates take
+    none of their own). A receipt names each step's action; the scenario has the rest."""
     rows, current = [], {"seconds": 0.0, "ok": True, "steps": 0}
     names = iter(generated_run["objectives"])
+    planned = generated_run["scenario"]["steps"]
     for s in receipt.get("steps", []):
-        step = s.get("action") if isinstance(s.get("action"), dict) else {}
+        index = s.get("index")
+        step = planned[index] if isinstance(index, int) and index < len(planned) else {}
         current["seconds"] += float(s.get("seconds") or 0)
         current["steps"] += 1
         current["ok"] = current["ok"] and bool(s.get("ok"))
         if not s.get("ok"):
             current["failed"] = step.get("label") or step.get("action")
+            current["error"] = s.get("error")
         if step.get("action") == "screenshot" and str(step.get("name", "")).endswith("_done"):
             rows.append({"objective": next(names, "?"), **current})
             current = {"seconds": 0.0, "ok": True, "steps": 0}
