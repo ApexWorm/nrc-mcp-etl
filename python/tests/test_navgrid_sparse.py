@@ -190,3 +190,64 @@ def test_every_real_map_builds_at_cell_16(kern, name):
         pytest.skip("corpus not imported")
     grid = analysis.build_navgrid(path, cell=16, profile_id=PROFILE)
     assert grid.counts["walkable_cells"] > 10_000
+
+
+def test_walk_columns_read_like_the_dicts_they_replace(kern, tmp_path):
+    """`columns` and `stand_z` are flat arrays now; every caller still reads them as dicts."""
+    grid = analysis.build_navgrid(_mixed_map(kern, tmp_path), cell=16, profile_id=PROFILE)
+    columns = dict(grid.columns.items())
+    stand_z = dict(grid.stand_z.items())
+    assert columns and stand_z, "the mixed map has standing cells resting off the grid"
+    assert grid.columns == columns and grid.stand_z == stand_z
+    assert list(grid.columns) == sorted(columns) and len(grid.columns) == len(columns)
+    assert grid.counts["walkable_cells"] == sum(len(zs) for zs in columns.values())
+    assert grid.walkable_cells() == [
+        (x, y, z) for (x, y), zs in sorted(columns.items()) for z in zs
+    ]
+    (ix, iy), zs = next(iter(columns.items()))
+    assert grid.columns.get((ix, iy)) == zs and grid.columns[(ix, iy)] == zs
+    # A dict finds a whole float and misses any other; so does the flat form.
+    assert grid.columns.get((float(ix), float(iy))) == zs
+    assert grid.columns.get((ix + 0.5, iy), ()) == ()
+    assert grid.columns.get((-1, 0), ()) == () and (-1, 0) not in grid.columns
+    for (x, y, z), rest in stand_z.items():
+        assert grid.stand_z.get((x, y, z)) == rest == grid.centre((x, y, z))[2]
+    nx, ny, nz = grid.dims
+    for (x, y), zs in columns.items():
+        for z in zs:
+            if (x, y, z) not in stand_z:
+                assert grid.stand_z.get((x, y, z)) is None
+                assert grid.centre((x, y, z))[2] == grid.origin[2] + z * grid.cell
+    assert grid.columns.nbytes() <= 4 * (nx * ny + 1) + 16 * grid.counts["walkable_cells"]
+
+
+def test_route_heights_reach_the_native_graph_from_the_flat_view(kern, tmp_path):
+    """`routesearch._heights` hands the kernel a dict; the grid's view converts to one."""
+    from nrc_mcp import routesearch  # noqa: PLC0415
+
+    grid = analysis.build_navgrid(_mixed_map(kern, tmp_path), cell=16, profile_id=PROFILE)
+    seen = {}
+
+    class Graph:
+        def set_heights(self, layer, heights):
+            seen[layer] = heights
+
+    routesearch._heights(Graph(), 0, grid)
+    assert isinstance(seen[0], dict) and seen[0] == dict(grid.stand_z.items())
+
+
+def test_hull_planes_are_remembered_compactly_and_exactly(kern):
+    """The hull cache keeps packed doubles, and hands back the planes `_hull_planes` gives."""
+    vertices = [(0.0, 0.0, 0.0), (128.0, 0.0, 0.0), (0.0, 128.0, 0.0), (0.0, 0.0, 64.0)]
+    direct = analysis._hull_planes(list(vertices), 1e-7)
+    assert analysis._hull_planes_cached(vertices, 1e-7) == direct
+    assert analysis._hull_planes_cached(vertices, 1e-7) == direct  # and from the cache
+    seen: dict = {}
+    first = analysis._interned(direct, seen)
+    again = analysis._interned([tuple(p) for p in direct], seen)
+    assert first == direct and all(a is b for a, b in zip(first, again, strict=True))
+    # A plane differing only in the sign of a zero is not merged into another.
+    assert (
+        analysis._interned([(0.0, 0.0, 1.0, 0.0)], seen)[0]
+        is not analysis._interned([(-0.0, 0.0, 1.0, 0.0)], seen)[0]
+    )

@@ -47,7 +47,9 @@ import heapq
 import math
 import os
 import random
+import struct
 from array import array
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -730,11 +732,15 @@ def _body_obstacles(solids: list[Solid], radius: float, height: float) -> list[S
     Face-plane expansion encloses the true Minkowski sum, so missing bevel planes can
     reject a clear angled corner but cannot make an obstructed box appear clear.
     """
+    seen: dict[bytes, tuple[float, float, float, float]] = {}
     return [
         Solid(
-            planes=tuple(
-                (a, b, c, d + radius * (abs(a) + abs(b)) + height * max(0.0, -c))
-                for a, b, c, d in solid.planes
+            planes=_interned(
+                (
+                    (a, b, c, d + radius * (abs(a) + abs(b)) + height * max(0.0, -c))
+                    for a, b, c, d in solid.planes
+                ),
+                seen,
             ),
             mins=(solid.mins[0] - radius, solid.mins[1] - radius, solid.mins[2] - height),
             maxs=(solid.maxs[0] + radius, solid.maxs[1] + radius, solid.maxs[2]),
@@ -750,13 +756,47 @@ def _body_obstacles(solids: list[Solid], radius: float, height: float) -> list[S
     ]
 
 
-@lru_cache(maxsize=1 << 16)
+def _interned(
+    planes, seen: dict[bytes, tuple[float, float, float, float]]
+) -> tuple[tuple[float, float, float, float], ...]:
+    """`planes` as a tuple whose planes are shared with every equal plane already in `seen`.
+
+    Neighbouring brushes share faces, so a map's planes repeat about four times over; one
+    tuple per distinct plane holds the same numbers at a quarter of the objects. Keyed by
+    the packed doubles, so a plane is only ever replaced by a bit-identical one (`-0.0`
+    stays `-0.0`).
+    """
+    return tuple(seen.setdefault(_PLANE.pack(*plane), plane) for plane in planes)
+
+
+_PLANE = struct.Struct("=4d")
+
+
 def _hull_planes_cached(
-    vertices: tuple[tuple[float, float, float], ...], tolerance: float
+    vertices: list[tuple[float, float, float]], tolerance: float
 ) -> tuple[tuple[float, float, float, float], ...] | None:
     """`_hull_planes`, remembered: a map's grids in several stances and door states each
-    collect the same brushes, and the hull is the costly part of collecting one."""
-    return _hull_planes(list(vertices), tolerance)
+    collect the same brushes, and the hull is the costly part of collecting one.
+
+    The cache holds vertices and planes as packed doubles, not tuples of floats: it outlives
+    every grid, and as objects a full-size map's entries cost more than its grid does.
+    """
+    packed = _hull_planes_packed(array("d", [c for v in vertices for c in v]).tobytes(), tolerance)
+    if packed is None:
+        return None
+    flat = array("d")
+    flat.frombytes(packed)
+    return tuple(zip(flat[0::4], flat[1::4], flat[2::4], flat[3::4], strict=True))
+
+
+@lru_cache(maxsize=1 << 16)
+def _hull_planes_packed(vertices: bytes, tolerance: float) -> bytes | None:
+    flat = array("d")
+    flat.frombytes(vertices)
+    planes = _hull_planes(list(zip(flat[0::3], flat[1::3], flat[2::3], strict=True)), tolerance)
+    if planes is None:
+        return None
+    return array("d", [c for plane in planes for c in plane]).tobytes()
 
 
 def _hull_planes(
@@ -1213,6 +1253,9 @@ def collect_solids(
     }
     indeterminate_examples: list[str] = []
     skipped_entities: set[int] = set()
+    # One object per distinct plane and shader list across the map (see `_interned`).
+    planes_seen: dict[bytes, tuple[float, float, float, float]] = {}
+    shaders_seen: dict[tuple[str, ...], tuple[str, ...]] = {}
 
     for entity in game_map.entities(with_keys=False):
         index = int(entity["index"])
@@ -1280,7 +1323,7 @@ def collect_solids(
             else:
                 extent = max(maxs[i] - mins[i] for i in range(3))
                 planes_or_none = (
-                    _hull_planes_cached(tuple(vertices), max(extent, 1.0) * 1e-7)
+                    _hull_planes_cached(vertices, max(extent, 1.0) * 1e-7)
                     if len(vertices) <= max_hull_vertices
                     else None
                 )
@@ -1291,16 +1334,17 @@ def collect_solids(
                 else:
                     planes = planes_or_none
 
+            names = tuple(shaders)
             solids.append(
                 Solid(
-                    planes=planes,
+                    planes=_interned(planes, planes_seen),
                     mins=mins,
                     maxs=maxs,
                     entity=index,
                     primitive=primitive - 1,
                     is_box=box,
                     approximated=approximated,
-                    shaders=tuple(shaders),
+                    shaders=shaders_seen.setdefault(names, names),
                 )
             )
             provenance["brushes_used"] += 1
@@ -1630,6 +1674,196 @@ class ColumnRuns:
         return self.offsets.itemsize * len(self.offsets) + self.bounds.itemsize * len(self.bounds)
 
 
+class WalkColumns(Mapping):
+    """A grid's standing cells, read like `{(ix, iy): (iz, ...)}` but stored flat.
+
+    `offsets[ix * ny + iy] .. offsets[ix * ny + iy + 1]` indexes `zs` (that column's walkable
+    cells, ascending) and `rests` (where the body comes to rest on each, see `RestHeights`);
+    `keys_` lists the columns that have any, in `(ix, iy)` order. A dict of tuples costs an
+    object per column and per height; this costs 4 bytes a column and 12 a standing cell.
+    `get` builds the column's tuple on each call.
+    """
+
+    __slots__ = ("cell", "dims", "keys_", "offsets", "oz", "rests", "zs")
+
+    def __init__(
+        self,
+        dims: tuple[int, int, int],
+        offsets: array,
+        zs: array,
+        rests: array,
+        oz: float,
+        cell: float,
+    ) -> None:
+        if len(offsets) != dims[0] * dims[1] + 1 or not len(zs) == len(rests) == offsets[-1]:
+            raise ValueError("offsets must hold one entry per column, plus one, ending at len(zs)")
+        self.dims = dims
+        self.offsets = offsets
+        self.zs = zs
+        self.rests = rests
+        self.oz = oz
+        self.cell = cell
+        self.keys_ = array(
+            "I", (k for k in range(len(offsets) - 1) if offsets[k] != offsets[k + 1])
+        )
+
+    @classmethod
+    def from_dict(
+        cls,
+        dims: tuple[int, int, int],
+        columns: dict[tuple[int, int], tuple[int, ...]],
+        stand_z: dict[tuple[int, int, int], float],
+        oz: float,
+        cell: float,
+    ) -> WalkColumns:
+        """The flat form of `{(ix, iy): zs}` and `{(ix, iy, iz): rest}` (rest defaults to
+        the cell's lower boundary, `oz + iz * cell`)."""
+        nx, ny, _nz = dims
+        offsets, zs, rests = array("I", [0]), array("I"), array("d")
+        for k in range(nx * ny):
+            ix, iy = divmod(k, ny)
+            for iz in columns.get((ix, iy), ()):
+                zs.append(iz)
+                rests.append(stand_z.get((ix, iy, iz), oz + iz * cell))
+            offsets.append(len(zs))
+        return cls(dims, offsets, zs, rests, oz, cell)
+
+    def _span(self, ix: int, iy: int) -> tuple[int, int]:
+        nx, ny, _nz = self.dims
+        if not (0 <= ix < nx and 0 <= iy < ny):
+            return 0, 0
+        if ix.__class__ is not int or iy.__class__ is not int:
+            # A dict would find a whole float (43.0 == 43) and miss any other.
+            if ix != int(ix) or iy != int(iy):
+                return 0, 0
+            ix, iy = int(ix), int(iy)
+        k = ix * ny + iy
+        return self.offsets[k], self.offsets[k + 1]
+
+    def get(self, key, default=None):
+        try:
+            ix, iy = key
+        except (TypeError, ValueError):
+            return default
+        a, b = self._span(ix, iy)
+        return tuple(self.zs[a:b]) if a < b else default
+
+    def __getitem__(self, key):
+        column = self.get(key)
+        if column is None:
+            raise KeyError(key)
+        return column
+
+    def __contains__(self, key) -> bool:
+        return self.get(key) is not None
+
+    def __iter__(self):
+        ny = self.dims[1]
+        for k in self.keys_:
+            yield divmod(k, ny)
+
+    def __len__(self) -> int:
+        return len(self.keys_)
+
+    def items(self):
+        ny, offsets, zs = self.dims[1], self.offsets, self.zs
+        for k in self.keys_:
+            yield divmod(k, ny), tuple(zs[offsets[k] : offsets[k + 1]])
+
+    def cell_count(self) -> int:
+        return len(self.zs)
+
+    def rest(self, ix: int, iy: int, iz: int) -> float | None:
+        """Where the body rests on walkable cell `(ix, iy, iz)`; None when it is not one."""
+        a, b = self._span(ix, iy)
+        zs = self.zs
+        for i in range(a, b):
+            if zs[i] == iz:
+                return self.rests[i]
+        return None
+
+    def heights(self) -> RestHeights:
+        return RestHeights(self)
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, WalkColumns):
+            return (
+                self.dims == other.dims
+                and self.offsets == other.offsets
+                and self.zs == other.zs
+                and self.rests == other.rests
+            )
+        return Mapping.__eq__(self, other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def nbytes(self) -> int:
+        return sum(a.itemsize * len(a) for a in (self.offsets, self.zs, self.rests, self.keys_))
+
+
+class RestHeights(Mapping):
+    """`{(ix, iy, iz): z}` for the walkable cells whose body rests off the cell's lower
+    boundary (`origin.z + iz * cell`), read from `WalkColumns` without a dict of its own."""
+
+    __slots__ = ("_count", "walk")
+
+    def __init__(self, walk: WalkColumns) -> None:
+        self.walk = walk
+        self._count: int | None = None
+
+    def get(self, key, default=None):
+        try:
+            ix, iy, iz = key
+        except (TypeError, ValueError):
+            return default
+        walk = self.walk
+        z = walk.rest(ix, iy, iz)
+        if z is None or z == walk.oz + iz * walk.cell:
+            return default
+        return z
+
+    def __getitem__(self, key):
+        z = self.get(key)
+        if z is None:
+            raise KeyError(key)
+        return z
+
+    def __contains__(self, key) -> bool:
+        return self.get(key) is not None
+
+    def items(self):
+        walk = self.walk
+        ny, offsets, zs, rests = walk.dims[1], walk.offsets, walk.zs, walk.rests
+        oz, cell = walk.oz, walk.cell
+        for k in walk.keys_:
+            ix, iy = divmod(k, ny)
+            for i in range(offsets[k], offsets[k + 1]):
+                iz = zs[i]
+                if rests[i] != oz + iz * cell:
+                    yield (ix, iy, iz), rests[i]
+
+    def __iter__(self):
+        for key, _z in self.items():
+            yield key
+
+    def __len__(self) -> int:
+        if self._count is None:
+            self._count = sum(1 for _ in self.items())
+        return self._count
+
+    def __bool__(self) -> bool:
+        if self._count is not None:
+            return self._count > 0
+        return next(iter(self.items()), None) is not None
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, RestHeights):
+            return self.walk == other.walk
+        return Mapping.__eq__(self, other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+
 @dataclass
 class NavGrid:
     """A voxelized walkable surface, with the provenance needed to judge it.
@@ -1645,7 +1879,8 @@ class NavGrid:
     origin: tuple[float, float, float]
     dims: tuple[int, int, int]
     occupancy: ColumnRuns
-    columns: dict[tuple[int, int], tuple[int, ...]]
+    #: Walkable cells per column, read like `{(ix, iy): (iz, ...)}` (`WalkColumns`).
+    columns: WalkColumns
     movement: Movement
     step_up_cells: int
     fall_cells: int
@@ -1667,8 +1902,9 @@ class NavGrid:
     clearance_restricted: list[tuple[int, int, int]] = field(default_factory=list)
     #: Where the body rests on a walkable cell, when that is not the cell's lower boundary:
     #: a floor whose top is off the cell grid, or one with something under the body's
-    #: footprint it rises onto (see `build_navgrid`). `centre` reads it.
-    stand_z: dict[tuple[int, int, int], float] = field(default_factory=dict)
+    #: footprint it rises onto (see `build_navgrid`). `centre` reads it. Read like
+    #: `{(ix, iy, iz): z}`; a built grid holds a `RestHeights` view of `columns`.
+    stand_z: Mapping = field(default_factory=dict)
     _components: dict[tuple[int, int, int], int] | None = None
     _component_sizes: list[int] = field(default_factory=list)
 
@@ -1681,7 +1917,10 @@ class NavGrid:
         cell's lower boundary only when the floor's top is on the cell grid.
         """
         ix, iy, iz = cell
-        z = self.stand_z.get((ix, iy, iz)) if self.stand_z else None
+        if isinstance(self.columns, WalkColumns):
+            z = self.columns.rest(ix, iy, iz)
+        else:
+            z = self.stand_z.get((ix, iy, iz)) if self.stand_z else None
         return (
             self.origin[0] + (ix + 0.5) * self.cell,
             self.origin[1] + (iy + 0.5) * self.cell,
@@ -2040,17 +2279,13 @@ def _voxelize(
     offsets, bounds = array("I"), array("I")
     offsets.frombytes(raw["offsets"])
     bounds.frombytes(raw["bounds"])
-    oz = origin[2]
-    stand_z = {
-        (ix, iy, z): rest
-        for ix, iy, zs, rests in raw["walkable"]
-        for z, rest in zip(zs, rests, strict=True)
-        if rest != oz + z * cell
-    }
+    walk_offsets, walk_z, walk_rest = array("I"), array("I"), array("d")
+    walk_offsets.frombytes(raw["walk_offsets"])
+    walk_z.frombytes(raw["walk_z"])
+    walk_rest.frombytes(raw["walk_rest"])
     return {
         "occupancy": ColumnRuns(dims, offsets, bounds),
-        "columns": {(ix, iy): tuple(zs) for ix, iy, zs, _ in raw["walkable"]},
-        "stand_z": stand_z,
+        "walk": WalkColumns(dims, walk_offsets, walk_z, walk_rest, origin[2], cell),
         "restricted": raw["restricted"],
         "clearance_restricted": raw["clearance_restricted"],
         "solid_cells": raw["solid_cells"],
@@ -2234,8 +2469,7 @@ def _voxelize_python(
 
     return {
         "occupancy": ColumnRuns.from_dense(dims, solid),
-        "columns": columns,
-        "stand_z": stand_z,
+        "walk": WalkColumns.from_dict(dims, columns, stand_z, oz, cell),
         "restricted": restricted,
         "clearance_restricted": clearance_restricted,
         "solid_cells": solid.count(1),
@@ -2278,9 +2512,10 @@ def build_navgrid(
       its intersection with a vertical line is an interval). The kernel fills those into one
       x-slab of `ny * nz` bytes at a time and keeps each column only as its solid runs.
     - each standing place is tested once against the expanded body obstacles that reach its
-      column, natively; walkable cells then cost Python only to put in `columns`.
-    - memory is 4 bytes per column plus 8 per solid run (`ColumnRuns`), not a byte per cell:
-      a full-size map at cell 16 holds a few megabytes of occupancy.
+      column, natively, and comes back flat (`WalkColumns`), not as Python objects.
+    - memory is 4 bytes per column plus 8 per solid run (`ColumnRuns`), not a byte per cell,
+      and 4 bytes per column plus 12 per standing cell (`WalkColumns`, which also holds the
+      resting heights `stand_z` reads): a full-size map at cell 16 holds a few megabytes.
 
     Raises `AnalysisError` when the map needs more than `max_cells` cells (counting its whole
     bounding box), naming the cap and the cell size that would fit — silently coarsening the
@@ -2365,7 +2600,7 @@ def build_navgrid(
         movement.step_height.value,
     )
     occupancy = voxels["occupancy"]
-    columns: dict[tuple[int, int], tuple[int, ...]] = voxels["columns"]
+    columns: WalkColumns = voxels["walk"]
     restricted: list[tuple[int, int, int]] = voxels["restricted"]
     clearance_restricted: list[tuple[int, int, int]] = voxels["clearance_restricted"]
     crouch_only_total = voxels["crouch_only"]
@@ -2377,7 +2612,7 @@ def build_navgrid(
     fall = movement.fall_no_damage
     fall_cells = max(step_up_cells, math.floor(fall.value / cell)) if fall else step_up_cells
 
-    walkable_total = sum(len(v) for v in columns.values())
+    walkable_total = columns.cell_count()
     counts = {
         "cells": total,
         "solid_cells": voxels["solid_cells"],
@@ -2534,7 +2769,7 @@ def build_navgrid(
         clearance_solids=clearance_solids,
         clearance_index=clearance_index,
         clearance_restricted=clearance_restricted,
-        stand_z=voxels["stand_z"],
+        stand_z=columns.heights(),
     )
 
 

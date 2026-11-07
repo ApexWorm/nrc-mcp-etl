@@ -63,7 +63,8 @@ def _heights(graph, layer: int, grid: Any) -> None:
     boundary: same routes, possibly a different expansion count)."""
     stand_z = getattr(grid, "stand_z", None)
     if stand_z and hasattr(graph, "set_heights"):
-        graph.set_heights(layer, stand_z)
+        # The kernel takes a dict; a built grid's heights are a flat view (`RestHeights`).
+        graph.set_heights(layer, stand_z if isinstance(stand_z, dict) else dict(stand_z.items()))
 
 
 def step_graph(grid: Any):
