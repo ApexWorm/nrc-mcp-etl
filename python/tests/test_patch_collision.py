@@ -105,11 +105,13 @@ def test_the_patch_surface_is_the_engine_chord_not_the_drawn_curve(kern, tmp_pat
 
 def test_a_small_pipe_reads_like_the_brush_ridge_it_collides_as(kern, tmp_path):
     """r=24 is drawn 48 high, but r*sqrt(2)/4 < 16 collapses each quarter to one chord: the
-    engine collides with a 45-degree diamond. The analysis treats it exactly as it treats a
-    45-degree brush ridge of the same size: unreachable standing, because the body box is
-    tested at its cell's floor and a 45-degree slope rises into it. That is the grid's slope
-    limitation, not the patch model's; in the engine (bench/dogfood/patches.py) the player
-    walks over it, since 45 degrees is within MIN_WALK_NORMAL 0.7.
+    engine collides with a 45-degree diamond, and in the engine (bench/dogfood/patches.py)
+    the player walks over it, since 45 degrees is within MIN_WALK_NORMAL 0.7.
+
+    The grid rests the body box on what is under it, rising up to a step, so a 45-degree
+    brush ridge of the same size is crossed as the engine crosses it. The diamond is not:
+    its lower chords overhang the floor from 0 to 24 units, and a box standing beside it
+    would have to rise 30 to clear them. That remains a difference from the engine.
     """
     path = write_map(tmp_path, room(0, 0, 512, 256))
     with_patches(kern, path, (pipe(256, 24, 24), "t/pipe"))
@@ -130,7 +132,8 @@ def test_a_small_pipe_reads_like_the_brush_ridge_it_collides_as(kern, tmp_path):
     )
     brush_path = write_map(tmp_path, [*room(0, 0, 512, 256), ridge], name="ridge.map")
     as_brush, _ = route(brush_path, stances=("stand",))
-    assert as_patch["reachable"] is as_brush["reachable"] is False
+    assert as_brush["reachable"] is True
+    assert as_patch["reachable"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@ def lane_y(k: int) -> float:
 LANES = [
     ("pipe_r48_floor", "stand", "blocked", False),
     ("pipe_r8_floor", "stand", "crosses", True),
-    ("pipe_r24_floor", "stand", "crosses", False),  # 45-degree diamond: grid slope limitation
+    ("pipe_r24_floor", "stand", "crosses", False),  # 45-degree diamond: its lower chords overhang
     ("arch_doorway", "stand", "crosses", True),
     ("vent_pipe_r16", "prone", "blocked", False),
     ("vent_pipe_r4", "prone", "crosses", True),

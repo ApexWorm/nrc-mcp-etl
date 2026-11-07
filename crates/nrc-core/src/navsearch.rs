@@ -143,6 +143,9 @@ impl Ord for Entry {
 pub struct Graph {
     origin: [f64; 3],
     cell: f64,
+    /// Resting heights that differ from the cell's lower boundary (`NavGrid.stand_z`),
+    /// keyed by node; a node absent here sits on its boundary.
+    heights: HashMap<Key, f64>,
     ids: HashMap<Key, u32>,
     keys: Vec<Key>,
     /// Per node, `(start, len)` into `edges` once expanded.
@@ -161,6 +164,7 @@ impl Graph {
         Graph {
             origin,
             cell,
+            heights: HashMap::new(),
             ids: HashMap::new(),
             keys: Vec::new(),
             adjacency: Vec::new(),
@@ -207,13 +211,22 @@ impl Graph {
         (self.keys.len(), expanded, self.edges.len())
     }
 
+    /// Set where a node's body rests when that is not its cell's lower boundary.
+    pub fn set_height(&mut self, key: Key, z: f64) {
+        self.heights.insert(key, z);
+    }
+
     /// World position of a node: centred horizontally, on its floor vertically — the
-    /// same expression, in the same order, as `NavGrid.centre`.
+    /// same expression, in the same order, as `NavGrid.centre` (a recorded resting
+    /// height wins over the cell boundary).
     pub fn centre(&self, key: Key) -> [f64; 3] {
         [
             self.origin[0] + (key.1 as f64 + 0.5) * self.cell,
             self.origin[1] + (key.2 as f64 + 0.5) * self.cell,
-            self.origin[2] + key.3 as f64 * self.cell,
+            match self.heights.get(&key) {
+                Some(&z) => z,
+                None => self.origin[2] + key.3 as f64 * self.cell,
+            },
         ]
     }
 

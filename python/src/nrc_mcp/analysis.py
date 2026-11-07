@@ -42,16 +42,19 @@ how a wrong number survives.
 
 from __future__ import annotations
 
+import bisect
 import heapq
 import math
 import os
 import random
+from array import array
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from . import gamepath, profiles
-from .kernel import load_map, repo_root
+from .kernel import KernelUnavailable, kernel, load_map, repo_root
 from .rules import Finding, parse_spawnflags
 from .rules import _keys as _rule_keys
 
@@ -66,8 +69,17 @@ from .rules import _keys as _rule_keys
 DEFAULT_CELL = 16
 """Default voxel edge in world units. 16 is the usual authoring grid for interiors."""
 
-MAX_CELLS = 12_000_000
-"""Cell budget for one grid. One byte per cell, so this is a 12 MB bytearray."""
+MAX_CELLS = 1_000_000_000
+"""Cell budget for one grid, counting every cell of its bounding box.
+
+The grid is sparse: it stores each column's solid runs (4 bytes per column plus 8 per run)
+and holds one x-slab of `ny * nz` bytes while voxelizing, so this caps time far more than
+memory. A billion cells is ET: Legacy's Supply Depot (6912 x 6912 x 3456 units) at cell 8.
+"""
+
+DENSE_MAX_CELLS = 12_000_000
+"""The cap when the kernel has no sparse voxel pass and the dense Python reference runs:
+one byte per cell, so a 12 MB bytearray."""
 
 MAX_HULL_VERTICES = 20
 """Above this, a brush is approximated by its bounding box instead of its half-spaces.
@@ -160,6 +172,10 @@ a small pipe would poke out of its top. The front face, the one players meet, st
 where the engine puts it. The voxel grid does not sample these slivers at cell centres, which
 would miss them; it marks every cell the facet passes through (`_rasterize_facet`).
 """
+
+REST_NUDGE = 1.0e-4
+"""How far a resting body rises past an obstacle whose top rounds to at or below the height
+it already holds (two brushes sharing a top face compute it a few ulps apart)."""
 
 PATCH_RASTER_SHIFT = 0.01
 """How far behind its front a facet is moved before it is rasterized, in world units.
@@ -734,6 +750,15 @@ def _body_obstacles(solids: list[Solid], radius: float, height: float) -> list[S
     ]
 
 
+@lru_cache(maxsize=1 << 16)
+def _hull_planes_cached(
+    vertices: tuple[tuple[float, float, float], ...], tolerance: float
+) -> tuple[tuple[float, float, float, float], ...] | None:
+    """`_hull_planes`, remembered: a map's grids in several stances and door states each
+    collect the same brushes, and the hull is the costly part of collecting one."""
+    return _hull_planes(list(vertices), tolerance)
+
+
 def _hull_planes(
     vertices: list[tuple[float, float, float]], tolerance: float
 ) -> tuple[tuple[float, float, float, float], ...] | None:
@@ -1023,6 +1048,7 @@ def _rasterize_facet(
     origin: tuple[float, float, float],
     dims: tuple[int, int, int],
     cell: float,
+    tops: dict[int, float] | None = None,
 ) -> None:
     """Mark every cell a patch facet passes through as solid.
 
@@ -1071,6 +1097,10 @@ def _rasterize_facet(
                 continue
             start = (base_x + iy) * nz
             occupancy[start + iz0 : start + iz1 + 1] = _SOLID * (iz1 - iz0 + 1)
+            if tops is not None:
+                top = max(zs)
+                if tops.get(start + iz1, -math.inf) < top:
+                    tops[start + iz1] = top
 
 
 def _collect_patches(
@@ -1250,7 +1280,7 @@ def collect_solids(
             else:
                 extent = max(maxs[i] - mins[i] for i in range(3))
                 planes_or_none = (
-                    _hull_planes(vertices, max(extent, 1.0) * 1e-7)
+                    _hull_planes_cached(tuple(vertices), max(extent, 1.0) * 1e-7)
                     if len(vertices) <= max_hull_vertices
                     else None
                 )
@@ -1525,13 +1555,88 @@ def floor_and_ceiling(
 # ---------------------------------------------------------------------------
 
 
+class ColumnRuns:
+    """A grid's solid cells, stored as each column's runs of solid z.
+
+    `offsets[ix * ny + iy] .. offsets[ix * ny + iy + 1]` indexes `bounds`, which holds that
+    column's runs flattened as half-open `[start, end)` pairs, ascending and maximal (two runs
+    never touch). A cell is solid exactly when an odd number of bounds lie at or below it, so a
+    lookup is one bisection over a handful of numbers. Memory follows the map's surfaces, not
+    its volume: a column of open air costs four bytes however tall the map is.
+    """
+
+    __slots__ = ("bounds", "dims", "offsets")
+
+    def __init__(self, dims: tuple[int, int, int], offsets: array, bounds: array) -> None:
+        if len(offsets) != dims[0] * dims[1] + 1:
+            raise ValueError("offsets must hold one entry per column, plus one")
+        self.dims = dims
+        self.offsets = offsets
+        self.bounds = bounds
+
+    @classmethod
+    def from_dense(cls, dims: tuple[int, int, int], solid: bytes | bytearray) -> ColumnRuns:
+        """The runs of a dense `(ix * ny + iy) * nz + iz` byte grid."""
+        nx, ny, nz = dims
+        offsets = array("I", [0])
+        bounds = array("I")
+        for column in range(nx * ny):
+            start = column * nz
+            end = start + nz
+            at = solid.find(_SOLID, start, end)
+            while at >= 0:
+                stop = solid.find(b"\x00", at, end)
+                stop = end if stop < 0 else stop
+                bounds.append(at - start)
+                bounds.append(stop - start)
+                at = solid.find(_SOLID, stop, end) if stop < end else -1
+            offsets.append(len(bounds))
+        return cls(dims, offsets, bounds)
+
+    def runs(self, ix: int, iy: int) -> list[tuple[int, int]]:
+        """The column's solid runs as `(start, end)` cell ranges, end exclusive."""
+        nx, ny, _nz = self.dims
+        if not (0 <= ix < nx and 0 <= iy < ny):
+            return []
+        k = ix * ny + iy
+        flat = self.bounds[self.offsets[k] : self.offsets[k + 1]]
+        return list(zip(flat[::2], flat[1::2], strict=True))
+
+    def is_solid(self, ix: int, iy: int, iz: int) -> bool:
+        nx, ny, nz = self.dims
+        if not (0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz):
+            return False
+        k = ix * ny + iy
+        lo = self.offsets[k]
+        return (bisect.bisect_right(self.bounds, iz, lo, self.offsets[k + 1]) - lo) % 2 == 1
+
+    def count(self) -> int:
+        """Solid cells in the whole grid."""
+        b = self.bounds
+        return sum(b[1::2]) - sum(b[::2])
+
+    def dense(self) -> bytearray:
+        """The grid as one byte per cell, `(ix * ny + iy) * nz + iz`. Costs the full volume."""
+        nx, ny, nz = self.dims
+        out = bytearray(nx * ny * nz)
+        b = self.bounds
+        for column in range(nx * ny):
+            base = column * nz
+            for k in range(self.offsets[column], self.offsets[column + 1], 2):
+                out[base + b[k] : base + b[k + 1]] = _SOLID * (b[k + 1] - b[k])
+        return out
+
+    def nbytes(self) -> int:
+        return self.offsets.itemsize * len(self.offsets) + self.bounds.itemsize * len(self.bounds)
+
+
 @dataclass
 class NavGrid:
     """A voxelized walkable surface, with the provenance needed to judge it.
 
-    `solid` is one byte per cell, indexed `(ix * ny + iy) * nz + iz` — the vertical axis is
-    contiguous so a whole column is one slice, which is what makes the walkability pass a
-    handful of C-level byte searches per column instead of a Python loop per cell.
+    `occupancy` holds the solid cells sparsely, as each column's runs (`ColumnRuns`);
+    `is_solid` reads it. `solid` still gives the old dense view, one byte per cell indexed
+    `(ix * ny + iy) * nz + iz`, but builds it on demand at the full volume's cost.
     """
 
     map_path: str
@@ -1539,7 +1644,7 @@ class NavGrid:
     cell: float
     origin: tuple[float, float, float]
     dims: tuple[int, int, int]
-    solid: bytearray
+    occupancy: ColumnRuns
     columns: dict[tuple[int, int], tuple[int, ...]]
     movement: Movement
     step_up_cells: int
@@ -1560,18 +1665,27 @@ class NavGrid:
     clearance_solids: list[Solid] = field(default_factory=list)
     clearance_index: BucketIndex | None = None
     clearance_restricted: list[tuple[int, int, int]] = field(default_factory=list)
+    #: Where the body rests on a walkable cell, when that is not the cell's lower boundary:
+    #: a floor whose top is off the cell grid, or one with something under the body's
+    #: footprint it rises onto (see `build_navgrid`). `centre` reads it.
+    stand_z: dict[tuple[int, int, int], float] = field(default_factory=dict)
     _components: dict[tuple[int, int, int], int] | None = None
     _component_sizes: list[int] = field(default_factory=list)
 
     # --- coordinates ------------------------------------------------------
 
     def centre(self, cell: tuple[int, int, int]) -> tuple[float, float, float]:
-        """World position of a walkable cell: centred horizontally, on its floor vertically."""
+        """World position of a walkable cell: centred horizontally, on its floor vertically.
+
+        "On its floor" is where the player box comes to rest there (`stand_z`), which is the
+        cell's lower boundary only when the floor's top is on the cell grid.
+        """
         ix, iy, iz = cell
+        z = self.stand_z.get((ix, iy, iz)) if self.stand_z else None
         return (
             self.origin[0] + (ix + 0.5) * self.cell,
             self.origin[1] + (iy + 0.5) * self.cell,
-            self.origin[2] + iz * self.cell,
+            self.origin[2] + iz * self.cell if z is None else z,
         )
 
     def cell_at(self, position: tuple[float, float, float]) -> tuple[int, int, int]:
@@ -1581,11 +1695,13 @@ class NavGrid:
             math.floor((position[2] - self.origin[2]) / self.cell),
         )
 
+    @property
+    def solid(self) -> bytearray:
+        """The dense byte grid, `(ix * ny + iy) * nz + iz`, built from `occupancy` per call."""
+        return self.occupancy.dense()
+
     def is_solid(self, ix: int, iy: int, iz: int) -> bool:
-        nx, ny, nz = self.dims
-        if not (0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz):
-            return False
-        return self.solid[(ix * ny + iy) * nz + iz] == 1
+        return self.occupancy.is_solid(ix, iy, iz)
 
     def is_walkable(self, cell: tuple[int, int, int]) -> bool:
         return cell[2] in self.columns.get((cell[0], cell[1]), ())
@@ -1869,6 +1985,267 @@ def navgrid_summary(grid: NavGrid) -> dict[str, Any]:
     return data
 
 
+RESTRICTED_SAMPLE_CAP = 4096
+"""Floor cells kept as examples in `NavGrid.restricted` and `clearance_restricted`."""
+
+
+def _sparse_kernel_available() -> bool:
+    try:
+        return hasattr(kernel(), "navgrid_voxelize")
+    except KernelUnavailable:
+        return False
+
+
+def _voxelize(
+    solids: list[Solid],
+    clearance_solids: list[Solid] | None,
+    origin: tuple[float, float, float],
+    dims: tuple[int, int, int],
+    cell: float,
+    headroom_cells: int,
+    crouch_cells: int,
+    step: float,
+    *,
+    engine: str = "auto",
+) -> dict[str, Any]:
+    """Occupancy and floors for `build_navgrid`: the kernel's sparse pass, else the reference.
+
+    `engine` is `auto`, `kernel` or `python`. Both give the same cells, counts and samples;
+    the kernel does it one x-slab at a time without a byte per cell of the whole map, and
+    tests the standing points against the body obstacles natively instead of in Python.
+    """
+    if engine not in ("auto", "kernel", "python"):
+        raise ValueError(f"engine must be auto, kernel or python, got {engine!r}")
+    if engine == "python" or (engine == "auto" and not _sparse_kernel_available()):
+        return _voxelize_python(
+            solids, clearance_solids, origin, dims, cell, headroom_cells, crouch_cells, step
+        )
+
+    def convex(rows: list[Solid]) -> list:
+        return [(list(s.planes), s.mins, s.maxs) for s in rows]
+
+    raw = kernel().navgrid_voxelize(
+        convex([s for s in solids if not s.facet]),
+        [(s.planes[0][:3], list(s.facet)) for s in solids if s.facet],
+        convex(clearance_solids) if clearance_solids is not None else None,
+        origin,
+        dims,
+        cell,
+        headroom_cells,
+        crouch_cells,
+        RESTRICTED_SAMPLE_CAP,
+        PATCH_RASTER_SHIFT,
+        step,
+    )
+    offsets, bounds = array("I"), array("I")
+    offsets.frombytes(raw["offsets"])
+    bounds.frombytes(raw["bounds"])
+    oz = origin[2]
+    stand_z = {
+        (ix, iy, z): rest
+        for ix, iy, zs, rests in raw["walkable"]
+        for z, rest in zip(zs, rests, strict=True)
+        if rest != oz + z * cell
+    }
+    return {
+        "occupancy": ColumnRuns(dims, offsets, bounds),
+        "columns": {(ix, iy): tuple(zs) for ix, iy, zs, _ in raw["walkable"]},
+        "stand_z": stand_z,
+        "restricted": raw["restricted"],
+        "clearance_restricted": raw["clearance_restricted"],
+        "solid_cells": raw["solid_cells"],
+        "floor_cells": raw["floor_cells"],
+        "crouch_only": raw["crouch_only"],
+        "too_low": raw["too_low"],
+        "body_blocked": raw["body_blocked"],
+    }
+
+
+def _rest_height(
+    obstacles: list[Solid],
+    candidates: list[int],
+    x: float,
+    y: float,
+    top: float,
+    step: float,
+) -> float | None:
+    """Where a player box dropped onto `(x, y)` comes to rest: the lowest height at or above
+    the floor's own `top` that is clear of every body obstacle, rising onto each one that
+    holds it. None when that is more than `step` above the floor.
+
+    The engine's box rests on the highest thing under its footprint and steps up onto what
+    is within its step height (`PM_StepSlideMove`), so a 1-unit strip of rubble or a floor
+    plate is stood on, not a wall. Each obstacle is convex, so it holds an interval of the
+    vertical line; rising to the highest top of those holding the body never skips a free
+    height, and taking the highest of a set keeps the answer independent of their order.
+    """
+    z = top
+    while True:
+        point = (x, y, z)
+        held = False
+        rise = -math.inf
+        for i in candidates:
+            solid = obstacles[i]
+            if not _aabb_misses(solid, point, point) and (
+                _segment_enters(solid, point, (0.0, 0.0, 0.0)) is not None
+            ):
+                span = solid.z_span(x, y)
+                if span is None:
+                    return None
+                held = True
+                rise = max(rise, span[1])
+        if not held:
+            return z
+        if rise <= z:
+            # Two obstacles sharing a top can round either side of it: rise past the noise.
+            rise = z + REST_NUDGE
+        if rise - top > step:
+            return None
+        z = rise
+
+
+def _voxelize_python(
+    solids: list[Solid],
+    clearance_solids: list[Solid] | None,
+    origin: tuple[float, float, float],
+    dims: tuple[int, int, int],
+    cell: float,
+    headroom_cells: int,
+    crouch_cells: int,
+    step: float,
+) -> dict[str, Any]:
+    """The dense reference voxel pass: one byte per cell of the whole map.
+
+    Kept as the definition the kernel's sparse pass is tested against, and as the fallback
+    for a kernel built without it.
+
+    - occupancy is `O(B * columns_in_brush_bounds * planes)` — per brush, not per cell. Each
+      column of each brush's bounding box yields one exact z-interval (a brush is convex, so
+      its intersection with a vertical line is an interval) which fills as one byte-slice
+      assignment.
+    - walkability is `O(nx * ny)` Python iterations, each doing a few C-level byte searches
+      over its column, rather than `O(nx * ny * nz)`.
+    """
+    nx, ny, nz = dims
+    solid = bytearray(nx * ny * nz)
+    tops: dict[int, float] = {}
+    ox, oy, oz = origin
+    for brush in solids:
+        if brush.facet:
+            _rasterize_facet(brush, solid, origin, dims, cell, tops)
+            continue
+        # Cells whose centre can lie inside this brush, from its bounding box.
+        cx0 = max(0, math.ceil((brush.mins[0] - ox) / cell - 0.5))
+        cx1 = min(nx - 1, math.floor((brush.maxs[0] - ox) / cell - 0.5))
+        cy0 = max(0, math.ceil((brush.mins[1] - oy) / cell - 0.5))
+        cy1 = min(ny - 1, math.floor((brush.maxs[1] - oy) / cell - 0.5))
+        if cx0 > cx1 or cy0 > cy1:
+            continue
+        for ix in range(cx0, cx1 + 1):
+            x = ox + (ix + 0.5) * cell
+            base_x = ix * ny
+            for iy in range(cy0, cy1 + 1):
+                y = oy + (iy + 0.5) * cell
+                span = brush.z_span(x, y)
+                if span is None:
+                    continue
+                lo = math.ceil((span[0] - oz) / cell - 0.5)
+                hi = math.floor((span[1] - oz) / cell - 0.5)
+                if lo > hi:
+                    # Thinner than a cell here, between two centres: a 4-unit floor slab over
+                    # a void would vanish, and the floor with it. Fill the cell it lies in.
+                    if span[1] <= span[0]:
+                        continue
+                    lo = hi = math.floor(((span[0] + span[1]) / 2 - oz) / cell)
+                iz0 = max(0, lo)
+                iz1 = min(nz - 1, hi)
+                if iz0 > iz1:
+                    continue
+                start = (base_x + iy) * nz
+                solid[start + iz0 : start + iz1 + 1] = _SOLID * (iz1 - iz0 + 1)
+                if tops.get(start + iz1, -math.inf) < span[1]:
+                    tops[start + iz1] = span[1]
+
+    clearance_index = BucketIndex(clearance_solids) if clearance_solids is not None else None
+    clearance_restricted: list[tuple[int, int, int]] = []
+    body_blocked_total = 0
+    stand_z: dict[tuple[int, int, int], float] = {}
+
+    columns: dict[tuple[int, int], tuple[int, ...]] = {}
+    restricted: list[tuple[int, int, int]] = []
+    crouch_only_total = 0
+    too_low_total = 0
+    floor_cells = 0
+    restricted_sample_cap = RESTRICTED_SAMPLE_CAP
+
+    for ix in range(nx):
+        base_x = ix * ny
+        for iy in range(ny):
+            start = (base_x + iy) * nz
+            end = start + nz
+            if solid.find(_SOLID, start, end) < 0:
+                continue  # nothing solid in this column, so no floor either
+            walkable: list[int] = []
+            at = start
+            while True:
+                found = solid.find(_SOLID_THEN_EMPTY, at, end)
+                if found < 0:
+                    break
+                stand_on = found + 1  # the empty cell resting on that solid one
+                at = stand_on
+                floor_cells += 1
+                obstruction = solid.find(_SOLID, stand_on, end)
+                clear = (end if obstruction < 0 else obstruction) - stand_on
+                if clear >= headroom_cells:
+                    boundary = oz + (stand_on - start) * cell
+                    if clearance_index is None or not clearance_solids:
+                        rest = boundary
+                    else:
+                        x, y = ox + (ix + 0.5) * cell, oy + (iy + 0.5) * cell
+                        rest = _rest_height(
+                            clearance_solids,
+                            clearance_index.column(x, y),
+                            x,
+                            y,
+                            tops.get(stand_on - 1, boundary),
+                            step,
+                        )
+                    if rest is None:
+                        body_blocked_total += 1
+                        if len(clearance_restricted) < restricted_sample_cap:
+                            clearance_restricted.append((ix, iy, stand_on - start))
+                    else:
+                        walkable.append(stand_on - start)
+                        if rest != boundary:
+                            stand_z[(ix, iy, stand_on - start)] = rest
+                    continue
+                # Every floor without room to stand is a candidate for `movement_check`,
+                # whichever side of crouch height the cell count falls on. The split below is
+                # only a summary: both thresholds are rounded up to whole cells, so a genuine
+                # crouch space can land in either bucket and only exact measurement can say.
+                if clear >= crouch_cells:
+                    crouch_only_total += 1
+                else:
+                    too_low_total += 1
+                if len(restricted) < restricted_sample_cap:
+                    restricted.append((ix, iy, stand_on - start))
+            if walkable:
+                columns[(ix, iy)] = tuple(walkable)
+
+    return {
+        "occupancy": ColumnRuns.from_dense(dims, solid),
+        "columns": columns,
+        "stand_z": stand_z,
+        "restricted": restricted,
+        "clearance_restricted": clearance_restricted,
+        "solid_cells": solid.count(1),
+        "floor_cells": floor_cells,
+        "crouch_only": crouch_only_total,
+        "too_low": too_low_total,
+        "body_blocked": body_blocked_total,
+    }
+
+
 def build_navgrid(
     map_path: str | Path,
     cell: float = DEFAULT_CELL,
@@ -1898,16 +2275,16 @@ def build_navgrid(
 
     - occupancy is `O(B * columns_in_brush_bounds * planes)` — per brush, not per cell. Each
       column of each brush's bounding box yields one exact z-interval (a brush is convex, so
-      its intersection with a vertical line is an interval) which fills as one byte-slice
-      assignment. A naive triple loop over the 4.5M cells of a real map would cost that many
-      Python iterations; this costs one per column of each brush, which is thousands.
-    - walkability is `O(nx * ny)` Python iterations, each doing a few C-level byte searches
-      over its column, rather than `O(nx * ny * nz)`.
-    - memory is exactly `nx * ny * nz` bytes, capped by `max_cells`.
+      its intersection with a vertical line is an interval). The kernel fills those into one
+      x-slab of `ny * nz` bytes at a time and keeps each column only as its solid runs.
+    - each standing place is tested once against the expanded body obstacles that reach its
+      column, natively; walkable cells then cost Python only to put in `columns`.
+    - memory is 4 bytes per column plus 8 per solid run (`ColumnRuns`), not a byte per cell:
+      a full-size map at cell 16 holds a few megabytes of occupancy.
 
-    Raises `AnalysisError` when the map needs more than `max_cells` cells, naming the cap and
-    the cell size that would fit — silently coarsening the grid would change every distance in
-    the report without anyone noticing.
+    Raises `AnalysisError` when the map needs more than `max_cells` cells (counting its whole
+    bounding box), naming the cap and the cell size that would fit — silently coarsening the
+    grid would change every distance in the report without anyone noticing.
     """
     profile = resolve_profile(profile_id)
     movement = movement_constants(profile)
@@ -1956,37 +2333,9 @@ def build_navgrid(
         raise AnalysisError(
             f"{path.name} needs {nx}x{ny}x{nz} = {total:,} cells at cell={cell:g}, over the "
             f"max_cells cap of {max_cells:,}. Use cell>={math.ceil(needed)} (or raise "
-            f"max_cells, which costs one byte per cell). The map measures "
+            f"max_cells, which costs time in proportion). The map measures "
             f"{maxs[0] - mins[0]:.0f}x{maxs[1] - mins[1]:.0f}x{maxs[2] - mins[2]:.0f} units."
         )
-
-    solid = bytearray(total)
-    ox, oy, oz = origin
-    for brush in solids:
-        if brush.facet:
-            _rasterize_facet(brush, solid, origin, dims, cell)
-            continue
-        # Cells whose centre can lie inside this brush, from its bounding box.
-        cx0 = max(0, math.ceil((brush.mins[0] - ox) / cell - 0.5))
-        cx1 = min(nx - 1, math.floor((brush.maxs[0] - ox) / cell - 0.5))
-        cy0 = max(0, math.ceil((brush.mins[1] - oy) / cell - 0.5))
-        cy1 = min(ny - 1, math.floor((brush.maxs[1] - oy) / cell - 0.5))
-        if cx0 > cx1 or cy0 > cy1:
-            continue
-        for ix in range(cx0, cx1 + 1):
-            x = ox + (ix + 0.5) * cell
-            base_x = ix * ny
-            for iy in range(cy0, cy1 + 1):
-                y = oy + (iy + 0.5) * cell
-                span = brush.z_span(x, y)
-                if span is None:
-                    continue
-                iz0 = max(0, math.ceil((span[0] - oz) / cell - 0.5))
-                iz1 = min(nz - 1, math.floor((span[1] - oz) / cell - 0.5))
-                if iz0 > iz1:
-                    continue
-                start = (base_x + iy) * nz
-                solid[start + iz0 : start + iz1 + 1] = _SOLID * (iz1 - iz0 + 1)
 
     width = movement.player_width
     # Keep voxel rounding of the nominal body height. The exact expanded brush test then
@@ -1997,61 +2346,32 @@ def build_navgrid(
     crouch_cells = max(1, math.ceil(crouch.value / cell)) if crouch else headroom_cells
     clearance_solids = _body_obstacles(solids, width.value / 2, body_height) if width else []
     clearance_index = BucketIndex(clearance_solids, bucket) if width else None
-    clearance_restricted: list[tuple[int, int, int]] = []
-    body_blocked_total = 0
 
-    columns: dict[tuple[int, int], tuple[int, ...]] = {}
-    restricted: list[tuple[int, int, int]] = []
-    crouch_only_total = 0
-    too_low_total = 0
-    floor_cells = 0
-    restricted_sample_cap = 4096
-
-    for ix in range(nx):
-        base_x = ix * ny
-        for iy in range(ny):
-            start = (base_x + iy) * nz
-            end = start + nz
-            if solid.find(_SOLID, start, end) < 0:
-                continue  # nothing solid in this column, so no floor either
-            walkable: list[int] = []
-            at = start
-            while True:
-                found = solid.find(_SOLID_THEN_EMPTY, at, end)
-                if found < 0:
-                    break
-                stand_on = found + 1  # the empty cell resting on that solid one
-                at = stand_on
-                floor_cells += 1
-                obstruction = solid.find(_SOLID, stand_on, end)
-                clear = (end if obstruction < 0 else obstruction) - stand_on
-                if clear >= headroom_cells:
-                    point = (
-                        ox + (ix + 0.5) * cell,
-                        oy + (iy + 0.5) * cell,
-                        oz + (stand_on - start) * cell,
-                    )
-                    if clearance_index is not None and not segment_clear(
-                        clearance_solids, clearance_index, point, point
-                    ):
-                        body_blocked_total += 1
-                        if len(clearance_restricted) < restricted_sample_cap:
-                            clearance_restricted.append((ix, iy, stand_on - start))
-                    else:
-                        walkable.append(stand_on - start)
-                    continue
-                # Every floor without room to stand is a candidate for `movement_check`,
-                # whichever side of crouch height the cell count falls on. The split below is
-                # only a summary: both thresholds are rounded up to whole cells, so a genuine
-                # crouch space can land in either bucket and only exact measurement can say.
-                if clear >= crouch_cells:
-                    crouch_only_total += 1
-                else:
-                    too_low_total += 1
-                if len(restricted) < restricted_sample_cap:
-                    restricted.append((ix, iy, stand_on - start))
-            if walkable:
-                columns[(ix, iy)] = tuple(walkable)
+    if not _sparse_kernel_available() and total > DENSE_MAX_CELLS:
+        raise AnalysisError(
+            f"{path.name} needs {total:,} cells at cell={cell:g}, and this kernel build has no "
+            f"sparse voxel pass, so the dense fallback is capped at {DENSE_MAX_CELLS:,} cells "
+            "(max_cells). Rebuild the kernel (mise run kernel:build), or use cell>="
+            f"{math.ceil(cell * (total / DENSE_MAX_CELLS) ** (1.0 / 3.0))}."
+        )
+    voxels = _voxelize(
+        solids,
+        clearance_solids if width else None,
+        origin,
+        dims,
+        cell,
+        headroom_cells,
+        crouch_cells,
+        movement.step_height.value,
+    )
+    occupancy = voxels["occupancy"]
+    columns: dict[tuple[int, int], tuple[int, ...]] = voxels["columns"]
+    restricted: list[tuple[int, int, int]] = voxels["restricted"]
+    clearance_restricted: list[tuple[int, int, int]] = voxels["clearance_restricted"]
+    crouch_only_total = voxels["crouch_only"]
+    too_low_total = voxels["too_low"]
+    floor_cells = voxels["floor_cells"]
+    body_blocked_total = voxels["body_blocked"]
 
     step_up_cells = max(0, math.floor(movement.step_height.value / cell))
     fall = movement.fall_no_damage
@@ -2060,7 +2380,7 @@ def build_navgrid(
     walkable_total = sum(len(v) for v in columns.values())
     counts = {
         "cells": total,
-        "solid_cells": solid.count(1),
+        "solid_cells": voxels["solid_cells"],
         "floor_cells": floor_cells,
         "walkable_cells": walkable_total,
         "walkable_columns": len(columns),
@@ -2194,7 +2514,7 @@ def build_navgrid(
         cell=float(cell),
         origin=origin,
         dims=dims,
-        solid=solid,
+        occupancy=occupancy,
         columns=columns,
         movement=movement,
         step_up_cells=step_up_cells,
@@ -2214,6 +2534,7 @@ def build_navgrid(
         clearance_solids=clearance_solids,
         clearance_index=clearance_index,
         clearance_restricted=clearance_restricted,
+        stand_z=voxels["stand_z"],
     )
 
 

@@ -53,7 +53,7 @@ engine builds from them (`CM_GeneratePatchCollide`, ported in `nrc_solid::patch:
 | --- | --- | --- | --- |
 | pipe r=48 on the floor | stand | blocked | blocked at x=446 (pipe side at 464) |
 | pipe r=8 on the floor | stand | crosses | crosses (collides as a diamond 16 high, under the 18 step) |
-| pipe r=24 on the floor | stand | blocked | **crosses**: it collides as a 45-degree diamond, a walkable slope; the grid's body test is stricter on slopes than the engine, for brush ramps too |
+| pipe r=24 on the floor | stand | blocked | **crosses**: it collides as a 45-degree diamond, a walkable slope. The grid rests the body on brush slopes and ridges (a 45-degree brush ridge is crossed), but the diamond's lower chords overhang the floor and a box beside them would have to rise 30 |
 | arch over a 128x176 doorway | stand | crosses | crosses |
 | prone vent, 48 high, pipe r=16 at the ceiling | prone | blocked | blocked at x=496 |
 | prone vent, 48 high, pipe r=4 at the ceiling | prone | crosses | crosses |

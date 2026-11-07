@@ -77,6 +77,8 @@ def test_path_distance_is_the_python_search_exactly(built):
         (low, high),
         ((900, 380, 64), (900, 600, 0)),
         ((40, 40, 0), (980, 700, 0)),
+        # Into the sealed box: a separate component, whatever the random pairs hit.
+        ((40, 40, 0), (680, 670, 8)),
     ]
     native = [analysis.path_distance(grid, a, b, engine="native") for a, b in sample]
     python = [analysis.path_distance(grid, a, b, engine="python") for a, b in sample]

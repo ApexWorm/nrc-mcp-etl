@@ -57,6 +57,15 @@ def _cache(grid: Any) -> dict:
     return graphs
 
 
+def _heights(graph, layer: int, grid: Any) -> None:
+    """Give the graph a grid's resting heights, so its heuristic measures from the same
+    points `NavGrid.centre` does (an older kernel without them measures from the cell
+    boundary: same routes, possibly a different expansion count)."""
+    stand_z = getattr(grid, "stand_z", None)
+    if stand_z and hasattr(graph, "set_heights"):
+        graph.set_heights(layer, stand_z)
+
+
 def step_graph(grid: Any):
     """The graph `path_distance` searches: one layer, edges and costs from `neighbours()`."""
     graphs = _cache(grid)
@@ -69,7 +78,9 @@ def step_graph(grid: Any):
                 for dest, step in grid.neighbours((ix, iy, iz))
             ]
 
-        entry = (kernel().RouteGraph(tuple(grid.origin), grid.cell), expand)
+        graph = kernel().RouteGraph(tuple(grid.origin), grid.cell)
+        _heights(graph, 0, grid)
+        entry = (graph, expand)
         graphs["step"] = entry
     return entry
 
@@ -101,7 +112,10 @@ def stance_graph(grids: dict, stances: tuple[str, ...], allowed: tuple[str, ...]
             return rows
 
         # Holding the grids keeps the ids in the key from being reused.
-        entry = (kernel().RouteGraph(tuple(reference.origin), reference.cell), expand, grids)
+        graph = kernel().RouteGraph(tuple(reference.origin), reference.cell)
+        for stance in allowed:
+            _heights(graph, layer_of[stance], grids[stance])
+        entry = (graph, expand, grids)
         graphs[key] = entry
     return entry[0], entry[1]
 

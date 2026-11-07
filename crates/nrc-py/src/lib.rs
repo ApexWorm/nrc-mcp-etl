@@ -1086,10 +1086,90 @@ fn round_trip_check<'py>(py: Python<'py>, source: &str) -> PyResult<Bound<'py, P
     PyMap::parse(source)?.round_trip(py)
 }
 
+mod navgrid;
+
+type PyPlanes = Vec<(f64, f64, f64, f64)>;
+type PyBounds = (f64, f64, f64);
+
+fn convex_from(rows: Vec<(PyPlanes, PyBounds, PyBounds)>) -> Vec<navgrid::Convex> {
+    rows.into_iter()
+        .map(|(planes, mins, maxs)| navgrid::Convex {
+            planes,
+            mins: [mins.0, mins.1, mins.2],
+            maxs: [maxs.0, maxs.1, maxs.2],
+        })
+        .collect()
+}
+
+/// The walk grid's voxel pass (`nrc_mcp.analysis.build_navgrid`), sparse and slab by slab.
+///
+/// `brushes` and `clearance` are `(planes, mins, maxs)`; `facets` are `(normal, corners)`.
+/// Returns a dict: `offsets` and `bounds` (native `u32` bytes: per column, flattened
+/// half-open solid runs), `walkable` `[(ix, iy, [z...], [rest height...])]`, `restricted` and
+/// `clearance_restricted` samples, and the floor counts.
+#[pyfunction]
+#[pyo3(signature = (brushes, facets, clearance, origin, dims, cell, headroom_cells, crouch_cells, sample_cap, facet_shift, step))]
+#[allow(clippy::too_many_arguments)]
+fn navgrid_voxelize<'py>(
+    py: Python<'py>,
+    brushes: Vec<(PyPlanes, PyBounds, PyBounds)>,
+    facets: Vec<(PyBounds, Vec<PyBounds>)>,
+    clearance: Option<Vec<(PyPlanes, PyBounds, PyBounds)>>,
+    origin: PyBounds,
+    dims: (usize, usize, usize),
+    cell: f64,
+    headroom_cells: usize,
+    crouch_cells: usize,
+    sample_cap: usize,
+    facet_shift: f64,
+    step: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !(cell.is_finite() && cell > 0.0) {
+        return Err(err(format!("cell must be positive, got {cell}")));
+    }
+    if dims.2 >= u32::MAX as usize || dims.0.saturating_mul(dims.1) >= u32::MAX as usize {
+        return Err(err("grid dimensions exceed the u32 run encoding"));
+    }
+    let brushes = convex_from(brushes);
+    let facets = facets
+        .into_iter()
+        .map(|(normal, corners)| navgrid::Facet { normal, corners })
+        .collect();
+    let clearance = clearance.map(convex_from);
+    let params = navgrid::Params {
+        origin: [origin.0, origin.1, origin.2],
+        dims: [dims.0, dims.1, dims.2],
+        cell,
+        headroom_cells,
+        crouch_cells,
+        sample_cap,
+        facet_shift,
+        step,
+    };
+    let v = py.detach(|| navgrid::voxelize(brushes, facets, clearance, &params));
+    if v.bounds.len() >= u32::MAX as usize {
+        return Err(err("too many solid runs for the u32 run encoding"));
+    }
+    let bytes = |xs: &[u32]| -> Vec<u8> { xs.iter().flat_map(|x| x.to_ne_bytes()).collect() };
+    let d = PyDict::new(py);
+    d.set_item("offsets", pyo3::types::PyBytes::new(py, &bytes(&v.offsets)))?;
+    d.set_item("bounds", pyo3::types::PyBytes::new(py, &bytes(&v.bounds)))?;
+    d.set_item("walkable", v.walkable)?;
+    d.set_item("restricted", v.restricted)?;
+    d.set_item("clearance_restricted", v.clearance_restricted)?;
+    d.set_item("solid_cells", v.solid_cells)?;
+    d.set_item("floor_cells", v.floor_cells)?;
+    d.set_item("crouch_only", v.crouch_only)?;
+    d.set_item("too_low", v.too_low)?;
+    d.set_item("body_blocked", v.body_blocked)?;
+    Ok(d)
+}
+
 #[pymodule]
 fn nrc_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMap>()?;
     m.add_class::<PyRouteGraph>()?;
+    m.add_function(wrap_pyfunction!(navgrid_voxelize, m)?)?;
     m.add_function(wrap_pyfunction!(round_trip_check, m)?)?;
     m.add_function(wrap_pyfunction!(solid_compile, m)?)?;
     m.add_function(wrap_pyfunction!(solid_commit, m)?)?;
@@ -1794,6 +1874,13 @@ impl PyRouteGraph {
     /// `(nodes seen, nodes expanded, edges)`.
     fn sizes(&self) -> (usize, usize, usize) {
         self.inner.sizes()
+    }
+
+    /// Record resting heights for one layer: `{(ix, iy, iz): z}`, as `NavGrid.stand_z`.
+    fn set_heights(&mut self, layer: u8, heights: std::collections::HashMap<(i32, i32, i32), f64>) {
+        for ((ix, iy, iz), z) in heights {
+            self.inner.set_height((layer, ix, iy, iz), z);
+        }
     }
 
     /// Whether a node's moves are already known.

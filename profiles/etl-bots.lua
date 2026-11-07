@@ -34,5 +34,10 @@ function et_RunFrame(time)
                 .. ",\"stance\":\"" .. stance .. "\",\"position\":[" .. num(o[1]) .. "," .. num(o[2]) .. "," .. num(o[3]) .. "]}"
         end
     end
-    et.G_Print("NRC_BOTS " .. token .. " {\"time\":" .. time .. ",\"bots\":[" .. table.concat(rows, ",") .. "]}\n")
+    -- et.G_Print keeps 1023 bytes (src/game/g_lua.c:193): print in pieces, end the line once.
+    local line = "NRC_BOTS " .. token .. " {\"time\":" .. time .. ",\"bots\":[" .. table.concat(rows, ",") .. "]}"
+    for i = 1, #line, 1000 do
+        et.G_Print(string.sub(line, i, i + 999))
+    end
+    et.G_Print("\n")
 end
