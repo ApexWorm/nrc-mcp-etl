@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -197,21 +198,40 @@ def _resolve(path: str) -> Path:
     return p if p.is_absolute() else repo_root() / p
 
 
+#: How long `compile_map` waits for a whole preset, in seconds. A release compile of a full-size
+#: map is mostly -light: ET: Legacy's Supply Depot with its author's own light line took 15
+#: minutes on 32 busy cores (README "Compile times"); a smaller machine needs a multiple of that.
+COMPILE_TIMEOUTS = {"draft": 900, "iterate": 1800, "quality": 3600, "final": 7200}
+
+
 @tool("compiling", "Compile with q3map2", writes=True)
-def compile_map(preset: str = "draft", path: str | None = None) -> dict:
+def compile_map(
+    preset: str = "draft", path: str | None = None, timeout_seconds: int | None = None
+) -> dict:
     """Compile a map with q3map2.
 
     Presets (§6.1): `draft` geometry-only seconds-long check, `iterate` playable test build,
-    `quality` review build, `final` release build.
+    `quality` review build, `final` release build. Light dominates the slow presets: on a
+    full-size map `final` can take tens of minutes. `timeout_seconds` overrides the preset's
+    limit (draft 900, iterate 1800, quality 3600, final 7200).
 
     On a WSL host where q3map2 is a Windows binary, the wrapper stages the map onto the
     Windows filesystem and copies artefacts back to `out/` — paths are handled for you.
 
     With no path (or the open map's path), compile a snapshot of the current unsaved map
     and staged companions. The result identifies that revision and its retained build folder.
+
+    The profile's compile-only shaders (`compile_shaders`: editor shaders such as terrain
+    alpha-blend volumes and hint-skip that real maps use but no game archive defines) are given
+    to q3map2 on every compile where nothing else defines them, so a definition the game, the
+    map or a pk3 beside it carries wins. They are never packed; shader_audit lists them under
+    `compile_only`.
     """
-    if preset not in ("draft", "iterate", "quality", "final"):
+    if preset not in COMPILE_TIMEOUTS:
         raise ToolError(f"unknown preset {preset!r} — choose draft, iterate, quality or final.")
+    limit = COMPILE_TIMEOUTS[preset] if timeout_seconds is None else int(timeout_seconds)
+    if limit < 1:
+        raise ToolError("timeout_seconds must be at least 1")
     explicit = Path(path) if path else None
     if explicit is not None and not explicit.is_absolute():
         explicit = repo_root() / explicit
@@ -268,11 +288,19 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
         )
     else:
         target = explicit
-    run = run_mise_task(
-        f"compile:{preset}",
-        [str(target)],
-        extra_env={"NRC_BUILD_OUTPUT": str(target.parent)} if receipt is not None else None,
-    )
+    try:
+        run = run_mise_task(
+            f"compile:{preset}",
+            [str(target)],
+            timeout=limit,
+            extra_env={"NRC_BUILD_OUTPUT": str(target.parent)} if receipt is not None else None,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ToolError(
+            f"the {preset} compile did not finish in {limit} seconds; a full-size map's light "
+            "stage can take longer on this machine. Pass a larger timeout_seconds, or use "
+            "quality/iterate while iterating."
+        ) from e
     if receipt is not None:
         run["revision"] = receipt
         run["build_directory"] = str(build)
@@ -484,6 +512,8 @@ def shader_audit(
     is where the base game's `.pk3` archives live, so the shaders and textures they ship count as
     defined; it defaults to the game path joined with the profile's `packaging.basegame`. With a
     base game known, `shader_dirs` may be empty: a map that ships no shaders of its own.
+    Shaders the profile supplies to the compiler (`compile_shaders`) count as defined and are
+    listed under `compile_only`: nothing needs to ship for them.
     """
     _require_path()
     pid = profile_id or active_profile() or None

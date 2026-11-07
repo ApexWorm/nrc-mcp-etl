@@ -51,7 +51,8 @@ def pack_pk3(
     base game ships them. A name counts as found when the base game supplies it, the map's own
     shader script defines it (script and images are packed), a file of that name sits beside
     the map, the profile lists it under `packaging.allowed_missing` (stock assets the base game
-    never shipped), or it matches `ignore`: exact names or shell patterns such as
+    never shipped) or `compile_shaders` (editor shaders only the compiler needs, never packed),
+    or it matches `ignore`: exact names or shell patterns such as
     `sound/world/*`, for resources you know the game does without. If all are found the
     package is `_autopacked.pk3`; whatever is left is in `not_found` and the pack still fails.
     `packer_not_found` is the packer's own list, `accounted_for` and `allowed_missing` say what

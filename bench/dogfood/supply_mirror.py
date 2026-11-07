@@ -35,41 +35,6 @@ SOURCE = "etl_supply"
 VEHICLES = ["truck", "truck_crate", "truck_trigger", "truck_toi"]
 BOT_PORT = 27964
 
-#: q3map2's alphaMod volumes (docs/shaderManual/terrain-and-alphamod-blends.html) and the
-#: hint brushes' skip faces, as the stock Quake 3 common shaders define them.
-COMPILE_SHADERS = """
-textures/editor/alpha_000
-{
-	q3map_alphaMod volume
-	q3map_alphaMod set 0
-	surfaceparm nodraw
-	surfaceparm nonsolid
-	surfaceparm trans
-	qer_trans 0.5
-}
-
-textures/editor/alpha_100
-{
-	q3map_alphaMod volume
-	q3map_alphaMod set 1
-	surfaceparm nodraw
-	surfaceparm nonsolid
-	surfaceparm trans
-	qer_trans 0.5
-}
-
-textures/common/hintskip
-{
-	qer_nocarve
-	surfaceparm nodraw
-	surfaceparm nonsolid
-	surfaceparm structural
-	surfaceparm trans
-	surfaceparm noimpact
-	surfaceparm skip
-}
-"""
-
 
 def mirror_loc(text: str) -> str:
     """A location file's "x y z name" lines with x negated."""
@@ -190,11 +155,8 @@ async def main(args):
         (maps / f"{NAME}_loc_override.dat").write_text(mirror_loc(loc), encoding="latin-1")
         # Beside maps/, so the compiler's -fs_pakpath finds the original textures and models.
         (run.root / source_pk3.name).symlink_to(source_pk3)
-        # Compile-only shaders the source uses and no archive defines (they came with the
-        # author's editor setup): without them q3map2 builds the terrain's alphaMod volumes
-        # and hint-skip faces as solid, drawn brushes.
-        (run.root / "scripts").mkdir()
-        (run.root / "scripts" / f"{NAME}_compile.shader").write_text(COMPILE_SHADERS)
+        # The terrain's alphaMod volumes and hint-skip faces use editor shaders no archive
+        # defines; the profile supplies them to the compiler (profiles/etl.yaml compile_shaders).
 
         opened = await run.call("map_open", path=str(maps / f"{SOURCE}.map"))
         assert opened["round_trip"]["identical"], opened["round_trip"]

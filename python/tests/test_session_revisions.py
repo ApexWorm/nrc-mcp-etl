@@ -340,3 +340,28 @@ def test_tool_calls_queue_instead_of_sharing_the_session_at_once():
 
     assert overlaps(MCPServer), "the SDK itself runs these at once; if not, drop the lock"
     assert not overlaps(_CompactServer)
+
+
+def test_compile_waits_per_preset_and_says_when_it_gives_up(opened, monkeypatch, tmp_path):
+    """A release light pass on a full-size map runs for many minutes; the limit follows the
+    preset, can be raised, and running out is a clear error rather than a crash."""
+    import subprocess
+
+    monkeypatch.setattr(compiling, "repo_root", lambda: tmp_path)
+    limits = []
+
+    def compile_task(name, args, timeout=None, **kwargs):
+        limits.append(timeout)
+        if timeout == 5:
+            raise subprocess.TimeoutExpired(name, timeout)
+        return {"ok": True, "stdout": "", "task": name}
+
+    monkeypatch.setattr(compiling, "run_mise_task", compile_task)
+    srv.compile_map(preset="draft")
+    srv.compile_map(preset="final")
+    srv.compile_map(preset="final", timeout_seconds=20000)
+    final = compiling.COMPILE_TIMEOUTS["final"]
+    assert limits == [compiling.COMPILE_TIMEOUTS["draft"], final, 20000]
+    assert final >= 3600
+    with pytest.raises(ToolError, match="did not finish in 5 seconds"):
+        srv.compile_map(preset="draft", timeout_seconds=5)

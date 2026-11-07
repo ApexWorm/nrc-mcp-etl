@@ -143,7 +143,17 @@ def pack_pk3(
     basegame = Path(base) / str(pkg["basegame"]) if base and pkg.get("basegame") else None
     packer_not_found = _not_found(console)
     optional_missing = _not_found(console, "~fail")
-    found = _account_for(packer_not_found, target, pkg, basegame, ignore or [], archives)
+    from . import optimize  # noqa: PLC0415
+
+    found = _account_for(
+        packer_not_found,
+        target,
+        pkg,
+        basegame,
+        ignore or [],
+        archives,
+        compile_only=optimize.compile_only_shaders(profile_id),
+    )
     extra, unpacked = _script_sounds(target, profile_id, basegame)
     found["add"] += extra
     sound_missing: list[str] = []
@@ -300,8 +310,12 @@ def _account_for(
     basegame: Path | None,
     ignore: list[str],
     depends: list[Path] | None = None,
+    compile_only: dict[str, dict] | None = None,
 ) -> dict[str, list]:
     """Sort the names the packer could not find into supplied, allowed and missing.
+
+    `compile_only` are the profile's compile-only shaders (`optimize.compile_only_shaders`):
+    allowed, never packed.
 
     `add` lists (archive path, file) pairs to pack so that a supplied name works: the map's own
     shader script that defines it, and that script's images.
@@ -345,6 +359,19 @@ def _account_for(
         allowed = _allowance(name, pkg, ignore)
         if allowed is not None:
             out["allowed"].append(allowed)
+            continue
+        if low in (compile_only or {}) and low not in own:
+            out["allowed"].append(
+                {
+                    "name": name,
+                    "pattern": None,
+                    "reason": "a compile-only editor shader the profile supplies to q3map2; it "
+                    "never ships. The packer only asks for it when the BSP draws it, which "
+                    "means the BSP was compiled without that definition: recompile with "
+                    "compile_map",
+                    "referenced_by": compile_only[low]["file"],
+                }
+            )
             continue
         if low in index["shaders"] or low in index["images"] or low in shipped:
             out["supplied"].append({"name": name, "by": "the base game"})
@@ -808,7 +835,7 @@ def _unresolved_shaders(
     if not index["archives"]:
         return None
     root = _map_root(target)
-    defined: set[str] = set()
+    defined: set[str] = set(optimize.compile_only_shaders(profile_id))
     for f in sorted((root / "scripts").glob("*.shader")):
         try:
             defined |= {sh["name"].lower() for sh in optimize.parse_shader_file(f)}
