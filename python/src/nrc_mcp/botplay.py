@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from . import botnav, engine, profiles
+from . import botnav, engine, gamepath, profiles
 
 
 def _expand(args: list, subs: dict[str, str]) -> list[str]:
@@ -261,7 +261,7 @@ def run(
     spec = botnav.spec(profile_id)
     play = spec.get("playtest") or {}
     pkg = profiles.load(profile_id).get("packaging") or {}
-    basepath = os.environ.get("NRC_FS_BASEPATH")
+    basepath = gamepath.basepath()
     if not basepath:
         raise engine.EngineError("NRC_FS_BASEPATH is not set, so the engine has no game data")
     source = Path(

@@ -40,12 +40,13 @@ unverified the findings clamp to `info`, like every other rule here.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import profiles
+from . import gamepath, profiles
 from .analysis import (
     AnalysisError,
     NavGrid,
@@ -904,7 +905,6 @@ def _pk3_contents(
     ships. Paths compare without regard to case, as the engine's do."""
     if not check.allow_compile:
         return Outcome("pk3_contents", True, "compiling not enabled for this run", skipped=True)
-    import os  # noqa: PLC0415
     import zipfile  # noqa: PLC0415
 
     from . import pack  # noqa: PLC0415
@@ -916,7 +916,7 @@ def _pk3_contents(
         names = {n.lower() for n in z.namelist() if not n.endswith("/")}
     problems = [f"missing {h}" for h in has or [] if h.lower() not in names]
     if no_basegame:
-        base = os.environ.get("NRC_FS_BASEPATH")
+        base = gamepath.basepath()
         pkg = profiles.load(resolve_profile(check.profile_id)).get("packaging") or {}
         if not base or not pkg.get("basegame"):
             return Outcome(
@@ -925,7 +925,11 @@ def _pk3_contents(
                 "no base game to compare against (NRC_FS_BASEPATH)",
                 skipped=True,
             )
-        shipped = pack.basegame_entries(Path(base) / str(pkg["basegame"]))
+        # An earlier build of this map in the base folder is not the base game.
+        stem = next(
+            (Path(n).stem for n in sorted(names) if re.fullmatch(r"maps/[^/]+\.bsp", n)), ""
+        )
+        shipped = pack.basegame_entries(Path(base) / str(pkg["basegame"]), stem)
         problems += [f"base-game file {n}" for n in sorted(names & shipped)]
     detail = "; ".join(problems) or f"{len(names)} entries, as required"
     return Outcome("pk3_contents", not problems, detail)
@@ -936,7 +940,9 @@ def _engine_loads(check: Check, step: str = "", client: bool = False) -> Outcome
     """The package a pack step wrote loads in the game's own engine with nothing stopping it.
 
     Skips, rather than fails, where there is no engine to ask: no compiler run, no `engine:`
-    section in the profile, no game install, no display for the client.
+    section in the profile, no game install. A server that fails fails, even when the client
+    could not have been started afterwards; a clean server with no client or display to join
+    it is a skip.
     """
     if not check.allow_compile:
         return Outcome("engine_loads", True, "compiling not enabled for this run", skipped=True)
@@ -952,6 +958,14 @@ def _engine_loads(check: Check, step: str = "", client: bool = False) -> Outcome
     bad = [f"{run['level']}: {line}" for run in r["runs"] for line in run["fatal"]]
     bad += [f"{run['level']}: the map never loaded" for run in r["runs"] if not run["loaded"]]
     levels = " and ".join(run["level"] for run in r["runs"])
+    if r["ok"] and r.get("client_skipped"):
+        # The server passed but the client asked for never ran: that much is not a pass.
+        return Outcome(
+            "engine_loads",
+            True,
+            f"server loaded clean; no client to ask: {r['client_skipped']}",
+            skipped=True,
+        )
     return Outcome("engine_loads", r["ok"], "; ".join(bad[:4]) or f"loaded clean ({levels})")
 
 

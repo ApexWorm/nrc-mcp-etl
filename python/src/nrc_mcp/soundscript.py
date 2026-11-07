@@ -17,13 +17,12 @@ comes from the profile; this module knows only the shapes.
 
 from __future__ import annotations
 
-import os
 import zipfile
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from . import mapscript, profiles
+from . import gamepath, mapscript, profiles
 from .rules import Finding
 
 
@@ -239,7 +238,7 @@ def parse_sound_scripts(text: str, ss: dict) -> tuple[list[dict], tuple[int, str
 
 
 def basegame_dir(profile_id: str) -> Path | None:
-    base = os.environ.get("NRC_FS_BASEPATH") or ""
+    base = gamepath.basepath()
     name = (profiles.load(profile_id).get("packaging") or {}).get("basegame")
     if not base or not name:
         return None

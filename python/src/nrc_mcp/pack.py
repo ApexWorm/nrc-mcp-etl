@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -41,7 +40,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-from . import profiles
+from . import gamepath, procs, profiles
 from .kernel import repo_root
 from .rules import clamp_severity
 
@@ -65,9 +64,17 @@ def _q3map2(args: list[str], target: Path, timeout: int = 1800) -> dict[str, Any
         "--",
         str(target),
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, errors="replace", timeout=timeout, check=False
-    )
+    # The wrapper runs q3map2 as its own child: a timeout must end both, or the compiler keeps
+    # running (and may still write its archive) after this has reported.
+    try:
+        proc = procs.run(cmd, text=True, errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "returncode": None,
+            "stdout": "",
+            "stderr": f"q3map2 did not finish within {timeout} s and was stopped",
+        }
     return {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
@@ -122,7 +129,7 @@ def pack_pk3(
         flags += ["-complevel", str(complevel)]
 
     pkg = _packaging(profile_id)
-    base = os.environ.get("NRC_FS_BASEPATH") or ""
+    base = gamepath.basepath()
     # q3map2 removes its previous outputs before packing (autopk3.cpp:564-567); do the same where
     # ours land, or a stale failure marker from an earlier run would read as this run's.
     for suffix in (SUCCESS_SUFFIX, FAILURE_SUFFIX):
@@ -162,7 +169,15 @@ def pack_pk3(
         # A failed package is fixed up too: it is still the map, missing only what the packer
         # could not find, and testing it should not also lose its script.
         if zipfile.is_zipfile(p):
-            a, d = _fix_up(p, dest, target, pkg, basegame, found["add"], archives)
+            try:
+                a, d = _fix_up(p, dest, target, pkg, basegame, found["add"], archives)
+            except BaseException:
+                # A failure part-way leaves neither the half-written archive (`dest` is only
+                # ever replaced whole) nor the packer's raw one in the game install.
+                dest.with_name(dest.name + ".tmp").unlink(missing_ok=True)
+                if _inside(p, base) and p.resolve() != dest.resolve():
+                    p.unlink(missing_ok=True)
+                raise
             added += a
             dropped += d
             # Every name the packer missed is accounted for: the package is good. Without names
@@ -296,7 +311,7 @@ def _account_for(
     out: dict[str, list] = {"supplied": [], "allowed": [], "missing": [], "add": []}
     if not names:
         return out
-    shipped = basegame_entries(basegame) if basegame else set()
+    shipped = basegame_entries(basegame, bsp.stem) if basegame else set()
     index = (
         optimize.basegame_index([basegame], skip_prefix=bsp.stem)
         if basegame
@@ -377,7 +392,7 @@ def _script_sounds(
         raise PackError(str(e)) from e
     if not named:
         return [], []
-    shipped = basegame_entries(basegame) if basegame else set()
+    shipped = basegame_entries(basegame, bsp.stem) if basegame else set()
     root = _map_root(bsp)
     add: list[tuple[str, Path]] = []
     missing: list[tuple[str, str]] = []
@@ -488,8 +503,29 @@ def _archive_digests(archives: list[Path], wanted: set[str]) -> dict[str, set[by
     return out
 
 
-def basegame_entries(basegame: Path) -> set[str]:
-    """Every path the base game's archives hold, lowercased, as the engine matches them."""
+def _build_of(archive: Path, members: list[str], stem: str) -> bool:
+    """Whether an archive in the base folder is a build of the map `stem`, not the base game.
+
+    A test copy of the map dropped into the game folder (`foo_v1.pk3`) holds the map's own
+    textures and shaders; counted as base game, they would be dropped from the new package,
+    which then works only where that copy is installed. A build is told by its BSP: it holds
+    `maps/<stem>.bsp` and no other map - the base game's archives hold many - or it has the
+    packer's own name for this map.
+    """
+    if not stem:
+        return False
+    low = stem.lower()
+    if archive.name.lower() in (f"{low}{SUCCESS_SUFFIX}".lower(), f"{low}{FAILURE_SUFFIX}".lower()):
+        return True
+    bsps = {m.lower() for m in members if re.fullmatch(r"maps/[^/]+\.bsp", m, re.I)}
+    return bsps == {f"maps/{low}.bsp"}
+
+
+def basegame_entries(basegame: Path, skip_map: str = "") -> set[str]:
+    """Every path the base game's archives hold, lowercased, as the engine matches them.
+
+    With `skip_map`, archives that are a build of that map (`_build_of`) are not the base game.
+    """
     names: set[str] = set()
     if not basegame.is_dir():
         return names
@@ -498,14 +534,17 @@ def basegame_entries(basegame: Path) -> set[str]:
             continue
         try:
             with zipfile.ZipFile(archive) as z:
-                names.update(n.lower() for n in z.namelist() if not n.endswith("/"))
+                members = z.namelist()
         except zipfile.BadZipFile:
             continue
+        if _build_of(archive, members, skip_map):
+            continue
+        names.update(n.lower() for n in members if not n.endswith("/"))
     return names
 
 
 def _basegame_digests(
-    basegame: Path | None, wanted: set[str], exclude: set[Path]
+    basegame: Path | None, wanted: set[str], exclude: set[Path], skip_map: str = ""
 ) -> dict[str, bytes]:
     """Hash only the effective archived copies of the files we might omit.
 
@@ -513,6 +552,7 @@ def _basegame_digests(
     `PakLess` in plugins/vfspk3/vfs.cpp). A match against an older, shadowed copy
     is not sufficient. Loose development files are deliberately not dependencies.
     Ambiguous or unreadable entries are retained in the output rather than guessed.
+    An earlier build of `skip_map` in the folder is not the base game (`_build_of`).
     """
     if basegame is None or not basegame.is_dir():
         return {}
@@ -526,6 +566,8 @@ def _basegame_digests(
             continue
         try:
             with zipfile.ZipFile(archive) as z:
+                if _build_of(archive, z.namelist(), skip_map):
+                    continue
                 for info in z.infolist():
                     name = info.filename.lower()
                     if name not in wanted or info.is_dir():
@@ -582,6 +624,7 @@ def _fix_up(
             basegame,
             {info.filename.lower() for info in src.infolist()},
             {produced.resolve(), dest.resolve()},
+            bsp.stem,
         )
         held = _archive_digests(
             [d for d in depends or [] if d.resolve() not in {produced.resolve(), dest.resolve()}],
@@ -662,18 +705,26 @@ def _find_packages(bsp: Path, output: str = "") -> list[Path]:
     would think to look. Globbing alone reported a perfectly good pack as a failure, which is
     the worst of both answers: the archive exists and the tool says it does not.
 
-    The glob stays as a fallback, for a q3map2 whose output was truncated or reworded.
+    A look in the usual places stays as a fallback, for a q3map2 whose output was truncated or
+    reworded: beside the map, under `out/`, and the game path itself, where q3map2 writes
+    (`Saved to <basepath>/<map>_autopacked.pk3`, seen with q3map2 2.5.17n). It looks for this
+    map's two names exactly, never a pattern: `foo*.pk3` also matches `foobar_autopacked.pk3`
+    and `foo_v1.pk3`, which are other maps' archives, and pack_pk3 rewrites what it finds.
     """
     stem = bsp.stem
     candidates: list[Path] = []
     for m in _SAVED_TO.finditer(output or ""):
-        p = Path(m.group(1).strip())
+        p = _local_path(m.group(1).strip())
         if p.is_file():
             candidates.append(p)
     roots = [bsp.parent, _map_root(bsp), repo_root() / "out" / stem, repo_root() / "out"]
+    base = gamepath.basepath()
+    if base:
+        roots.append(Path(base))
     for root in roots:
-        if root.is_dir():
-            candidates += list(root.glob(f"{stem}*.pk3"))
+        for name in (f"{stem}{SUCCESS_SUFFIX}", f"{stem}{FAILURE_SUFFIX}"):
+            if (root / name).is_file():
+                candidates.append(root / name)
     # Deduplicate while keeping order stable for reproducible output.
     seen: set[str] = set()
     out = []
@@ -683,6 +734,27 @@ def _find_packages(bsp: Path, output: str = "") -> list[Path]:
             seen.add(k)
             out.append(c)
     return out
+
+
+def _local_path(reported: str) -> Path:
+    """A path q3map2 printed, as this side can open it.
+
+    Under WSL the compiler is a Windows program and prints `C:\\...`; that is translated to the
+    mount it is reachable at (`wslpath -u`, else `/mnt/<drive>/...`). Anything else is as is.
+    """
+    m = re.match(r"^([A-Za-z]):[\\/](.*)$", reported)
+    if not m or sys.platform == "win32":
+        return Path(reported)
+    if shutil.which("wslpath"):
+        try:
+            got = subprocess.run(
+                ["wslpath", "-u", reported], capture_output=True, text=True, timeout=10
+            )
+            if got.returncode == 0 and got.stdout.strip():
+                return Path(got.stdout.strip())
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return Path("/mnt", m.group(1).lower(), *re.split(r"[\\/]+", m.group(2)))
 
 
 #: Lines of `-repack -analyze` output that name a resource. The flag exists to dump what a
@@ -728,7 +800,7 @@ def _unresolved_shaders(
     """
     from . import optimize  # noqa: PLC0415
 
-    base = os.environ.get("NRC_FS_BASEPATH") or ""
+    base = gamepath.basepath()
     pkg = _packaging(profile_id) if profile_id else {}
     if not base or not pkg.get("basegame"):
         return None
@@ -1015,16 +1087,21 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
         d = str(ar.get("directory", "scripts")).lower()
         ext = str(ar.get("extension", "arena")).lower()
         conf = str(ar.get("confidence", "unverified"))
-        arenas = [n for n in lower if n.startswith(f"{d}/") and n.endswith(f".{ext}")]
-        if arenas:
-            findings += _check_arena(archive, arenas, stem, ar, sev)
-        if not arenas:
+        # Exactly <dir>/<map>.<ext>: the game looks the map's own arena up by that name, so
+        # another map's arena in the package does not stand in for it.
+        own = f"{d}/{stem.lower()}.{ext}"
+        if own in lower:
+            findings += _check_arena(archive, [own], stem, ar, sev)
+        else:
+            others = sorted(n for n in lower if n.startswith(f"{d}/") and n.endswith(f".{ext}"))
             findings.append(
                 _finding(
                     "SHIP_NO_ARENA",
                     sev("warning", conf),
-                    f"no .{ext} file under {d}/ in {archive.name}; without it the map does "
-                    f"not appear in the in-game map list. {ar.get('note', '')}",
+                    f"no {own} in {archive.name}"
+                    + (f" (only {', '.join(others[:3])}, named for another map)" if others else "")
+                    + f"; without it the map does not appear in the in-game map list. "
+                    f"{ar.get('note', '')}",
                     conf,
                     f"add {d}/{stem}.{ext}",
                 )
@@ -1096,13 +1173,18 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
                 )
             )
 
-    if not any(n.lower().endswith(".bsp") for n in lower):
+    # The engine loads maps/<map>.bsp by the map's name; another map's BSP is no substitute.
+    if f"maps/{stem.lower()}.bsp" not in lower:
+        others = sorted(n for n in lower if n.endswith(".bsp"))
         findings.append(
             _finding(
                 "SHIP_NO_BSP",
                 "error",
-                f"{archive.name} contains no .bsp — the package is unusable",
+                f"{archive.name} contains no maps/{stem}.bsp"
+                + (f" (it holds {', '.join(others[:3])})" if others else "")
+                + " — the package cannot load this map",
                 "verified",
+                "pack the compiled map with pack_pk3",
             )
         )
     return findings

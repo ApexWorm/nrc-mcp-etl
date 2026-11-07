@@ -142,3 +142,70 @@ def test_client_requires_an_active_connection_marker(fake_engine, monkeypatch, c
     result = engine.smoke(package, "test", client=True, keep=True)
     assert result["ok"] is connected
     assert result["runs"][1]["connected"] is connected
+
+
+def test_a_failing_server_fails_even_when_the_client_cannot_start(fake_engine, monkeypatch):
+    """The client's binary or display missing used to raise after the server had already
+    failed, and engine_loads turned that into a skipped pass."""
+    from nrc_mcp import playspace
+
+    package = pk3(fake_engine / "m_autopacked.pk3", ["maps/m.bsp"])
+    (fake_engine / "log_to_write_server").write_text(REAL_LOG_CRASH)
+    real_find = engine.find_binary
+
+    def no_client(names, basepath, override=None):
+        if names == SPEC["client"]:
+            raise engine.EngineError("none of fakeclient found")
+        return real_find(names, basepath, override)
+
+    monkeypatch.setattr(engine, "find_binary", no_client)
+    r = engine.smoke(package, "test", seconds=1, client=True, keep=True)
+    assert not r["ok"] and "fakeclient" in r["client_skipped"]
+    assert [run["level"] for run in r["runs"]] == ["server"] and r["runs"][0]["fatal"]
+
+    check = playspace.Check(workspace=fake_engine, allow_compile=True, profile_id="test")
+    check.results["pack"] = {"packages": [str(package)]}
+    monkeypatch.setattr(playspace, "resolve_profile", lambda pid: pid)
+    out = playspace._REGISTRY["engine_loads"](check, step="pack", client=True)
+    assert not out.ok and not out.skipped, out
+
+    (fake_engine / "log_to_write_server").write_text(REAL_LOG_GOOD)
+    out = playspace._REGISTRY["engine_loads"](check, step="pack", client=True)
+    assert out.ok and out.skipped and "client" in out.detail, "a clean server alone is a skip"
+
+
+def test_the_display_failing_also_leaves_the_servers_verdict(fake_engine, monkeypatch):
+    package = pk3(fake_engine / "m_autopacked.pk3", ["maps/m.bsp"])
+    (fake_engine / "log_to_write_server").write_text(REAL_LOG_CRASH)
+    monkeypatch.setattr(engine, "find_binary", lambda names, *a: fake_engine / "install/fakeded")
+
+    def no_display():
+        raise engine.EngineError("the client needs a display")
+
+    monkeypatch.setattr(engine, "_start_display", no_display)
+    r = engine.smoke(package, "test", seconds=1, client=True, keep=True)
+    assert not r["ok"] and r["client_skipped"] == "the client needs a display"
+
+
+def test_the_engine_is_stopped_however_the_wait_ends(monkeypatch, tmp_path):
+    """try/finally: an interrupt while waiting still ends the engine and what it started."""
+    stopped = []
+
+    class Proc:
+        pid = 4242
+
+        def wait(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(engine.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(engine.procs, "kill_tree", lambda proc, grace=10: stopped.append(proc))
+    with pytest.raises(KeyboardInterrupt):
+        engine._run(["etlded"], tmp_path, 1, {})
+    assert len(stopped) == 1
+
+
+def test_no_x_display_is_started_on_windows(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(engine.os, "name", "nt")
+    monkeypatch.setattr(engine.shutil, "which", lambda _n: pytest.fail("looked for Xvfb"))
+    assert engine._start_display() == (None, {})

@@ -15,7 +15,7 @@ from pathlib import Path
 from mcp.server.mcpserver import Image as _Image
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .. import botnav, botplay, profiles
+from .. import botnav, botplay, gamepath, profiles
 from .. import bsp as bspmod
 from .. import detail as detailmod
 from .. import optimize as optmod
@@ -452,7 +452,7 @@ def leak_trace(lin_path: str | None = None) -> dict:
             "hint": "a pointfile only exists when the last compile leaked; a sealed map has none",
         }
     pid = active_profile() or None
-    base = _basegame_dir(os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH"), pid)
+    base = _basegame_dir(gamepath.basepath(), pid)
     try:
         report = optmod.leak_trace(
             p,
@@ -487,7 +487,7 @@ def shader_audit(
     """
     _require_path()
     pid = profile_id or active_profile() or None
-    base = os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH")
+    base = gamepath.basepath()
     dirs: list[str] = list(shader_dirs or [])
     if not dirs:
         game = os.environ.get("NRC_FS_GAME")
@@ -523,9 +523,7 @@ def texture_search(query: str = "", limit: int = 40, profile_id: str | None = No
     non-solid are marked, since they are not wall material.
     """
     pid = profile_id or active_profile() or None
-    basegame = _basegame_dir(
-        os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH"), pid
-    )
+    basegame = _basegame_dir(gamepath.basepath(), pid)
     if not basegame:
         return {
             "error": "no base game known",
