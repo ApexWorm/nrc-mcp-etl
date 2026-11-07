@@ -223,8 +223,9 @@ def compile_map(
 
     The profile's compile-only shaders (`compile_shaders`: editor shaders such as terrain
     alpha-blend volumes and hint-skip that real maps use but no game archive defines) are given
-    to q3map2 on every compile, below everything else, so a definition the map or its packs
-    carry wins. They are never packed; shader_audit lists them under `compile_only`.
+    to q3map2 on every compile where nothing else defines them, so a definition the game, the
+    map or a pk3 beside it carries wins. They are never packed; shader_audit lists them under
+    `compile_only`.
     """
     if preset not in COMPILE_TIMEOUTS:
         raise ToolError(f"unknown preset {preset!r} — choose draft, iterate, quality or final.")

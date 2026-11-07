@@ -5144,10 +5144,11 @@ packaging:
 # ---------------------------------------------------------------------------
 # Editor shaders real maps use (the ET: Legacy Supply Depot overhaul, etl_supply.map, has 9291
 # alpha-volume faces and 157 hintskip faces) but that ship with the mapper's editor setup, not
-# with the game. tools/q3map2.py packs `compile_shader_file` into a throwaway pk3 and puts it on
-# the last -fs_pakpath of every compile stage (not -pk3/-repack), so it is the lowest-priority
-# definition: the base game's, the map's own scripts and any pk3 beside the map all win
-# (vfs.cpp:194-224 lists loose dirs before pk3s; shaders.cpp:749 takes the first definition).
+# with the game. tools/q3map2.py puts the shaders of `compile_shader_file` that no script in the
+# base game, the map's folder or a pk3 beside the map defines into a throwaway pk3 on an extra
+# -fs_pakpath of every compile stage (not -pk3/-repack). A fallback only: q3map2 ranks a later
+# archive ahead of earlier ones (vfs.cpp:109, :124) and takes the first definition
+# (shaders.cpp:749), so a name defined anywhere else is left out rather than overridden.
 # shader_audit, repack_analyze and pack_pk3 count these names as supplied and never ship them.
 
 compile_shaders:

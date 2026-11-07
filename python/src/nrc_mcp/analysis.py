@@ -929,6 +929,36 @@ def _basegame_parms(directory: Path) -> dict[str, tuple[str, ...]]:
     return hit
 
 
+def _archive_parms(archive: Path) -> dict[str, tuple[str, ...]]:
+    """Surfaceparms of every shader one pk3's `scripts/*.shader` define, first definition
+    kept (q3map2 reads one archive's scripts in turn and the first definition of a name wins,
+    shaders.cpp:749)."""
+    import zipfile  # noqa: PLC0415
+
+    from . import optimize  # noqa: PLC0415
+
+    found: dict[str, tuple[str, ...]] = {}
+    try:
+        with zipfile.ZipFile(archive) as z:
+            members = sorted(
+                n
+                for n in z.namelist()
+                if n.lower().startswith("scripts/") and n.lower().endswith(".shader")
+            )
+            for member in members:
+                try:
+                    parsed = optimize.parse_shader_text(
+                        z.read(member).decode("latin-1"), f"{archive.name}:{member}"
+                    )
+                except optimize.OptimizeError:
+                    continue
+                for shader in parsed:
+                    found.setdefault(shader["name"].lower(), tuple(shader["surfaceparms"]))
+    except (OSError, zipfile.BadZipFile):
+        return {}
+    return found
+
+
 def shader_contents(profile_id: str, map_path: str | Path | None = None) -> ShaderContents:
     """The shader scripts a compile of `map_path` would read: the project's own, then the game's.
 
@@ -958,6 +988,16 @@ def shader_contents(profile_id: str, map_path: str | Path | None = None) -> Shad
                 for shader in parsed:
                     parms.setdefault(shader["name"].lower(), tuple(shader["surfaceparms"]))
                 sources.append(str(script))
+        # Archives kept beside `maps/` (a map built on another package's art, packed with
+        # `depends`): compile_map puts that folder on q3map2's -fs_pakpath, which opens them
+        # after the base game and so ahead of it, the last-named archive first (vfs.cpp:109,
+        # :124, :178-184), as the engine prefers later archives.
+        for archive in sorted(root.glob("*.pk3"), key=lambda p: p.name.upper(), reverse=True):
+            found = _archive_parms(archive)
+            if found:
+                for name, value in found.items():
+                    parms.setdefault(name, value)
+                sources.append(str(archive))
     base = gamepath.basepath()
     basegame = (data.get("packaging") or {}).get("basegame")
     if base and basegame and (Path(base) / str(basegame)).is_dir():

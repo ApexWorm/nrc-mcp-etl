@@ -1707,8 +1707,8 @@ def compile_only_shaders(profile_id: str | None) -> dict[str, dict[str, Any]]:
     """The profile's compile-only shaders, by lowercase name: editor shaders real maps use
     whose definitions come with the mapper's editor setup, not the game (`compile_shaders`).
 
-    `tools/q3map2.py` hands the profile's `compile_shader_file` to q3map2 on every compile as
-    its lowest-priority definitions, and nothing packs them, so a map that uses one needs to
+    `tools/q3map2.py` hands the profile's `compile_shader_file` to q3map2 on every compile,
+    for the names nothing else defines, and nothing packs them, so a map that uses one needs to
     ship nothing for it. Each entry carries the profile's `role`, `source` and `confidence`.
     """
     if not profile_id:

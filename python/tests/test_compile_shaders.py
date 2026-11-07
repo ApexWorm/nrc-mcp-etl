@@ -203,6 +203,22 @@ def test_q3map2_builds_alpha_volumes_as_nonsolid_and_undrawn(tmp_path, monkeypat
     contents, _, draws = _bsp_shader(m2.with_suffix(".bsp"), ALPHA)
     assert contents & 1 and draws == 0, "the map's solid nodraw definition won"
 
+    # So does one in a pk3 beside the map (a dependency's art). q3map2 puts archives it opens
+    # later *ahead* of earlier ones (vfs.cpp:109, :124), so order alone cannot make the
+    # profile's archive the last resort: the wrapper leaves out what any archive defines.
+    packed = tmp_path / "packed"
+    (packed / "maps").mkdir(parents=True)
+    with zipfile.ZipFile(packed / "dep.pk3", "w") as z:
+        z.writestr("scripts/dep.shader", f"{ALPHA}\n{{\n\tsurfaceparm nodraw\n}}\n")
+    m3 = packed / "maps" / "m.map"
+    m3.write_text(_room(volume))
+    r = q3.compile_map(m3, [["-bsp", "-meta"]], stage_dir=None, verbose=False, keep=False)
+    assert r["ok"], r["stages"][0]["tail"]
+    contents, _, draws = _bsp_shader(m3.with_suffix(".bsp"), ALPHA)
+    assert contents & 1 and draws == 0, "the dependency's solid nodraw definition won"
+    assert ALPHA in r["compile_shaders"]["defined_elsewhere"]
+    assert "textures/common/hintskip" in r["compile_shaders"]["supplied"]
+
 
 def _alpha_map(tmp_path: Path) -> Path:
     m = tmp_path / "maps" / "m.map"
@@ -255,3 +271,32 @@ def test_routes_walk_through_alpha_volumes(tmp_path, monkeypatch):
     assert contents.blocks_player("editor/alpha_000") is False
     assert contents.blocks_player("common/hintskip") is False
     assert analysis.shader_contents("urt43", m).blocks_player("editor/alpha_000") is None
+
+
+def test_routes_read_shaders_from_archives_beside_the_map(tmp_path, monkeypatch):
+    """A map built on a dependency's art (pk3 beside `maps/`, as `depends` packs it) has its
+    shaders there; the collision model reads them as q3map2 does: loose scripts first, then the
+    archives, the last-named first, then the base game, then the profile's compile-only ones."""
+    from nrc_mcp import analysis
+
+    monkeypatch.delenv("NRC_FS_BASEPATH", raising=False)
+    m = _alpha_map(tmp_path)
+
+    def pk3(name: str, text: str) -> None:
+        with zipfile.ZipFile(tmp_path / name, "w") as z:
+            z.writestr("scripts/dep.shader", text)
+
+    pk3("a_dep.pk3", "textures/dep/grass\n{\n\tsurfaceparm nonsolid\n}\ntextures/dep/rock\n{\n}\n")
+    pk3("b_dep.pk3", "textures/dep/rock\n{\n\tsurfaceparm nonsolid\n}\n")
+    contents = analysis.shader_contents("etl", m)
+    assert contents.blocks_player("dep/grass") is False, "read from the archive"
+    assert contents.blocks_player("dep/rock") is False, "the later archive wins"
+    assert any(s.endswith("a_dep.pk3") for s in contents.sources)
+
+    # A dependency's own definition of a compile-only name beats the profile's.
+    pk3("c_dep.pk3", f"{ALPHA}\n{{\n\tsurfaceparm nodraw\n}}\n")
+    assert analysis.shader_contents("etl", m).blocks_player("editor/alpha_000") is True
+    # Loose scripts beside the map come before every archive.
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "m.shader").write_text("textures/dep/grass\n{\n}\n")
+    assert analysis.shader_contents("etl", m).blocks_player("dep/grass") is True

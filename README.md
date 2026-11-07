@@ -448,8 +448,9 @@ editor setup. For ET: Legacy these are the terrain alpha-blend volumes `editor/a
 `editor/alpha_100` and the hint brushes' `common/hintskip`. Without a definition q3map2 builds them
 as solid, drawn brushes. Supply Depot's terrain then turns into orange walls. The profile owns
 compile-only definitions for them (`profiles/etl-compile.shader`, with sources and confidence under
-`compile_shaders` in `profiles/etl.yaml`). Every compile hands them to q3map2 as its lowest-priority
-archive, so a definition the map or the game ships still wins. They are never packed.
+`compile_shaders` in `profiles/etl.yaml`). Every compile hands q3map2 the ones that nothing in
+the game, the map's folder or a pk3 beside it defines, so their own definitions always win. They
+are never packed.
 `shader_audit` lists them under `compile_only`, `repack_analyze` and `pack_pk3` do not count them
 as missing, and the movement analysis treats the volumes as nonsolid, as the compiled map does.
 

@@ -239,22 +239,108 @@ def profile_compile_shaders() -> Path | None:
     return path if path.is_file() else None
 
 
-def write_compile_shader_archive(directory: Path) -> Path | None:
-    """Put the profile's compile-only shaders in a pk3 of their own in `directory`.
+_COMMENT = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 
-    Passed as the last `-fs_pakpath`, it is the lowest-priority source q3map2 has: loose
-    directories are listed before archives and archives in search-path order (vfs.cpp:194-224,
-    path_init.cpp:412-424), and the first definition of a name wins (shaders.cpp:749). So the
-    game's, the map's own scripts and any pk3 beside the map still override it.
+
+def shader_blocks(text: str) -> list[tuple[str, str]]:
+    """(name, text) of each top-level shader definition in a shader script, comments dropped.
+
+    The same grammar `ParseShaderFile` reads (shaders.cpp:809-830): a name token, then a braced
+    body; a `:q3map` suffix on the name marks a compiler-only shader and is not part of it.
+    """
+    text = _COMMENT.sub("", text)
+    blocks: list[tuple[str, str]] = []
+    i, n = 0, len(text)
+    while i < n:
+        m = re.compile(r"\s*([^\s{}]+)\s*\{").match(text, i)
+        if not m:
+            break
+        depth, j = 1, m.end()
+        while j < n and depth:
+            depth += {"{": 1, "}": -1}.get(text[j], 0)
+            j += 1
+        name = m.group(1)
+        if name.lower().endswith(":q3map"):
+            name = name[: -len(":q3map")]
+        blocks.append((name, text[m.start(1) : j]))
+        i = j
+    return blocks
+
+
+def shader_search_dirs(map_path: Path) -> list[Path]:
+    """The folders whose loose scripts and pk3s q3map2 reads shaders from for this map: the
+    base game's folder, the mod's, and the map's own root (path_init.cpp:412-424). The base
+    game folder is the profile's `packaging.basegame`; without it only the map's root counts.
+    """
+    dirs: list[Path] = []
+    base = os.environ.get("NRC_FS_BASEPATH") or os.environ.get("URT_BASEPATH")
+    profile = os.environ.get("NRC_PROFILE", "").strip()
+    if base and profile:
+        try:
+            text = (
+                Path(os.environ.get("NRC_ROOT", ".")) / "profiles" / f"{profile}.yaml"
+            ).read_text(errors="replace")
+        except OSError:
+            text = ""
+        m = re.search(r"^\s*basegame:\s*['\"]?([\w.-]+)", text, re.M)
+        if m:
+            dirs.append(Path(base) / m.group(1))
+        if os.environ.get("NRC_FS_GAME"):
+            dirs.append(Path(base) / os.environ["NRC_FS_GAME"])
+    root = map_path.parent.parent if map_path.parent.name.lower() == "maps" else map_path.parent
+    dirs.append(root)
+    return [d for d in dirs if d.is_dir()]
+
+
+def defined_shader_names(dirs: list[Path]) -> set[str]:
+    """Lowercased names every shader script under `dirs` defines, loose or in a pk3."""
+    names: set[str] = set()
+
+    def add(text: str) -> None:
+        names.update(name.lower() for name, _ in shader_blocks(text))
+
+    for d in dirs:
+        for f in sorted((d / "scripts").glob("*.shader")):
+            try:
+                add(f.read_text(errors="replace"))
+            except OSError:
+                continue
+        for archive in sorted(d.glob("*.pk3")):
+            try:
+                with zipfile.ZipFile(archive) as z:
+                    for member in z.namelist():
+                        low = member.lower()
+                        if low.startswith("scripts/") and low.endswith(".shader"):
+                            add(z.read(member).decode("latin-1"))
+            except (OSError, zipfile.BadZipFile):
+                continue
+    return names
+
+
+def write_compile_shader_archive(directory: Path, defined: set[str]) -> dict | None:
+    """Put the profile's compile-only shaders that nothing else defines in a pk3 of their own.
+
+    A fallback, never an override. Ordering cannot make it one: loose scripts are read before
+    archives (vfs.cpp:194-224), but q3map2 puts each archive it opens *ahead* of those opened
+    before it (vfs.cpp:109, :124), so an archive on the last -fs_pakpath would beat the base
+    game's and a dependency's, and the first definition of a name wins (shaders.cpp:749). So
+    every name `defined` already holds (see `defined_shader_names`) is left out.
     """
     script = profile_compile_shaders()
     if script is None:
         return None
-    archive = directory / COMPILE_SHADER_ARCHIVE
-    member = COMPILE_SHADER_MEMBER.format(profile=os.environ.get("NRC_PROFILE", "").strip())
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(member, script.read_bytes())
-    return archive
+    blocks = shader_blocks(script.read_text(errors="replace"))
+    supplied = [(name, body) for name, body in blocks if name.lower() not in defined]
+    report = {
+        "file": str(script),
+        "supplied": [name for name, _ in supplied],
+        "defined_elsewhere": [name for name, _ in blocks if name.lower() in defined],
+    }
+    if supplied:
+        member = COMPILE_SHADER_MEMBER.format(profile=os.environ.get("NRC_PROFILE", "").strip())
+        with zipfile.ZipFile(directory / COMPILE_SHADER_ARCHIVE, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(member, "\n\n".join(body for _, body in supplied) + "\n")
+    return report
 
 
 def general_flags() -> list[str]:
@@ -376,11 +462,15 @@ def compile_map(
     # system temp directory, or on WSL (where a Windows binary cannot read it) the staging
     # directory or the map's own folder. Removed afterwards.
     shader_dir: Path | None = None
+    compile_shaders: dict | None = None
     compile_general = general
-    if any(not s or s[0] not in PACKING_STAGES for s in stages):
+    if profile_compile_shaders() and any(not s or s[0] not in PACKING_STAGES for s in stages):
         near = (workdir or work_map.parent) if is_wsl() else None
         shader_dir = Path(tempfile.mkdtemp(prefix="nrc-compile-shaders-", dir=near))
-        if write_compile_shader_archive(shader_dir) is not None:
+        compile_shaders = write_compile_shader_archive(
+            shader_dir, defined_shader_names(shader_search_dirs(map_path))
+        )
+        if compile_shaders and compile_shaders["supplied"]:
             compile_general = [*general, "-fs_pakpath", to_windows_path(shader_dir)]
 
     results: list[StageResult] = []
@@ -452,6 +542,7 @@ def compile_map(
         "q3map2": str(exe),
         "windows_mode": is_wsl(),
         "artifacts": artifacts,
+        **({"compile_shaders": compile_shaders} if compile_shaders else {}),
         "total_seconds": round(sum(r.seconds for r in results), 3),
         "stages": [
             {
