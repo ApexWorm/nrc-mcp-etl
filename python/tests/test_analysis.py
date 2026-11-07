@@ -1184,13 +1184,13 @@ def test_every_finding_matches_the_rule_engine_shape(tmp_path, kern, pid, role_m
 def test_reports_return_an_error_instead_of_raising_when_the_grid_cannot_be_built(
     tmp_path, kern, pid
 ):
-    """cell=1 over a 1024-unit room is far past the cell budget, and every report says so."""
+    """cell=0.5 over a 1024-unit room is far past the cell budget, and every report says so."""
     path = write_map(tmp_path, room(0, 0, 1024, 1024))
     reports = (
-        analysis.balance_report(path, profile_id=pid, cell=1),
-        analysis.sightline_report(path, samples=4, profile_id=pid, cell=1),
-        analysis.movement_check(path, profile_id=pid, cell=1),
-        analysis.spawn_safety(path, profile_id=pid, cell=1),
+        analysis.balance_report(path, profile_id=pid, cell=0.5),
+        analysis.sightline_report(path, samples=4, profile_id=pid, cell=0.5),
+        analysis.movement_check(path, profile_id=pid, cell=0.5),
+        analysis.spawn_safety(path, profile_id=pid, cell=0.5),
     )
     for report in reports:
         assert "max_cells" in report["error"]
