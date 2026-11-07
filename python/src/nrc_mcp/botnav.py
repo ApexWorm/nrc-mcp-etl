@@ -14,7 +14,7 @@ position, varint-packed optional fields and relative-index connections); the pro
 which version it is and cites the add-on's source for every field.
 
 Jumps and ladders, which the walk grids cannot express, are added after seeding
-(`add_traversals`): a ledge within the jump's rise or a gap the player box's arc clears gets
+(`add_traversals`): a ledge within the jump's reach or a gap the player box's arc clears gets
 take-off, landing and one-way jump links, and a ladder brush gets climb waypoints at its foot
 and top.
 
@@ -880,16 +880,23 @@ class _Physics:
     """The movement figures a jump needs, all from the profile's movement section."""
 
     jump_velocity: float
-    gravity: float
+    gravity: float  # what an airborne body falls at (the profile's effective gravity)
     speeds: tuple[float, ...]  # horizontal take-off speeds every gap arc must work at
     separation: float
     safe_drop: float
     step: float
     width: float
+    # The highest ledge a jump lands on (the profile's jump_up_max: the rise plus the step-up
+    # a falling body gets at the riser), or the bare rise when the profile states none.
+    ledge_max: float | None = None
 
     @property
     def apex(self) -> float:
         return self.jump_velocity**2 / (2 * self.gravity)
+
+    @property
+    def ledge(self) -> float:
+        return self.apex if self.ledge_max is None else self.ledge_max
 
     def rise(self, t: float) -> float:
         return self.jump_velocity * t - 0.5 * self.gravity * t * t
@@ -906,7 +913,9 @@ def _physics(profile_id: str, jumps: dict) -> _Physics | None:
         return float(v) if ok else None
 
     jump = number("jump_velocity", "value")
-    gravity = number("gravity", "default")
+    # `effective` where the game's movement code changes what bodies fall at (ET's fixed
+    # physics: 750 for g_gravity 800); the arcs follow what the engine does.
+    gravity = number("gravity", "effective") or number("gravity", "default")
     run = number("run_speed", "value")
     mv = analysis.movement_constants(profile_id)
     if None in (jump, gravity, run) or mv.player_width is None:
@@ -922,6 +931,7 @@ def _physics(profile_id: str, jumps: dict) -> _Physics | None:
         safe_drop=mv.fall_no_damage.value if mv.fall_no_damage else mv.step_height.value,
         step=mv.step_height.value,
         width=mv.player_width.value,
+        ledge_max=mv.jump_up_max.value if mv.jump_up_max else None,
     )
 
 
@@ -1078,7 +1088,7 @@ def _jump_candidates(grid: analysis.NavGrid, piece_of: dict, phys: _Physics, mar
     standing grid: a cell whose next column offers no walk at its level, scanned along the
     direction for the first walkable floor of each other piece within jump reach."""
     cell = grid.cell
-    rise_cells = math.ceil((phys.apex - margin) / cell)
+    rise_cells = math.ceil((phys.ledge - margin) / cell)
     drop_cells = max(0, math.floor((phys.safe_drop - phys.apex) / cell))
     reach = max(phys.speeds) * 2 * phys.jump_velocity / phys.gravity + phys.width
     k_max = max(2, math.ceil(reach / cell))
@@ -1125,7 +1135,7 @@ def _jump(ext: _Extend, phys: _Physics, cfg: dict, a, c, d, k) -> dict | None:
     feet_c = (pc[0], pc[1], fc + phys.separation)
     rise = fc - fa
     # Ledge: the floor runs up to a riser (or the riser starts right away) and its top is
-    # within the jump's rise: the body slides up the face and steps across.
+    # within the jump's reach: the body slides up the face, steps up at the apex and across.
     floor_runs = all(
         grid.is_solid(a[0] + d[0] * i, a[1] + d[1] * i, a[2] - 1)
         or grid.is_solid(a[0] + d[0] * i, a[1] + d[1] * i, a[2])
@@ -1133,7 +1143,7 @@ def _jump(ext: _Extend, phys: _Physics, cfg: dict, a, c, d, k) -> dict | None:
     )
     kind = landing = None
     near = math.dist(pa[:2], pc[:2]) <= phys.width + 2 * grid.cell
-    if floor_runs and near and phys.step < rise <= phys.apex - margin:
+    if floor_runs and near and phys.step < rise <= phys.ledge - margin:
         top = fc + phys.separation + 1.0
         if _swept(grid, [feet_a, (pa[0], pa[1], top), (pc[0], pc[1], top), feet_c]):
             kind, landing = "ledge", (c, fc)
@@ -1288,8 +1298,8 @@ def add_traversals(
 
     Jumps (profile `bots.jumps`): every brink of the standing grid is scanned for a floor of
     another area within jump reach; a pair of areas whose walking route is missing or a long
-    detour gets its first brink that passes as a ledge (rise within the jump, the box sweeps
-    up the face and across) or as a gap (the box's ballistic arc lands in the far area from
+    detour gets its first brink that passes as a ledge (rise within the jump's reach, `movement.jump_up_max`
+    less the margin, the box sweeps up the face and across) or as a gap (the box's ballistic arc lands in the far area from
     every take-off point and at every speed). It becomes a run-up waypoint, a take-off
     waypoint flagged to jump, and a one-way link to a landing waypoint.
 

@@ -10,6 +10,7 @@ configured as described in the root README.
 mise run bench:dogfood -- depot
 mise run bench:dogfood -- constructible
 mise run bench:dogfood -- movement
+mise run bench:dogfood -- movement_limits [--pk3 PACKAGE]
 mise run bench:dogfood -- frontline [--one-way]
 mise run bench:dogfood -- convoy
 mise run bench:dogfood -- gates [--bots [--strip FLAG]]
@@ -22,6 +23,7 @@ mise run bench:dogfood -- patches stock
 | `depot` | Two routes through a warehouse, six spawns per team, dynamite objective and scripted win; built with the batch tools (`solids_commit`, `spawn_cluster`, `entities_place`) |
 | `constructible` | Workshop pit, stairs, constructible bridge, horizontal pipe, parametric editing and checkpoint restoration |
 | `movement` | Standing stair/arch route, crouch tunnel, prone vent, route changes after lowering a ceiling and restoring it |
+| `movement_limits` | Measures the profile's movement figures in the engine: run/sprint speed, a free jump, step 18/19, ledges 40-68, falls 256-514 (`scenarios/movement_limits.json`); see below |
 | `frontline` | `objective_place` checkpoint (or `checkpoint_one_way`) with forward spawns, a neutral `command_post`, and an Axis-only door (`allowteams`) |
 | `gates` | A corridor of gates, each the only way on: an Allies-only door, an unbuilt constructible bridge over a lethal trench, a wall Allies dynamite; seeds the bot waypoints, and with `--bots` runs bots and reports where they were before and after each gate changed |
 | `convoy` | A truck the Allies escort along a path with a curved bend (`path_place`, `objective_place` escort), and Axis orders they steal and deliver (`objective_place` steal) |
@@ -148,6 +150,56 @@ Inspect `result.json` and screenshots together. Failed attempts remain on disk w
 evidence as successful attempts. Native previews show geometry; engine screenshots are needed
 to assess actual materials, lighting and player interactions.
 
+## Movement limits in the engine
+
+`movement_limits` builds a hall of lanes (`nrc_movelimits`), one test each, and drives one
+engineer through all of them with `engine_playtest` (ET: Legacy 2.86.2, client at
+`com_maxfps 60`, the server's defaults: `g_fixedphysics 1`, `g_gravity 800`, `g_speed 320`).
+It reads each lane's outcome from the step states and the observer's 100 ms samples and
+asserts the figures recorded under `movement:` in `profiles/etl.yaml`; about two minutes.
+
+| Lane | Result | Runs |
+| --- | --- | --- |
+| hold forward / forward + sprint, 1.5 s | top speed 256.0 / 352.0 (g_speed x 0.8 / x 1.1) | 7 (one run read sprint at the hold's end, 349.2) |
+| jump in the open | feet 48.04-48.55 above rest at the highest sample (48.42 against a wall) | 6 |
+| walk into a riser of 18 / 19 | up / blocked | 7 |
+| jump against a ledge face, forward held | 40-66 climbed; 67, 68 and higher not | 66 and 67 in 5, 64 in 7, 65 in 6 |
+| walk off 256, 257 | no damage | 2, 3 |
+| 258 | no damage twice, 10 once | 3 |
+| 259 / 319 / 320 | 10 | 5 / 4 / 1 |
+| 321-386 | 15 | 4 |
+| 387-446 | 25 | 4 |
+| 447-512 | 50 | 4 |
+| 513 | 50 once, gibbed once | 2 |
+| 514 | gibbed (health -176) | 4 |
+
+Two things the source alone did not say. Airborne bodies fall at 750, not 800: with fixed
+physics (`g_fixedphysics 1`, fps 125) every move adds back the 0.4 per 8 ms a 125 fps client
+loses to velocity rounding (`bg_pmove.c:5380-5418`), so a jump rises 270^2 / 1500 = 48.6
+rather than 45.56, and the fall bands (delta = v^2 / 10000 over 38.75, 48, 58, 67, 77,
+`bg_pmove.c:1628-1717`) sit at drops of 258.3, 320, 386.7, 446.7 and 513.3 rather than 242
+and 481; the frame timing of each landing moves them by under a unit, which is why 258 and
+513 went both ways. And a jump reaches 18 above its rise: once the body stops rising, a move
+blocked by the riser steps up `STEPSIZE` and across (`bg_slidemove.c:370-405`), so with
+forward held into the face a 66-unit ledge is climbed (48.4 + 0.125 + 18 = 66.56).
+
+Each drop starts from a fresh spawn (a team switch, at 100 health) and waits out the 3 s
+spawn shield first: until then the game ignores all damage (`g_client.c:3322`,
+`g_combat.c:1601`), which made an early run read every fall as harmless. Crouch-jumping is not
+a lane: a crouch lowers only the top of the box (`bg_pmove.c:2036`, `:2069`), and the driver
+releases forward between holds, so a crouch pressed after the jump also ends the push into
+the riser the step-up needs. Not measured: gap widths (the driver cannot press jump at a
+point of a run-up; `botnav` gaps use the arc at the effective gravity), and anything with
+standing water or a `SURF_NODAMAGE` floor.
+
+The bot jumps follow these figures: a ledge gets a jump link up to `jump_up_max` (66) less
+the 4-unit margin, and gap arcs fall at the profile's `gravity.effective`. With the
+traversal course's ledge raised to 56 (`traversal --ledge 56`, above the bare 48.4 rise, so
+only the step-up makes it), the seeded file got 3 ledge jumps and 2 gap jumps (74
+waypoints), and a 240 s run (8 bots, samples every 0.5 s, port 27975) saw 78 Axis and 7
+Allied floor-to-ledge-top climbs within one life; Axis planted the radio twice (Allies
+defused once), which needs the ledge, the gap and the ladder.
+
 ## Bot waypoints in the engine
 
 `bot_waypoints_write` then `bot_playtest` (8 bots, 300 s, ET: Legacy 2.86.2 with its bundled
@@ -197,8 +249,9 @@ Axis planted the radio once (`axis planted "Course Radio"`, Allies defused it): 
 reachable from the Axis spawn only through the ledge jump, the gap jump and the ladder. One bot
 fell into the shaft in 240 s. Not measured: how many ladder climbs fail (22 Axis samples went
 from the ladder back to its foot, which is either a bot slipping off or one turning back), and
-the jump distance limits themselves (the course's ledge and gap sit inside them; the limits
-come from the arc model, not from the engine).
+the jump distance limits themselves (the course's ledge and gap sit inside them; the ledge
+limit is the engine-measured `jump_up_max`, see Movement limits above, the gap limit comes
+from the arc model).
 
 Doors, constructible bridges and blown walls are covered by the `gates` map below.
 
