@@ -807,16 +807,24 @@ docs/                design notes and the spec corrections
 
 Ask for any of these and you get an honest refusal rather than a plausible number.
 
-**Rotated geometry is partly invisible.** This is the cost of the exact-predicate design and it shows
-up on real maps. Any coordinate that is not an exact integer within world bounds is refused, and
-everything downstream reports `Indeterminate` rather than picking a side. Geometry whose
-*plane-defining points* are off-grid therefore cannot be evaluated at all, and rotated brushes are
-the common case.
+**Rotated and decompiled geometry is approximate.** This is the cost of the exact-predicate design
+and it shows up on real maps. Any coordinate that is not an exact integer within world bounds is
+refused by the exact predicates, which report `Indeterminate` rather than picking a side. Geometry
+whose *plane-defining points* are off-grid therefore cannot be evaluated exactly, and rotated brushes
+and maps decompiled from a BSP (`q3map2 -convert -format map` prints every plane point to three
+decimals) are the common cases. `validate` reports them as `BRUSH_NOT_EXACT`.
 
-Measured: `ut4_woolis` and `ut4_megastructunnel` are 100% evaluable, while **`ut4_dofa` has 478 of
-1454 brushes the kernel declines**. Those are absent from the navgrid, so every analysis report
-carries the count, gives examples, and warns that a path may cross a wall. `validate` reports them as
-`BRUSH_NOT_EXACT`.
+The gameplay analyses (navgrid, routes, sightlines, play-space) read such brushes from the kernel's
+floating-point path instead (`nrc_core::approx_geometry`: q3map2-style winding clipping, plane
+tolerance 0.01u, corners welded and snapped to the integer grid within 0.1u) and count them as
+`brushes_float_evaluated`; on-grid brushes are untouched. Only a brush that path also declines
+(collinear points, planes enclosing nothing, a corner past the world limit) is left out, counted as
+`brushes_indeterminate` and warned about. Measured on maps decompiled from the stock BSPs against
+their Splash Damage sources at cell 32: oasis went from 8,544 of 21,072 brushes left out and 62% of
+walkable cells shared with the source to none left out and 97.3% shared (99.4% with the compiler's
+model-clip brushes, which the source map does not contain, set aside); goldrush 98.4% to 99.95%,
+radar 84.8% to 99.1%. Most of the residue is cell centres lying exactly on a vertical face, which
+the last bit of a rebuilt plane decides either way.
 
 The honest summary: fully precise about axis-aligned and 45° geometry, partly blind to arbitrarily
 rotated geometry, and every report says which it is looking at. Closing the gap means either snapping
@@ -896,7 +904,7 @@ fitness score as meaningless until you know why.
 | MCP client shows no tools | The server needs to start in the repo. Set `cwd`, or use `mise -C /path/to/nrc-mcp run mcp:serve`. Check `mise run mcp:tools` works first. |
 | A rule fires that you believe is wrong | Check `nrc://corrections` — some of the design document's rules were wrong. If it is `info`, it is `unverified` by construction and cannot fail a build. |
 | `BRUSH_OFF_GRID` on curves and prisms | Expected. A `.map` stores planes; angled geometry has off-grid vertices necessarily. Judge it only on axis-aligned geometry. |
-| Analysis reports fewer brushes than the map has | `BRUSH_NOT_EXACT` — off-grid plane points, excluded rather than approximated. The count is in the report. See [Limits](#limits). |
+| Analysis reports fewer brushes than the map has | Brushes with no derivable geometry (collinear plane points, planes enclosing nothing) are excluded; the count and examples are in the report. Off-grid plane points (`BRUSH_NOT_EXACT`) are read in floating point and counted as `brushes_float_evaluated`. See [Limits](#limits). |
 | A top-down render is one flat grey rectangle | You forced `--solid` on a sealed map and are looking at the sky brush. Orthographic views default to wireframe for this reason. |
 | `mise install` fails on an env var | An `mise.local.toml` value referenced from `mise.toml`. Machine paths belong only in `mise.local.toml`. |
 | `selfdev:protected` fails | Something that defines *correct* changed. Treat all scores as meaningless and find out why before re-pinning. |

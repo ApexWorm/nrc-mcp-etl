@@ -711,11 +711,20 @@ impl PyMap {
     }
 
     /// Exact vertices of one brush, plus what the kernel could determine about it.
+    ///
+    /// With `approximate=True`, a brush the exact path declines only because its plane
+    /// points are off the integer grid (a map decompiled from a BSP, say) is evaluated in
+    /// floating point instead (`nrc_core::approx_geometry`) and comes back `usable` with
+    /// `approximate: True` and the exact path's `exact_reason`. Its shape is good to a
+    /// hundredth of a unit; its `off_grid_vertices` and `redundant_faces` are tolerance
+    /// answers. On-grid brushes are answered exactly either way.
+    #[pyo3(signature = (entity, primitive, approximate=false))]
     fn brush_geometry<'py>(
         &self,
         py: Python<'py>,
         entity: usize,
         primitive: usize,
+        approximate: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let e = self
             .inner
@@ -769,6 +778,31 @@ impl PyMap {
                 .collect::<Vec<_>>(),
         )?;
         match nrc_core::brush_geometry(&b.faces) {
+            Err(deg @ nrc_core::Degeneracy::NotExactlyRepresentable(_)) if approximate => {
+                match nrc_core::approx_geometry(&b.faces) {
+                    Err(why) => {
+                        d.set_item("usable", false)?;
+                        d.set_item("reason", format!("{deg}; in floating point, {why}"))?;
+                    }
+                    Ok(g) => {
+                        d.set_item("usable", true)?;
+                        d.set_item("approximate", true)?;
+                        d.set_item("exact_reason", deg.to_string())?;
+                        let verts = PyList::empty(py);
+                        for p in &g.vertices {
+                            verts.append([p.x, p.y, p.z])?;
+                        }
+                        d.set_item("vertices", verts)?;
+                        d.set_item("redundant_faces", g.redundant_faces())?;
+                        d.set_item("min_thickness", g.min_thickness())?;
+                        d.set_item("off_grid_vertices", g.off_grid_vertices())?;
+                        let bb = g.bounds();
+                        if !bb.is_empty() {
+                            d.set_item("bounds", (bb.min.to_array(), bb.max.to_array()))?;
+                        }
+                    }
+                }
+            }
             Err(deg) => {
                 d.set_item("usable", false)?;
                 d.set_item("reason", deg.to_string())?;

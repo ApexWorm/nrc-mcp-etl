@@ -1151,6 +1151,12 @@ def collect_solids(
 
     `nonsolid_entities` leaves out the brushes of those entity indices, for a caller that
     walks the map in one particular state of its doors and objectives.
+
+    A brush whose plane points are off the integer grid (every brush of a map decompiled
+    from a BSP, whose writer prints three decimals) cannot be derived exactly; it enters
+    from the kernel's floating-point path instead (`nrc_core::approx_geometry`, good to
+    0.01 unit) and is counted in `brushes_float_evaluated`. Only brushes that path also
+    declines (collinear points, planes enclosing nothing) are `brushes_indeterminate`.
     """
     nonsolid_categories = set(NONSOLID_ROLES)
     if open_state_changing and role_map:
@@ -1160,6 +1166,7 @@ def collect_solids(
         "brushes": 0,
         "brushes_used": 0,
         "brushes_indeterminate": 0,
+        "brushes_float_evaluated": 0,
         "brushes_bounds_approximated": 0,
         "brushes_nonsolid_shader": 0,
         "brushes_nonsolid_entity": 0,
@@ -1190,7 +1197,7 @@ def collect_solids(
         limit = int(entity.get("brushes") or 0) + int(entity.get("patches") or 0) + 4096
         while primitive < limit:
             try:
-                geometry = game_map.brush_geometry(index, primitive)
+                geometry = game_map.brush_geometry(index, primitive, approximate=True)
             except ValueError as e:
                 message = str(e)
                 if "has no primitive" in message:
@@ -1229,6 +1236,8 @@ def collect_solids(
             if not bounds:
                 provenance["brushes_indeterminate"] += 1
                 continue
+            if geometry.get("approximate"):
+                provenance["brushes_float_evaluated"] += 1
             mins = (float(bounds[0][0]), float(bounds[0][1]), float(bounds[0][2]))
             maxs = (float(bounds[1][0]), float(bounds[1][1]), float(bounds[1][2]))
             vertices = [(float(v[0]), float(v[1]), float(v[2])) for v in geometry["vertices"]]
@@ -1927,7 +1936,7 @@ def build_navgrid(
     )
     if not solids:
         raise AnalysisError(
-            f"{path.name} has no brush the kernel can evaluate exactly "
+            f"{path.name} has no brush the kernel can evaluate "
             f"({provenance['brushes']} brush(es) seen, "
             f"{provenance['brushes_indeterminate']} indeterminate), so there is nothing to "
             "voxelize"
@@ -2068,13 +2077,14 @@ def build_navgrid(
                 "NAV_GEOMETRY_INCOMPLETE",
                 "warning",
                 f"{provenance['brushes_indeterminate']} of {provenance['brushes']} brush(es) "
-                f"({share:.0%}) have off-grid or out-of-range plane points, so the kernel "
-                "cannot derive their geometry exactly and they are absent from this grid. "
-                "Space they occupy reads as empty, so a path may cross a wall and a clearance "
-                "may look larger than it is.",
+                f"({share:.0%}) have no geometry the kernel can derive, exactly or in floating "
+                "point (collinear plane points, too many faces, or planes that enclose "
+                "nothing), so they are absent from this grid. Space they occupy reads as "
+                "empty, so a path may cross a wall and a clearance may look larger than it "
+                "is. Examples: " + "; ".join(provenance.get("indeterminate_examples") or []),
                 "verified",
-                "nrc_mcp.analysis: kernel returned Indeterminate for these brushes",
-                "snap the offending brushes to the grid, then re-run",
+                "nrc_mcp.analysis: kernel returned no geometry for these brushes",
+                "fix or delete the offending brushes (map_validate names them), then re-run",
             )
         )
     if provenance["patches_unmodelled"]:
@@ -2466,7 +2476,7 @@ def _brush_bounds(game_map: Any, entity: dict) -> tuple[list[float], list[float]
     hi = [-math.inf] * 3
     for primitive in range(int(entity.get("brushes") or 0) + int(entity.get("patches") or 0)):
         try:
-            geometry = game_map.brush_geometry(index, primitive)
+            geometry = game_map.brush_geometry(index, primitive, approximate=True)
         except ValueError:
             continue
         bounds = geometry.get("bounds") if geometry.get("usable") else None

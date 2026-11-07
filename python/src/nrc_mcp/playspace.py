@@ -509,7 +509,8 @@ def diff(
             f"indoors means a ceiling that is not the top of its column, or one within "
             f"{near:.0f}u; a sky brush is solid here, so 'has something above it' would call "
             f"every rooftop an interior",
-            "brushes the kernel cannot evaluate exactly are absent from both sides; see "
+            "brushes the kernel cannot evaluate, exactly or in floating point, are absent "
+            "from both sides; see "
             "geometry.*.brushes_indeterminate",
         ],
     }
