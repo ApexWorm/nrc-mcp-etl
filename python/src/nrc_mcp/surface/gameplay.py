@@ -71,6 +71,7 @@ def _route_query(
     transition_cost,
     max_nodes,
     snap_radius,
+    max_detour=None,
 ):
     path = _require_path()
     pid = _require_profile(profile_id)
@@ -107,8 +108,149 @@ def _route_query(
         transition_cost=transition_cost,
         max_nodes=max_nodes,
         snap_radius=snap_radius,
+        max_detour=max_detour,
     )
     return {**report, "revision": revision, "editor_grid": editor_grid}, snapshot
+
+
+def _link_endpoints(snapshot, pid: str, index: int, link) -> tuple[dict, dict, str | None]:
+    """A link is `[start, end]` or `{"start": ..., "end": ..., "stance": ...}`."""
+    stance = None
+    if isinstance(link, dict):
+        unknown = set(link) - {"start", "end", "stance"}
+        if unknown:
+            raise ValueError(f"links[{index}] has unknown keys {sorted(unknown)}")
+        start, end, stance = link.get("start"), link.get("end"), link.get("stance")
+    elif isinstance(link, (list, tuple)) and len(link) == 2:
+        start, end = link
+    else:
+        raise ValueError(f'links[{index}] must be [start, end] or {{"start", "end", "stance"}}')
+    if stance is not None and stance not in (*routesmod.STANCES, "mixed"):
+        raise ValueError(f"links[{index}].stance must be stand, crouch, prone or mixed")
+    try:
+        first = routesmod.endpoint(snapshot, pid, start, None, "start")
+        last = routesmod.endpoint(snapshot, pid, end, None, "end")
+    except ValueError as e:
+        raise ValueError(f"links[{index}]: {e}") from e
+    return first, last, stance
+
+
+def _link_row(index: int, stance: str, report: dict, full: bool) -> dict:
+    row = {"index": index, "stance": stance, **report}
+    row.pop("cost_model", None)
+    row.pop("map", None)
+    row.pop("profile", None)
+    row.pop("cell", None)
+    row.pop("snap_radius", None)
+    if not full:
+        for key in ("path_cells", "collinear_vertices_removed"):
+            row.pop(key, None)
+        for end in ("start", "end"):
+            row[end] = {
+                k: v for k, v in row[end].items() if k in ("position", "distance", "stance")
+            }
+        if len(row.get("stances", ())) < 2:
+            row.pop("distance_by_stance", None)
+        row.pop("stances", None)
+        if row.get("reason") is None:
+            row.pop("reason", None)
+    requested = [report["start"].get("requested"), report["end"].get("requested")]
+    if report.get("distance") is not None and None not in requested:
+        straight = math.dist(*requested)
+        row["straight_line"] = round(straight, 2)
+        row["detour_ratio"] = round(report["distance"] / straight, 3) if straight > 0 else None
+    return row
+
+
+def _route_links(
+    links,
+    stance,
+    cell,
+    profile_id,
+    start_stance,
+    end_stance,
+    stance_costs,
+    transition_cost,
+    max_nodes,
+    snap_radius,
+    max_detour,
+    full,
+) -> dict:
+    path = _require_path()
+    pid = _require_profile(profile_id)
+    if not isinstance(links, list) or not links:
+        raise ValueError("links must be a non-empty list of [start, end] pairs")
+    if len(links) > routesmod.MAX_LINKS:
+        raise ValueError(f"at most {routesmod.MAX_LINKS:,} links per call, got {len(links):,}")
+    source = SESSION.require().source()
+    snapshot = parse_map(source)
+    revision = SESSION.receipt()
+    revision["sha256"] = digest(source.encode("utf-8"))
+    revision["dirty"] = source.encode("utf-8") != SESSION.baseline_files.get(path.resolve())
+    cell = routesmod.number(cell, "cell", maximum=4096)
+    groups: dict[str, list] = {}
+    for index, link in enumerate(links):
+        first, last, own = _link_endpoints(snapshot, pid, index, link)
+        groups.setdefault(own or stance, []).append((index, first, last))
+    grids = {}
+    for spec in groups:
+        for selected in routesmod.stances(pid, spec):
+            if selected in grids:
+                continue
+            key = (str(path), revision["sha256"], pid, cell, selected, repr(profiles.load(pid)))
+            if key not in SESSION.grids:
+                SESSION.grids[key] = anamod.cached_navgrid(
+                    path, cell=cell, profile_id=pid, game_map=snapshot, stance=selected
+                )
+                while len(SESSION.grids) > 4:
+                    SESSION.grids.pop(next(iter(SESSION.grids)))
+            grids[selected] = SESSION.grids[key]
+    rows: list = [None] * len(links)
+    for spec, members in groups.items():
+        allowed = {s: grids[s] for s in routesmod.stances(pid, spec)}
+        reports = routesmod.find_routes(
+            allowed,
+            [(first, last) for _, first, last in members],
+            with_paths=full,
+            start_stance=start_stance,
+            end_stance=end_stance,
+            stance_costs=(
+                {k: v for k, v in stance_costs.items() if k in allowed}
+                if isinstance(stance_costs, dict)
+                else stance_costs
+            ),
+            transition_cost=transition_cost,
+            max_nodes=max_nodes,
+            snap_radius=snap_radius,
+            max_detour=max_detour,
+        )
+        for (index, _, _), report in zip(members, reports, strict=True):
+            rows[index] = _link_row(index, spec, report, full)
+    statuses: dict[str, int] = {}
+    for row in rows:
+        statuses[row["status"]] = statuses.get(row["status"], 0) + 1
+    reference = next(iter(grids.values()))
+    out = {
+        "map": reference.map_path,
+        "profile": reference.profile,
+        "cell": reference.cell,
+        "links_checked": len(rows),
+        "by_status": statuses,
+        "cost_model": {
+            "kind": "weighted_distance",
+            "units": "weighted_world_units",
+            "stance_costs": {
+                s: (stance_costs or {}).get(s, routesmod.DEFAULT_COSTS[s]) for s in grids
+            },
+            "transition_cost": transition_cost,
+            "max_detour": max_detour,
+        },
+        "links": rows,
+        "revision": revision,
+    }
+    if full:
+        out["grids"] = {s: g.as_dict() for s, g in grids.items()}
+    return out
 
 
 @tool("gameplay", "Route with stance changes")
@@ -126,6 +268,8 @@ def route_report(
     transition_cost: float = 32,
     max_nodes: int = 100000,
     snap_radius: float | None = None,
+    links: list | None = None,
+    max_detour: float | None = None,
     detail: Detail = "summary",
 ) -> dict:
     """Find a directed route with a geometric witness and explicit stance changes.
@@ -154,9 +298,39 @@ def route_report(
 
     `detail="summary"` (default) omits the model caveats, per-grid constants and the
     per-vertex `path` (`segments` holds the same vertices); `"full"` returns everything.
+
+    Link checks: pass `links` (instead of start/end) to check up to 20000 links in one call,
+    each `[start, end]` or `{"start", "end", "stance"}` (a link's own stance overrides
+    `stance`). Every link is the same search as a single route; the grid's edges are
+    learned once and shared, so thousands of short waypoint links are cheap. Rows come back
+    in order with index, status (found, unreachable, budget_exhausted, no_endpoint,
+    exceeds_max_detour), distance, cost, straight_line, detour_ratio and the snapped ends;
+    `segments`/`transitions` only with `detail="full"`.
+
+    `max_detour` (single route or links) bounds the search: no route costing more than
+    max_detour x the straight line (x the cheapest stance weight) is looked for, so a failed
+    short link explores only the ellipse around it. A route inside the bound is the same
+    answer as without it; one outside reports `exceeds_max_detour`. Needs position endpoints.
     """
     full = detailmod.wants_full(detail)
     try:
+        if links is not None:
+            if any(v is not None for v in (start, end, start_entity, end_entity)):
+                raise ValueError("give links, or start/end, not both")
+            return _route_links(
+                links,
+                stance,
+                cell,
+                profile_id,
+                start_stance,
+                end_stance,
+                stance_costs,
+                transition_cost,
+                max_nodes,
+                snap_radius,
+                max_detour,
+                full,
+            )
         report, _ = _route_query(
             start,
             end,
@@ -171,6 +345,7 @@ def route_report(
             transition_cost,
             max_nodes,
             snap_radius,
+            max_detour,
         )
         return report if full else detailmod.route_report(report)
     except (OSError, ValueError, MemoryError, anamod.AnalysisError) as e:

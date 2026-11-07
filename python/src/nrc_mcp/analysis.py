@@ -2242,63 +2242,17 @@ def _decimate(points: list[list[float]], max_points: int) -> list[list[float]]:
     return thinned
 
 
-def path_distance(
+def _astar_python(
     grid: NavGrid,
-    from_xyz: tuple[float, float, float],
-    to_xyz: tuple[float, float, float],
-    *,
-    max_nodes: int = MAX_A_STAR_NODES,
-    max_path_points: int = 48,
-    snap_radius: float | None = None,
-) -> dict[str, Any]:
-    """Shortest walkable distance between two world positions, by A* over the grid.
+    start_cell: tuple[int, int, int],
+    goal_cell: tuple[int, int, int],
+    max_nodes: int,
+) -> tuple[str, int, float | None, list[tuple[int, int, int]]]:
+    """The reference search: `(status, expanded, cost, cells)`, status found/exhausted/budget.
 
-    Steps up to the profile's step height and drops within its no-damage fall distance are
-    allowed between neighbouring columns; the cost of a move is its true 3D length, so the
-    returned distance is in world units and stairs cost what they actually cost. The heuristic
-    is straight-line distance, which never exceeds the remaining path and so cannot make A*
-    return a long route.
-
-    Complexity is `O(E log V)` over the walkable graph, with at most 8 horizontal neighbours
-    per cell. A definite "no" comes from the cached component labelling rather than from
-    exhausting the search; a route blocked only in one direction — a ledge that can be walked
-    off but not climbed — still costs a full search of its component. Never raises: an
-    unreachable pair is a result, not an error.
+    Kept as the definition the native search (`routesearch`) is tested against, and as the
+    fallback when the loaded kernel predates it.
     """
-    start = grid.nearest_walkable(from_xyz, radius=snap_radius)
-    goal = grid.nearest_walkable(to_xyz, radius=snap_radius)
-    limit = grid.cell * 4 if snap_radius is None else snap_radius
-    if start is None or goal is None:
-        which = "start" if start is None else "goal"
-        return {
-            "reachable": False,
-            "reason": (
-                f"no walkable cell within {limit:g} units of the {which} position "
-                f"{list(from_xyz if start is None else to_xyz)}"
-            ),
-            "distance": None,
-            "nodes_expanded": 0,
-            "path": [],
-        }
-
-    (start_cell, start_snap), (goal_cell, goal_snap) = start, goal
-    labels = grid.components()
-    if labels.get(start_cell) != labels.get(goal_cell):
-        return {
-            "reachable": False,
-            "reason": (
-                "the two positions are in different connected components of the walkable "
-                "grid; at this cell size nothing links them"
-            ),
-            "distance": None,
-            "nodes_expanded": 0,
-            "path": [],
-            "from_cell": list(start_cell),
-            "to_cell": list(goal_cell),
-            "snap_distance": [round(start_snap, 2), round(goal_snap, 2)],
-            "components": [labels.get(start_cell), labels.get(goal_cell)],
-        }
-
     goal_point = grid.centre(goal_cell)
 
     def heuristic(cell: tuple[int, int, int]) -> float:
@@ -2322,16 +2276,7 @@ def path_distance(
         if current == goal_cell:
             break
         if expanded > max_nodes:
-            return {
-                "reachable": False,
-                "reason": (
-                    f"gave up after expanding {max_nodes:,} nodes (max_nodes); the grid may be "
-                    "finer than this search budget allows"
-                ),
-                "distance": None,
-                "nodes_expanded": expanded,
-                "path": [],
-            }
+            return "budget", expanded, None, []
         cost_here = best[current]
         for neighbour, step in grid.neighbours(current):
             if neighbour in closed:
@@ -2344,32 +2289,180 @@ def path_distance(
                 heapq.heappush(open_heap, (candidate + heuristic(neighbour), tie, neighbour))
 
     if goal_cell not in best:
+        return "exhausted", expanded, None, []
+    cells = [goal_cell]
+    while cells[-1] != start_cell:
+        cells.append(came[cells[-1]])
+    cells.reverse()
+    return "found", expanded, best[goal_cell], cells
+
+
+def _astar(
+    grid: NavGrid,
+    start_cell: tuple[int, int, int],
+    goal_cell: tuple[int, int, int],
+    max_nodes: int,
+    bound: float | None = None,
+    engine: str = "auto",
+) -> tuple[str, int, bool, float | None, list[tuple[int, int, int]]]:
+    """`(status, expanded, pruned, cost, cells)`, by the native search when the kernel has it.
+
+    `engine` is `auto`, `native` or `python`. `bound` (native only) prunes every node whose
+    straight-line lower bound on a route through it exceeds the bound.
+    """
+    from . import routesearch  # noqa: PLC0415
+
+    if engine == "python" or (engine == "auto" and not routesearch.available()):
+        if bound is not None:
+            raise AnalysisError("a search bound needs the native route search; rebuild the kernel")
+        status, expanded, cost, cells = _astar_python(grid, start_cell, goal_cell, max_nodes)
+        return status, expanded, False, cost, cells
+    with routesearch.LOCK:
+        graph, expand = routesearch.step_graph(grid)
+        status, expanded, pruned, cost, path = graph.search(
+            [(0, *start_cell)],
+            [(0, *goal_cell)],
+            [grid.centre(goal_cell)],
+            expand,
+            max_nodes=max_nodes,
+            budget="after_goal_test",
+            bound=bound,
+        )
+    return status, expanded, pruned, cost, [(x, y, z) for _layer, x, y, z in path]
+
+
+def path_distance(
+    grid: NavGrid,
+    from_xyz: tuple[float, float, float],
+    to_xyz: tuple[float, float, float],
+    *,
+    max_nodes: int = MAX_A_STAR_NODES,
+    max_path_points: int = 48,
+    snap_radius: float | None = None,
+    max_detour: float | None = None,
+    use_components: bool = True,
+    engine: str = "auto",
+    _snapped: tuple | None = None,
+) -> dict[str, Any]:
+    """Shortest walkable distance between two world positions, by A* over the grid.
+
+    Steps up to the profile's step height and drops within its no-damage fall distance are
+    allowed between neighbouring columns; the cost of a move is its true 3D length, so the
+    returned distance is in world units and stairs cost what they actually cost. The heuristic
+    is straight-line distance, which never exceeds the remaining path and so cannot make A*
+    return a long route.
+
+    Complexity is `O(E log V)` over the walkable graph, with at most 8 horizontal neighbours
+    per cell. A definite "no" comes from the cached component labelling rather than from
+    exhausting the search; a route blocked only in one direction — a ledge that can be walked
+    off but not climbed — still costs a full search of its component. Never raises: an
+    unreachable pair is a result, not an error.
+
+    The search runs in the kernel (`routesearch`), which learns each cell's edges once per
+    grid, so later queries over the same grid get cheaper. `max_detour` bounds the answer:
+    a route longer than `max_detour` times the straight line is not looked for (the search
+    stays inside the ellipse such a route could use) and the pair reports
+    `exceeds_max_detour`. `use_components=False` skips labelling the whole grid; a pair in
+    different components is then found unreachable by the search (or the bound) instead,
+    with the same answer and a less specific reason.
+    """
+    if _snapped is None:
+        start = grid.nearest_walkable(from_xyz, radius=snap_radius)
+        goal = grid.nearest_walkable(to_xyz, radius=snap_radius)
+    else:
+        start, goal = _snapped
+    limit = grid.cell * 4 if snap_radius is None else snap_radius
+    if start is None or goal is None:
+        which = "start" if start is None else "goal"
         return {
             "reachable": False,
             "reason": (
+                f"no walkable cell within {limit:g} units of the {which} position "
+                f"{list(from_xyz if start is None else to_xyz)}"
+            ),
+            "distance": None,
+            "nodes_expanded": 0,
+            "path": [],
+        }
+
+    (start_cell, start_snap), (goal_cell, goal_snap) = start, goal
+    labels = grid.components() if use_components else None
+    if labels is not None and labels.get(start_cell) != labels.get(goal_cell):
+        return {
+            "reachable": False,
+            "reason": (
+                "the two positions are in different connected components of the walkable "
+                "grid; at this cell size nothing links them"
+            ),
+            "distance": None,
+            "nodes_expanded": 0,
+            "path": [],
+            "from_cell": list(start_cell),
+            "to_cell": list(goal_cell),
+            "snap_distance": [round(start_snap, 2), round(goal_snap, 2)],
+            "components": [labels.get(start_cell), labels.get(goal_cell)],
+        }
+
+    straight = math.dist(from_xyz, to_xyz)
+    bound = None
+    if max_detour is not None:
+        # The reported ratio divides the cell-to-cell cost by the requested straight line,
+        # so bound that product, but never below the gap between the snapped cells.
+        bound = max(
+            max_detour * straight, math.dist(grid.centre(start_cell), grid.centre(goal_cell))
+        )
+    status, expanded, pruned, cost, cells = _astar(
+        grid, start_cell, goal_cell, max_nodes, bound=bound, engine=engine
+    )
+    if status == "budget":
+        return {
+            "reachable": False,
+            "reason": (
+                f"gave up after expanding {max_nodes:,} nodes (max_nodes); the grid may be "
+                "finer than this search budget allows"
+            ),
+            "distance": None,
+            "nodes_expanded": expanded,
+            "path": [],
+        }
+    if status == "exhausted":
+        if pruned:
+            reason = (
+                f"no walkable route within max_detour={max_detour:g} times the straight line "
+                f"({bound:.2f} units); a longer one was not looked for"
+            )
+        elif labels is not None:
+            reason = (
                 "no walkable route leads there, though the two are in the same component — "
                 "usually a one-way drop, which can be walked off but not climbed back up"
-            ),
+            )
+        else:
+            reason = (
+                "no walkable route leads there: the two are not connected, or only by a "
+                "one-way drop that can be walked off but not climbed back up"
+            )
+        row = {
+            "reachable": False,
+            "reason": reason,
             "distance": None,
             "nodes_expanded": expanded,
             "path": [],
             "from_cell": list(start_cell),
             "to_cell": list(goal_cell),
         }
+        if pruned:
+            row["exceeds_max_detour"] = True
+        return row
 
-    cells = [goal_cell]
-    while cells[-1] != start_cell:
-        cells.append(came[cells[-1]])
-    cells.reverse()
+    assert cost is not None
     points = [[round(v, 2) for v in grid.centre(c)] for c in cells]
     decimated = _decimate(points, max_path_points)
-    straight = math.dist(from_xyz, to_xyz)
 
     return {
         "reachable": True,
-        "distance": round(best[goal_cell], 2),
+        "distance": round(cost, 2),
         "straight_line": round(straight, 2),
-        "detour_ratio": round(best[goal_cell] / straight, 3) if straight > 0 else None,
+        "detour_ratio": round(cost / straight, 3) if straight > 0 else None,
         "nodes_expanded": expanded,
         "path_cells": len(cells),
         "path": decimated,
@@ -2378,6 +2471,78 @@ def path_distance(
         "to_cell": list(goal_cell),
         "snap_distance": [round(start_snap, 2), round(goal_snap, 2)],
     }
+
+
+#: Most pairs one `path_distances` call takes.
+MAX_LINKS = 20_000
+#: Fewest pairs for which a batch learns its cells ahead, in parallel.
+PREFETCH_MIN_LINKS = 32
+
+
+def path_distances(
+    grid: NavGrid,
+    pairs: list,
+    *,
+    max_nodes: int = MAX_A_STAR_NODES,
+    snap_radius: float | None = None,
+    max_detour: float | None = None,
+    with_paths: bool = False,
+    max_path_points: int = 48,
+    use_components: bool | None = None,
+    engine: str = "auto",
+    workers: int | None = None,
+) -> list[dict[str, Any]]:
+    """`path_distance` for many `(from_xyz, to_xyz)` pairs over one grid, in order.
+
+    The batch form of a link check: each cell's edges are learned once and shared by every
+    pair, and an endpoint that repeats (a waypoint with several links) snaps once. Rows are
+    `path_distance` results, without `path` unless `with_paths`.
+
+    `use_components` defaults to whether the grid has labelled its components already:
+    labelling costs a pass over every cell, which a batch of short links on a large grid
+    would otherwise pay for nothing. Reachability and distances are the same either way.
+
+    A large batch first learns the cells around its links in `workers` forked processes
+    (default `routesearch.workers()`; 1 = learn lazily, one cell at a time, as a single
+    query does). The graph is the same either way, and so are the answers.
+    """
+    from . import routesearch  # noqa: PLC0415
+
+    if len(pairs) > MAX_LINKS:
+        raise AnalysisError(f"at most {MAX_LINKS:,} pairs per call, got {len(pairs):,}")
+    if engine != "python" and routesearch.available() and len(pairs) >= PREFETCH_MIN_LINKS:
+        graph, expand = routesearch.step_graph(grid)
+        near = routesearch.cells_near(grid, pairs, routesearch.link_pad(grid, max_detour))
+        routesearch.learn(graph, expand, [(0, *c) for c in near], processes=workers)
+    if use_components is None:
+        use_components = getattr(grid, "_components", None) is not None
+    snaps: dict[tuple, Any] = {}
+
+    def snap(point: tuple[float, float, float]):
+        if point not in snaps:
+            snaps[point] = grid.nearest_walkable(point, radius=snap_radius)
+        return snaps[point]
+
+    rows = []
+    for a, b in pairs:
+        a, b = tuple(a), tuple(b)
+        row = path_distance(
+            grid,
+            a,
+            b,
+            max_nodes=max_nodes,
+            max_path_points=max_path_points,
+            snap_radius=snap_radius,
+            max_detour=max_detour,
+            use_components=use_components,
+            engine=engine,
+            _snapped=(snap(a), snap(b)),
+        )
+        if not with_paths:
+            row.pop("path", None)
+            row.pop("path_decimated", None)
+        rows.append(row)
+    return rows
 
 
 # ---------------------------------------------------------------------------
