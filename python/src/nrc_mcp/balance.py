@@ -52,7 +52,7 @@ def _waves(data: dict, game_map, text: str | None) -> tuple[dict, list[str]]:
     if text is not None:
         live = mapscript.names(script_spec, game_map.entities())
         try:
-            blocks = mapscript.parse(text, mapscript.brace_actions(script_spec))
+            blocks = mapscript.parse_spec(text, script_spec)
         except mapscript.ScriptSyntaxError as e:
             blocks = []
             parse_error = True

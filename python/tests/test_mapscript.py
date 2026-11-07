@@ -578,3 +578,211 @@ def test_a_reference_can_skip_the_old_numeric_syntax(tmp_path, monkeypatch):
         if f.code == "MAPSCRIPT_UNRESOLVED_REFERENCE"
     ]
     assert len(found) == 1 and "nowhere" in found[0]
+
+
+# ---------------------------------------------------------------------------
+# The engine's tokenizer, quirk by quirk (qcommon/q_shared.c COM_ParseExt, g_script.c)
+# ---------------------------------------------------------------------------
+
+ETL_LIKE = {
+    **SPEC,
+    "brace_actions": ["set", "create", "delete"],
+    "tokenizer": {"high_bytes": "whitespace"},
+    "actions": [*SPEC["actions"], "set", "delete", "print", "wm_announce"],
+}
+
+
+def _acts(text: str, spec: dict = ETL_LIKE) -> list[tuple[str, list[str]]]:
+    return [
+        (a.name, a.args)
+        for b in mapscript.parse_spec(text, spec)
+        for e in b.events
+        for a in e.actions
+    ]
+
+
+def test_a_lone_carriage_return_is_no_line_break_so_arguments_run_on():
+    crlf = "a\r\n{\r\n spawn\r\n {\r\n  wait 5\r\n  wait 6\r\n }\r\n}\r\n"
+    assert _acts(crlf) == [("wait", ["5"]), ("wait", ["6"])]
+    with pytest.raises(mapscript.ScriptSyntaxError, match="end of script"):
+        mapscript.parse_spec(crlf.replace("\r\n", "\r"), ETL_LIKE)
+
+
+def test_a_line_break_inside_a_comment_or_a_quote_does_not_end_the_arguments():
+    text = 'a\n{\n spawn\n {\n  wait 5 /* one\n two */ 6\n  wm_announce "x\ny" z\n }\n}\n'
+    assert _acts(text) == [("wait", ["5", "6"]), ("wm_announce", ["x\ny", "z"])]
+
+
+def test_an_empty_quoted_token_ends_the_arguments_and_reads_as_the_end_elsewhere():
+    """In the running block `wait "" 5` is a wait and an action named 5; every entity that
+    skips the block reads the "" as the end of the script."""
+    running, _ = mapscript._read_block(
+        mapscript.tokenize('a\n{\n spawn\n {\n  wait "" 5\n }\n}\n'), 0, 0, frozenset()
+    )
+    assert [(x.name, x.args) for x in running.events[0].actions] == [("wait", []), ("5", [])]
+    for text in ('""\na\n{\n}\n', 'a\n{\n spawn ""\n {\n }\n}\n', 'a\n{\n e\n {\n  w ""\n }\n}\n'):
+        with pytest.raises(mapscript.ScriptSyntaxError, match='empty ""'):
+            mapscript.parse_spec(text, ETL_LIKE)
+
+
+def test_bytes_past_ascii_split_words_on_a_signed_char_build_but_not_inside_quotes():
+    word = "wait\xe95"
+    assert [t.text for t in mapscript.tokenize(word, high_bytes_split=True)] == ["wait", "5"]
+    assert [t.text for t in mapscript.tokenize(word)] == [word]
+    assert [t.text for t in mapscript.tokenize('"a\xe9b"', high_bytes_split=True)] == ["a\xe9b"]
+
+
+def test_a_backslash_quote_is_the_engines_nested_string():
+    (t,) = mapscript.tokenize(r'"say \"hi\" now"')
+    assert t.text == 'say "hi" now'
+
+
+def test_any_number_of_entity_keywords_may_come_before_a_name():
+    (b,) = mapscript.parse("entity Entity gate\n{\n}\n")
+    assert b.name == "gate"
+
+
+def test_a_brace_on_an_action_line_reads_differently_when_the_block_is_skipped():
+    """Run, `wait 5 }` is a wait with two arguments; skipped, the `}` ends the event."""
+    text = "a\n{\n spawn\n {\n  wait 5 }\n }\n}\nb\n{\n}\n"
+    running, _ = mapscript._read_block(mapscript.tokenize(text), 0, 0, frozenset())
+    assert running.events[0].actions[0].args == ["5", "}"]
+    with pytest.raises(mapscript.ScriptSyntaxError, match="not expected"):
+        mapscript.parse(text)
+    # Where the skipping reading still makes sense of the rest, the two readings disagree:
+    # skipped, the quoted "{x" opens a level and `b` reads as a second event of block a.
+    text = 'a\n{\n spawn\n {\n  print "{x"\n }\n}\nb\n{\n}\n}\n'
+    with pytest.raises(mapscript.ScriptSyntaxError, match="when it runs"):
+        mapscript.parse(text)
+
+
+# ---------------------------------------------------------------------------
+# Edits that used to be written and then broke the file (audit S-F1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("block_name", "params", "actions"),
+    [
+        ("gate", [], ["set {targetname foo}"]),
+        ("gate", [], ['set { "a" "}b" }']),
+        ("gate", [], ["set { a b // c }"]),
+        ("gate", [], ["wait 50 /*"]),
+        ("gate", [], ["wait 50 /* note */"]),
+        ("gate", ["/*x"], ["wait 50"]),
+        ("entity", [], ["wait 50"]),
+        ("gate", [], ["set { a } wait 5 }"]),
+        ("gate", [], ['wait ""']),
+        ("gate", [], [r'print "a \"b\" c"']),
+        ("gate", [], ["wm_announce café"]),
+        ("gate", [], ['wm_announce "open']),
+        ("café", [], ["wait 50"]),
+    ],
+)
+def test_an_edit_that_would_break_out_of_its_event_is_refused(block_name, params, actions):
+    with pytest.raises(mapscript.ScriptEditError):
+        mapscript.set_event(EDITABLE, ETL_LIKE, block_name, "trigger", params, actions)
+
+
+def test_an_edit_is_parsed_again_and_must_read_as_asked(monkeypatch):
+    """The last line of defence, past every per-line check: a re-parse that disagrees."""
+
+    def lenient(line, _spec):
+        return mapscript.Action(line.split()[0], line.split()[1:], 0)
+
+    monkeypatch.setattr(mapscript, "_line_action", lenient)
+    with pytest.raises(mapscript.ScriptEditError, match="differently|could not read"):
+        mapscript.set_event(EDITABLE, ETL_LIKE, "gate", "trigger", ["x"], ["wait 5 }"])
+
+
+def test_text_past_ascii_is_written_as_utf8_inside_quotes():
+    new, _ = mapscript.set_event("", ETL_LIKE, "gm", "spawn", [], ['wm_announce "Café"'])
+    assert mapscript.encode(new).count("Café".encode()) == 1
+    (action,) = mapscript.parse_spec(new, ETL_LIKE)[0].events[0].actions
+    assert mapscript.to_user(action.args[0]) == "Café"
+
+
+RAW = (
+    b"// caf\xc3\xa9 \x81 notes\r\ngame_manager\r\n{\r\n\tspawn\r\n\t{\r\n\t\twait 50\r\n"
+    b'\t\twm_announce "Caf\xc3\xa9"\r\n\t}\r\n}\r\n\r\ngate\r\n{\r\n\tdeath\r\n\t{\r\n'
+    b"\t\twait 10\r\n\t}\r\n}\r\n"
+)
+
+
+def test_an_edit_keeps_every_byte_it_does_not_touch():
+    """CRLF line ends, UTF-8 and an undecodable byte all come back as they were (audit S-F2)."""
+    text = mapscript.decode(RAW)
+    same, did = mapscript.set_event(
+        text, ETL_LIKE, "game_manager", "spawn", [], ["wait 50", 'wm_announce "Café"']
+    )
+    assert did == "unchanged" and mapscript.encode(same) == RAW
+    new, did = mapscript.set_event(text, ETL_LIKE, "gate", "death", [], ["wait 20"])
+    assert did == "replaced event"
+    assert mapscript.encode(new) == RAW.replace(b"wait 10", b"wait 20")
+    added, _ = mapscript.set_event(text, ETL_LIKE, "gate", "trigger", ["open"], ["wait 1"])
+    assert b"\n" not in mapscript.encode(added).replace(b"\r\n", b""), "new lines match CRLF"
+    gone = mapscript.remove(text, ETL_LIKE, "gate")
+    assert mapscript.encode(gone) == RAW[: RAW.index(b"\r\n\r\ngate")] + b"\r\n"
+
+
+def test_every_action_shown_is_a_line_set_event_takes_back():
+    """script_show's text for an action parses back to that action (audit S-F6)."""
+    text = (
+        'a\n{\n spawn\n {\n  wm_announce "Axis Bunker" 0\n  set { "origin" "0 0 1" }\n'
+        '  print "//y" "a\xc3\xa9" "/*z"\n  delete { a }\n }\n}\n'
+    )
+    braced = mapscript.brace_actions(ETL_LIKE)
+    actions = [a for b in mapscript.parse_spec(text, ETL_LIKE) for e in b.events for a in e.actions]
+    assert len(actions) == 4
+    for a in actions:
+        line = mapscript.action_text(a, braced)
+        new, _ = mapscript.set_event("", ETL_LIKE, "a", "spawn", [], [mapscript.to_user(line)])
+        (again,) = mapscript.parse_spec(new, ETL_LIKE)[0].events[0].actions
+        assert (again.name, again.args) == (a.name, a.args), line
+
+
+def test_removing_a_block_removes_its_dead_copies_too():
+    """Removing only the first would make a forgotten copy the one that runs (audit S-F5)."""
+    text = EDITABLE + "\ngate\n{\n\tspawn\n\t{\n\t\twait 1\n\t}\n}\n"
+    out = mapscript.remove(text, ETL_LIKE, "gate")
+    assert [b.name for b in mapscript.parse(out)] == ["game_manager"]
+
+
+def test_a_create_in_a_block_that_never_runs_spawns_nothing(tmp_path, spec):
+    """Only a live first-of-name block spawns, so a dead one cannot hide an error (S-F4)."""
+    made = 'create { "scriptname" "made" "targetname" "lever" }'
+    dead = block("nobody", ("spawn", [made])) + block(
+        "game_manager", ("spawn", ["alertentity lever"])
+    )
+    assert "MAPSCRIPT_UNRESOLVED_REFERENCE" in check(tmp_path, dead, [ent(0, "manager")])
+    dup = block("game_manager", ("spawn", ["alertentity lever"])) + block(
+        "game_manager", ("spawn", [made])
+    )
+    assert "MAPSCRIPT_UNRESOLVED_REFERENCE" in check(tmp_path, dup, [ent(0, "manager")])
+    live = block("game_manager", ("spawn", [made, "alertentity lever"]))
+    assert "MAPSCRIPT_UNRESOLVED_REFERENCE" not in check(tmp_path, live, [ent(0, "manager")])
+    # A spawned entity's own block runs, and what it spawns is real too: a fixed point.
+    chain = block("game_manager", ("spawn", [made])) + block(
+        "made", ("spawn", ['create { "targetname" "far" }', "alertentity far"])
+    )
+    assert "MAPSCRIPT_UNRESOLVED_REFERENCE" not in check(tmp_path, chain, [ent(0, "manager")])
+
+
+def test_trigger_self_needs_the_event_in_the_running_block(tmp_path, monkeypatch):
+    """`trigger self open` runs the caller's own `trigger open` (audit S-F10)."""
+    refs = [dict(SPEC["references"][0], self=["self"]), *SPEC["references"][1:]]
+    spec = {**SPEC, "references": refs}
+    monkeypatch.setattr(profiles, "load", lambda _pid: {"mapscript": spec})
+    missing = block("game_manager", ("spawn", ["trigger self open"]))
+    assert "MAPSCRIPT_MISSING_EVENT" in check(tmp_path, missing, [ent(0, "manager")])
+    there = block("game_manager", ("spawn", ["trigger self open"]), ("trigger open", ["wait 1"]))
+    assert "MAPSCRIPT_MISSING_EVENT" not in check(tmp_path, there, [ent(0, "manager")])
+
+
+def test_the_shipped_profile_reads_the_script_as_the_engine_does():
+    if "etl" not in profiles.available():
+        pytest.skip("no ET: Legacy profile on disk")
+    spec = profiles.load("etl")["mapscript"]
+    assert mapscript.high_bytes_split(spec)
+    trig = next(r for r in spec["references"] if r["action"] == "trigger")
+    assert trig.get("self") == ["self"]

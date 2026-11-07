@@ -469,7 +469,7 @@ class Script:
     def __init__(self, text: str, spec: dict, meta: dict):
         self.meta = meta.get("script") or {}
         try:
-            blocks = mapscript.parse(text, mapscript.brace_actions(spec)) if text else []
+            blocks = mapscript.parse_spec(text, spec) if text else []
         except mapscript.ScriptSyntaxError:
             blocks = []
         self.blocks = {b.name.casefold(): b for b in blocks}

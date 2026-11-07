@@ -439,7 +439,7 @@ def bot_waypoints_write(
             bots,
             waypoint_file.waypoints,
             extras,
-            script_text=script_data.decode("utf-8", errors="replace") if script_data else None,
+            script_text=mapscript.decode(script_data) if script_data else None,
             given=spots,
             auto=bool(auto_spots),
             header=f"{goals_spec.get('comment', '')} for {stem}".strip(),
