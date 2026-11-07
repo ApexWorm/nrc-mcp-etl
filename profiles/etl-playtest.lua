@@ -86,7 +86,13 @@ local function sample(time)
         winner = winner == "0" and "red" or winner == "1" and "blue" or "none",
         charge_count = charges, armed_charges = armed, charge_position = chargeAt
     }, entities = entities}
-    et.G_Print("NRC_PLAYTEST " .. token .. " " .. json(packet) .. "\n")
+    -- et.G_Print copies into a 1024-byte buffer (src/game/g_lua.c:193) and drops the rest,
+    -- newline included; print in pieces under that and end the line once.
+    local line = "NRC_PLAYTEST " .. token .. " " .. json(packet)
+    for i = 1, #line, 1000 do
+        et.G_Print(string.sub(line, i, i + 999))
+    end
+    et.G_Print("\n")
 end
 function et_RunFrame(time)
     if time >= nextSample then

@@ -86,8 +86,8 @@ impl Convex {
 
     /// `segment_clear(p, p)` failing on this one solid: the point is `PLANE_EPS` inside.
     fn holds_point(&self, p: [f64; 3]) -> bool {
-        for i in 0..3 {
-            if p[i] < self.mins[i] || p[i] > self.maxs[i] {
+        for ((&v, &lo), &hi) in p.iter().zip(&self.mins).zip(&self.maxs) {
+            if v < lo || v > hi {
                 return false;
             }
         }

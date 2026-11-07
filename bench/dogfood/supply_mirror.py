@@ -261,8 +261,9 @@ async def main(args):
             )
             result["engine_smoke"] = {k: receipt.get(k) for k in ("ok", "error", "result_path")}
             run.artifact("result", result)
-            # The objective flow, hand-written (objective_playtests finds no standing place
-            # it can route to on this map, mirrored or not): escort the truck a little,
+            # The objective flow, hand-written (objective_playtests only reaches what the
+            # start-of-round grid connects to a spawn, so not the truck or the objectives
+            # behind the gates): escort the truck a little,
             # dynamite the forward bunker gate, respawn in the bunker the script hands the
             # Allies, dynamite the depot gate. `position` is test setup, not a route.
             flow = json.loads(
@@ -355,7 +356,7 @@ async def main(args):
                         nav_files=nav,
                         seconds=args.bot_seconds,
                         bots=args.bot_count,
-                        port=BOT_PORT,
+                        port=args.bot_port,
                         depends=[str(source_pk3)],
                     )
                 except ToolCallError as e:
@@ -378,10 +379,11 @@ if __name__ == "__main__":
         help="also run the seeded waypoints with the mirrored stock bot script",
     )
     p.add_argument("--bot-seconds", type=float, default=300)
-    # The grids cover the whole map, sky and clip ceiling included (6912 x 6912 x 3456): 24
-    # is over the analysis cap (one cell past it); 32 is the next grid size.
-    p.add_argument("--cell", type=float, default=32)
+    # The grids cover the whole map, sky and clip ceiling included (6912 x 6912 x 3456):
+    # 40M cells at 16, which the sparse grid holds in a few megabytes.
+    p.add_argument("--cell", type=float, default=16)
     p.add_argument("--bot-count", type=int, default=8)
+    p.add_argument("--bot-port", type=int, default=BOT_PORT, help="net_port for bot_playtest")
     p.add_argument(
         "--stock-way",
         default="/root/etlegacy/etlegacy-v2.86.2-x86_64/legacy/omni-bot/et/nav/etl_supply.way",
