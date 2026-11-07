@@ -7,16 +7,17 @@
     "crates/nrc-core/src/num.rs": "cf94b10b6c116c8ea13a6a1f945f975dfffd8fee97602a65794471b084c18edb",
     "crates/nrc-core/src/winding.rs": "a0cb0d69d1e8b59879957d319c02461dd4097739cc4a7d9d561e2c748926cb79",
     "tools/bench.py": "f3f82df62c5c72ab8584ae24ec5260981bca303949264401792e23d7693afef3",
-    "tools/difftest.py": "2e9778d4fb50e8f5b50d80abb4acc655d5faf54fc71d5e2b698f45ee2a54ef3b",
-    "tools/protected.py": "40ef9001aaeebac41875f4ff6938b525ab7abb985cee3ceb8b3cd01b281d3256",
-    "tools/seam_lint.py": "29f06626f93a741e9f27c8bb638b7ec1bc3215fcddedec2c49abdee87f16afd0"
+    "tools/difftest.py": "5ef80abcf89edea9344fbdbcd322b5eff6a16ca3deeb85e3fa9c8c22da428008",
+    "tools/protected.py": "5cd8852b894ece93fe78b5dba31de38463e4dabca12585e2eb5abe100332f350",
+    "tools/seam_lint.py": "8babdcfe18a5aec65c808b6d67f785a2642fc13852b713a86773b3030cb8fefb",
+    "tools/selfdev.py": "1ec3d91567a1da2c6da07b48d061a97fd2a21f1d4153a1fa5458395e935c8225"
   },
   "note": "Hash pins for paths self-dev may not modify (\u00a711.4). Re-pinned only by a human who has reviewed the change; the loop cannot call --repin.",
   "profiles": {
-    "etl.yaml": "66d3fcfce95292ec3b5951e048ecbc2e14de5d2924420a068cd4fe86b5a6c284",
-    "urt43.yaml": "daeaa63df42c1bd37fc12f6827fdd63a75365decc83e3a6514a0af87b785c9b6"
+    "etl.yaml": "371defd81eb1b5f57f390b332880017fecabec7273a05bfd8d32629117f8a0ce",
+    "urt43.yaml": "69953784a7f87d2e734bb8a38cad08d4ed49de22b566b9e24efa039b38988a1e"
   },
   "trees": {
-    "corpus/synthetic/degenerate": "04884ab27cfe08a8c612e9f3a0506d11f9219860158f42907add46f7ddaf43c1"
+    "corpus/synthetic/degenerate": "5e84587b64d1db12f47a6917b0d896e9ee4da4a7fc0f92ff7ba77f39b544017b"
   }
 }
