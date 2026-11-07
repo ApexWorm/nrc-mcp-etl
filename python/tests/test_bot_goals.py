@@ -320,7 +320,7 @@ def test_gamemonkey_mirror_off_the_origin_reflects_positions_and_turns_direction
     assert botgoals.gm_mirror(out, coords, 0, at=100)[0] == text
     # A vector constructor may hold a place or a direction: refused, naming the line.
     with pytest.raises(botgoals.BotGoalsError, match=r"line 2: .*Vec3\( 1, 0, 0 \)"):
-        botgoals.gm_mirror('x = 1;\nFacing = Vec3( 1, 0, 0 );\n', coords, 0, at=100)
+        botgoals.gm_mirror("x = 1;\nFacing = Vec3( 1, 0, 0 );\n", coords, 0, at=100)
     # Through the origin it is still the sign flip, positions and directions alike.
     assert botgoals.gm_mirror(text, coords, 0, at=0)[0] == botgoals.gm_mirror(text, coords, 0)[0]
 

@@ -657,6 +657,49 @@ def test_a_constructible_barrier_is_a_wall_once_built(tmp_path):
 # --------------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda p: _gap_map(p, 48),
+        lambda p: _ledge_map(p, 40),
+        lambda p: _trench_map(p),
+        lambda p: _door_map(p),
+        lambda p: shutil.copytree(FIXTURE, p, dirs_exist_ok=True) and p / "maps" / "nrcroom.map",
+    ],
+    ids=["gap", "ledge", "trench", "door", "nrcroom"],
+)
+def test_learning_moves_in_workers_seeds_the_same_file(tmp_path, monkeypatch, make):
+    """The parallel path (moves and jump tests in forked workers) against the plain one,
+    byte for byte and report for report, on maps with jumps, bridges, doors and stances."""
+    from nrc_mcp import routesearch
+
+    path = make(tmp_path)
+    fmt = spec()["format"]
+    monkeypatch.setenv("NRC_ROUTE_WORKERS", "1")
+    plain_wf, plain = _seed(path, spacing=64)
+    monkeypatch.setenv("NRC_ROUTE_WORKERS", "3")
+    monkeypatch.setattr(routesearch, "PARALLEL_MIN_CELLS", 1)
+    monkeypatch.setattr(routesearch, "FORK_MAP_MIN", 1)
+    calls = {"moves": 0, "map": 0}
+    learn, fork_map = routesearch.learn_moves, routesearch.fork_map
+
+    def counted_learn(*a, **k):
+        n = learn(*a, **k)
+        calls["moves"] += n
+        return n
+
+    def counted_map(fn, items, **k):
+        calls["map"] += len(items)
+        return fork_map(fn, items, **k)
+
+    monkeypatch.setattr(routesearch, "learn_moves", counted_learn)
+    monkeypatch.setattr(routesearch, "fork_map", counted_map)
+    fast_wf, fast = _seed(path, spacing=64)
+    assert calls["moves"] > 0
+    assert botnav.write(fast_wf, fmt) == botnav.write(plain_wf, fmt)
+    assert fast == plain
+
+
 @pytest.fixture
 def nrcroom(tmp_path) -> Path:
     shutil.copytree(FIXTURE, tmp_path, dirs_exist_ok=True)

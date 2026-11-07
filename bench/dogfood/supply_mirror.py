@@ -352,7 +352,9 @@ async def main(args):
                 plays["seeded+stock_gm"] = (None, gm)
             if "waypoints" in files:
                 plays["stock_way+stock_gm"] = (files["waypoints"]["path"], gm)
+            started = time.monotonic()
             result["bots"] = {"write": await run.call("bot_waypoints_write", cell=args.cell)}
+            result["bots"]["write_seconds"] = round(time.monotonic() - started, 1)
             for label, (waypoints, nav) in plays.items():
                 try:
                     result["bots"][label] = await run.call(
