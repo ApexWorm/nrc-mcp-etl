@@ -361,9 +361,28 @@ def test_a_ledge_within_the_jump_gets_a_one_way_jump_and_drops_stay_one_way(tmp_
     assert report["one_way_connections"] >= len(down) + 1
 
 
+def test_a_ledge_above_the_bare_rise_is_reached_with_the_step_up(tmp_path):
+    # 60 is above the jump's rise (48.4 in the engine) but within jump_up_max (66, the rise
+    # plus the 18-unit step-up at the apex, measured by bench/dogfood/movement_limits.py)
+    # less the 4-unit margin.
+    phys = botnav._physics("etl", spec()["jumps"])
+    assert phys.apex < 60 <= phys.ledge - spec()["jumps"]["margin"]
+    _wf, report = _seed(_ledge_map(tmp_path, 60), spacing=128)
+    (jump,) = report["jumps"]
+    assert jump["kind"] == "ledge" and jump["rise"] == 60
+
+
+def test_the_arcs_fall_at_the_profiles_effective_gravity(tmp_path):
+    # ET's fixed physics: g_gravity 800, bodies fall at 750, so the rise is 270^2 / 1500.
+    phys = botnav._physics("etl", spec()["jumps"])
+    assert phys.gravity == 750
+    assert phys.apex == pytest.approx(48.6)
+    assert phys.ledge == 66
+
+
 def test_a_ledge_above_the_jump_gets_no_link(tmp_path):
-    # 44 > 45.56 (270^2 / 1600) less the 4-unit margin.
-    wf, report = _seed(_ledge_map(tmp_path, 44), spacing=128)
+    # 64 > jump_up_max 66 less the 4-unit margin.
+    wf, report = _seed(_ledge_map(tmp_path, 64), spacing=128)
     assert report["jumps"] == []
     assert not any(w.flags for w in wf.waypoints)
     (blue,) = report["spawn_waypoints"]["blue"]
@@ -417,8 +436,9 @@ def test_a_gap_within_every_arc_gets_jumps_both_ways(tmp_path):
 
 
 def test_a_gap_too_wide_for_the_slowest_runner_gets_no_jump(tmp_path):
-    # 64 units: a heavy-weapon carrier at 0.4 x 320 = 128 units/s lands short.
-    _wf, report = _seed(_gap_map(tmp_path, 64), spacing=128)
+    # 80 units: a heavy-weapon carrier at 0.4 x 320 = 128 units/s is 2 x 270 / 750 = 0.72 s
+    # in the air, 92 units, and takes off up to the 16-unit radius short of the brink.
+    _wf, report = _seed(_gap_map(tmp_path, 80), spacing=128)
     assert report["jumps"] == [] and report["components"]["count"] == 2
 
 

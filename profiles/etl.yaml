@@ -11,10 +11,11 @@
 #     movement constants, gametypes, engine limits, spawn selection, and the files a map
 #     ships with. Every such entry cites file:line, relative to the tree's src/ directory.
 #
-# Unlike the Urban Terror gamepack, this one carries no measuring entities, so there is no
-# empirically measured clearance here. A figure that is a literal constant in source, or exact
-# arithmetic on such constants, is `verified`. A figure that depends on simulating movement
-# (how high a jump reaches, how far a fall hurts) is derived, approximate and `unverified`.
+# Unlike the Urban Terror gamepack, this one carries no measuring entities. A figure that is a
+# literal constant in source, or exact arithmetic on such constants, is `verified`. A figure
+# that depends on simulating movement (how high a jump reaches, how far a fall hurts) was
+# measured in the engine instead (source engine_measurement: bench/dogfood/movement_limits.py,
+# which re-runs it) and is `verified` with the lanes that show it under `engine_verified`.
 #
 # CONFIDENCE SEMANTICS (hard requirement, a validator depends on it):
 #   verified    - the fact is literally present in one of the files listed under
@@ -70,6 +71,14 @@ profile:
     - id: q3map2_source
       path: "vendor/netradiant-custom tools/quake3/q3map2/"
       note: "the compiler this project drives; cited as file:line for what it does with a brush"
+    - id: engine_measurement
+      path: "bench/dogfood/movement_limits.py, scenario bench/dogfood/scenarios/movement_limits.json"
+      note: >-
+        one player driven through a hall of test lanes by engine_playtest, in ET: Legacy 2.86.2
+        (client at com_maxfps 60, default g_fixedphysics 1 / g_fixedphysicsfps 125, g_gravity
+        800, g_speed 320). The script asserts every recorded figure and re-runs in about two
+        minutes. Measured 2026-11-06 in seven runs while the lanes were narrowed down; the
+        checked-in lanes passed in both of their runs.
     - id: omnibot_source
       path: "github.com/jswigart/omni-bot, tag 0.93, directory 0.83/Omnibot/"
       note: >-
@@ -163,15 +172,17 @@ movement:
   confidence: verified
   source: etlegacy_source
   note: >-
-    Literal constants from the movement code. ET has no ledge grab or wall jump, so those
-    entries are absent rather than zero. Stance analysis checks the main prone body box;
-    separate leg collision and turning clearance are not modelled.
+    Literal constants from the movement code, and the figures that depend on how it
+    integrates a jump or a fall, measured in the engine (engine_measurement). ET has no ledge
+    grab or wall jump, so those entries are absent rather than zero. Stance analysis checks
+    the main prone body box; separate leg collision and turning clearance are not modelled.
   step_height:
     value: 18
     description: "Max height a player can walk up without needing to jump."
     confidence: verified
     source: etlegacy_source
     locus: "game/bg_local.h:51 STEPSIZE"
+    engine_verified: "movement_limits lanes `step 18` (walked up) and `step 19` (blocked)"
   headroom_stand:
     value: 72
     description: "Standing player height."
@@ -222,38 +233,92 @@ movement:
     confidence: verified
     source: etlegacy_source
     locus: "game/bg_local.h:53 JUMP_VELOCITY, applied at game/bg_pmove.c:828"
-  jump_up_max:
-    value_approx: 45.5
+  jump_rise:
+    value_approx: 48.5
     description: >-
-      Rise of a standing jump, v^2 / 2g = 270^2 / 1600 = 45.56. Approximate: the real figure
-      depends on frame-rate integration and on whether a step-up helps at the top.
-    confidence: unverified
-    source: etlegacy_source
-    locus: "derived from bg_local.h:53 and bg_public.h:55"
+      How far the feet rise in a standing jump: 270^2 / (2 x 750) = 48.6 under the effective
+      gravity below, 48.4 in 16-17 ms frames, not the 45.56 that g_gravity 800 alone gives.
+    confidence: verified
+    source: engine_measurement
+    locus: "game/bg_pmove.c:5380-5418 (fixed-physics velocity correction), game/g_cvars.c:636-637"
+    engine_verified: >-
+      movement_limits lane `jump`: highest sampled feet 48.04-48.55 above rest in six runs
+      (samples every 100 ms, so up to about 0.5 below the apex); against a wall the samples
+      reach 48.42
+  jump_up_max:
+    value: 66
+    description: >-
+      Highest ledge (brush top above the take-off floor) a standing jump lands on, holding
+      forward into its face: the jump's rise plus the step-up a falling body gets at a riser.
+      Stepping is refused while the body still rises (game/bg_slidemove.c:370-376), so at the
+      apex the body steps STEPSIZE 18 higher (:384) and across: 48.4 + 0.125 + 18 = 66.56.
+      Crouching does not raise it: a crouch lowers only the top of the box
+      (game/bg_pmove.c:2036, :2069), and a player who stops pushing into the face before the
+      apex does not step up at all.
+    confidence: verified
+    source: engine_measurement
+    locus: "game/bg_slidemove.c:362-405 (PM_StepSlideMove), game/bg_pmove.c:1298 (air moves step)"
+    engine_verified: >-
+      movement_limits lanes `ledge 40` .. `ledge 68`: 66 climbed and 67 did not in every one
+      of five runs (64 climbed in seven, 65 in six)
   fall_damage:
-    confidence: unverified
-    source: etlegacy_source
+    confidence: verified
+    source: engine_measurement
     note: >-
-      PM_CrashLand (game/bg_pmove.c:1628) computes delta = v^2 * 0.0001 from the impact speed
-      and hurts above 38.75 (bg_pmove.c:1717), kills above 77 (bg_pmove.c:1674). The drops
-      below convert those thresholds to a free fall from rest at gravity 800 (h = v^2 / 1600).
-      Derived, not measured: frame timing moves them by a few units.
+      PM_CrashLand (game/bg_pmove.c:1594-1628) solves the impact speed v within the landing
+      frame and takes delta = v^2 * 0.0001; delta above 38.75, 48, 58, 67 and 77
+      (bg_pmove.c:1674-1717) sends the events G_FallDamage turns into 10, 15, 25 and 50
+      damage, and above 77 a gib (game/g_active.c:981-1014; GIB_DAMAGE, bg_public.h:59). Under
+      the effective gravity 750 (gravity below) a fall from rest reaches those at drops of
+      258.3, 320, 386.7, 446.7 and 513.3 units; the frame timing of each landing moves them by
+      under a unit, so the heights on either side of a band edge (258, 320, 513) go either
+      way. Drops are floor to floor (the body rests 0.125 above both). Standing water cuts
+      delta to 0.5 or 0.25 and full submersion to none (bg_pmove.c:1631-1647); a
+      SURF_NODAMAGE floor never hurts (:1659). Damage during the 3 s spawn shield is ignored
+      (game/g_client.c:3322, game/g_combat.c:1601).
+    engine_verified: >-
+      movement_limits lanes `fall 256` .. `fall 514` (each walked off from a fresh spawn at
+      100 health, after the spawn shield): every band below in four runs; 258 cost 10 in one
+      run of three and 513 killed in one run of two
     thresholds:
-      - {band: none, max_drop: 242, description: "Largest drop that costs no health (delta 38.75).",
-         confidence: unverified, source: etlegacy_source}
-      - {band: fatal, min_drop: 481, description: "A drop from this or higher kills outright (delta 77).",
-         confidence: unverified, source: etlegacy_source}
+      - {band: none, max_drop: 257, damage: 0, confidence: verified, source: engine_measurement,
+         description: "Largest drop that costs no health (256 and 257 in every run; 258 hurt in one of three)."}
+      - {band: light, min_drop: 259, max_drop: 319, damage: 10, confidence: verified, source: engine_measurement,
+         description: "Costs 10 health (EV_FALL_DMG_10); 320 cost 10 in its one run."}
+      - {band: medium, min_drop: 321, max_drop: 386, damage: 15, confidence: verified, source: engine_measurement,
+         description: "Costs 15 health (EV_FALL_DMG_15)."}
+      - {band: heavy, min_drop: 387, max_drop: 446, damage: 25, confidence: verified, source: engine_measurement,
+         description: "Costs 25 health (EV_FALL_DMG_25)."}
+      - {band: severe, min_drop: 447, max_drop: 512, damage: 50, confidence: verified, source: engine_measurement,
+         description: "Costs 50 health (EV_FALL_DMG_50), so it kills a player left with 50 or less."}
+      - {band: fatal, min_drop: 514, damage: gib, confidence: verified, source: engine_measurement,
+         description: "A drop from this or higher gibs outright (EV_FALL_NDIE); 513 killed in one run of two."}
   gravity:
     default: 800
+    effective: 750
+    description: >-
+      g_gravity is 800, but with g_fixedphysics on (the default, fps 125) each move adds back
+      the velocity a 125 fps client loses to rounding: gravity x 8 ms = 6.4 rounds to 6, so
+      0.4 per 8 ms, 50 units/s^2 whatever the frame time. Airborne bodies fall at 750, which
+      is what jump_rise and the fall bands follow. A server that sets g_fixedphysics 0 rounds
+      velocity to whole units each move instead (:5423), and those figures change with the
+      frame rate; they were not measured that way.
     confidence: verified
     source: etlegacy_source
-    locus: "game/bg_public.h:55 DEFAULT_GRAVITY; g_gravity default at game/g_cvars.c:434"
+    locus: >-
+      game/bg_public.h:55 DEFAULT_GRAVITY; g_gravity default at game/g_cvars.c:434;
+      g_fixedphysics 1 and g_fixedphysicsfps 125 at game/g_cvars.c:636-637, the correction
+      at game/bg_pmove.c:5380-5418 (instead of the velocity snap at :5423)
+    engine_verified: "movement_limits lanes `jump` and `fall *` (both match 750, not 800)"
   run_speed:
     value: 320
-    description: "Default g_speed, in units per second; an input to idealized route-time estimates."
+    description: >-
+      Default g_speed, in units per second; an input to idealized route-time estimates.
+      Players move at a scale of it: running 0.8 (256), sprinting 1.1 (352), PM_CmdScale.
     confidence: verified
     source: etlegacy_source
-    locus: "game/g_cvars.c:433"
+    locus: "game/g_cvars.c:433; scales game/g_client.c:3242-3243, applied at game/bg_pmove.c:658-666"
+    engine_verified: "movement_limits lanes `run` (256.0) and `sprint` (352.0)"
 
 # Which shader contents stop a player, for patch collision in the movement analysis. The
 # compiler's default table (shared by every game, and kept in code) already clears solid for
@@ -4500,8 +4565,11 @@ bots:
   # take-off -> landing link needs the jump; nothing else leads through the take-off.
   #
   # Physics, all from the movement section: a jump gives jump_velocity up (bg_pmove.c:828)
-  # under gravity, so it rises v^2/2g = 45.6. A ledge is linked when its top (measured
-  # exactly, not by cell) is at most that minus `margin` above the take-off floor and the
+  # under the effective gravity (750 with ET's fixed physics), so it rises v^2/2g = 48.6.
+  # A ledge is linked when its top (measured exactly, not by cell) is at most
+  # movement.jump_up_max (66: that rise plus the step-up a falling body pushing into the
+  # riser gets at the apex, bg_slidemove.c:370-384; measured with a player holding forward,
+  # bench/dogfood/movement_limits.py) minus `margin` above the take-off floor, and the
   # standing box sweeps clear straight up then across onto it: a bot that meets the riser
   # early slides up its face, and the add-on's JUMPLOW on the landing re-presses jump while
   # the riser is ahead. Pressing jump does not change horizontal speed (bg_pmove.c:782-831)
@@ -4512,7 +4580,6 @@ bots:
   # speed_scales x movement.run_speed: 0.4 = runSpeedScale 0.8 (g_client.c:3242) x 0.5 for
   # an unskilled heavy-weapon carrier (bg_pmove.c:673-695), 1.1 = sprintSpeedScale
   # (g_client.c:3243). Landings may be lower than the take-off only by the grids' safe drop.
-  # Nothing assumes the step-up a falling body gets at a riser (bg_slidemove.c:370).
   # `detour`: a jump is only added between two areas whose walking route in the seeded
   # graph is missing or longer than detour x the straight distance, so bots keep walking
   # where walking works. `tries`: candidate brinks tested per pair of areas.

@@ -5,7 +5,9 @@ a 48-unit gap over a fatal shaft to jump across, then a 192-unit wall with a lad
 top of which the Allies spawn beside the radio the Axis must destroy. Walking alone reaches
 none of it, so a bot that gets to the radio has used every one of the three.
 
-`--bots PORT` also runs `bot_playtest` on the packed map with the seeded waypoints.
+`--bots PORT` also runs `bot_playtest` on the packed map with the seeded waypoints. `--ledge`
+raises the ledge (and the floor beyond it) from 40, e.g. to 56 (the map grid is 8): above
+the jump's bare rise (48.4), within `movement.jump_up_max` (66) less the jump margin.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import json
 
 from dogfood_session import DogfoodSession
 
-LEDGE = 40  # zone 1 floor at 0; within the jump's rise less the profile's margin
+LEDGE = 40  # zone 1 floor at 0; within movement.jump_up_max less the profile's margin
 GAP = (880, 928)  # the shaft, x; 48 wide
 UPPER = 232  # the top floor, 192 above the gap's far side
 SHAFT_FLOOR = -528  # 568 below the ledge: a fall there kills
@@ -26,7 +28,7 @@ def box(lo, hi):
     return {"op": "box", "min": lo, "max": hi}
 
 
-async def build(bots_port: int | None, seconds: float, bots: int):
+async def build(bots_port: int | None, seconds: float, bots: int, ledge: int = LEDGE):
     async with DogfoodSession("traversal") as run:
         call = run.call
         await call("profile_summary")
@@ -50,12 +52,12 @@ async def build(bots_port: int | None, seconds: float, bots: int):
             {"op": "hollow", "solid": box([-32, -32, -560], [1632, 288, 448]), "thickness": 32},
         )
         await solid("start_floor", box([0, 0, -528], [512, 256, 0]))
-        await solid("ledge", box([512, 0, -528], [GAP[0], 256, LEDGE]), metal)
-        await solid("far_side", box([GAP[1], 0, -528], [1216, 256, LEDGE]), metal)
+        await solid("ledge", box([512, 0, -528], [GAP[0], 256, ledge]), metal)
+        await solid("far_side", box([GAP[1], 0, -528], [1216, 256, ledge]), metal)
         await solid("upper_floor", box([1216, 0, -528], [1600, 256, UPPER]))
         # The ladder: a thin brush of the base game's ladder shader against the upper wall.
-        await solid("ladder", box([1200, 96, LEDGE], [1216, 160, UPPER]), "common/ladder", True)
-        await solid("ladder_rungs", box([1208, 96, LEDGE], [1216, 160, UPPER]), metal, True)
+        await solid("ladder", box([1200, 96, ledge], [1216, 160, UPPER]), "common/ladder", True)
+        await solid("ladder_rungs", box([1208, 96, ledge], [1216, 160, UPPER]), metal, True)
 
         spawn_ids = {}
         for team, classname, xs, z, marker, flag, angle in (
@@ -232,5 +234,6 @@ if __name__ == "__main__":
     parser.add_argument("--bots", type=int, metavar="PORT", help="also run bot_playtest on PORT")
     parser.add_argument("--seconds", type=float, default=300)
     parser.add_argument("--count", type=int, default=8, help="bots to add")
+    parser.add_argument("--ledge", type=int, default=LEDGE, help="ledge height (default 40)")
     args = parser.parse_args()
-    asyncio.run(build(args.bots, args.seconds, args.count))
+    asyncio.run(build(args.bots, args.seconds, args.count, args.ledge))

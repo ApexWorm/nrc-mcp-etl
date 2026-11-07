@@ -1,0 +1,735 @@
+{
+  "steps": [
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40
+    },
+    {
+      "action": "position",
+      "origin": [
+        40,
+        48,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 1.5,
+      "timeout": 6,
+      "label": "run"
+    },
+    {
+      "action": "position",
+      "origin": [
+        40,
+        144,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "sprint"
+      ],
+      "seconds": 1.5,
+      "timeout": 6,
+      "label": "sprint"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        240,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "step 18"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        336,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "step 19"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        432,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 40"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        528,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 48"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        624,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 56"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        720,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 60"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        816,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 64"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        912,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 65"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        1008,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 66"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        1104,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 67"
+    },
+    {
+      "action": "position",
+      "origin": [
+        236,
+        1200,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward",
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "ledge 68"
+    },
+    {
+      "action": "position",
+      "origin": [
+        40,
+        48,
+        24
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "jump"
+      ],
+      "seconds": 1.0,
+      "timeout": 5,
+      "label": "jump"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 256 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1296,
+        280
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 256"
+    },
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 257 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1392,
+        281
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 257"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 259 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1488,
+        283
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 259"
+    },
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 319 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1584,
+        343
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 319"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 321 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1680,
+        345
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 321"
+    },
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 386 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1776,
+        410
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 386"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 387 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1872,
+        411
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 387"
+    },
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 446 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        1968,
+        470
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 446"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 447 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        2064,
+        471
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 447"
+    },
+    {
+      "action": "join",
+      "team": "red",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 512 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        2160,
+        536
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 512"
+    },
+    {
+      "action": "join",
+      "team": "blue",
+      "role": "engineer",
+      "timeout": 40,
+      "label": "fall 514 spawn"
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "crouch"
+      ],
+      "seconds": 3.5,
+      "timeout": 8
+    },
+    {
+      "action": "position",
+      "origin": [
+        620,
+        2256,
+        538
+      ],
+      "angles": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "action": "hold",
+      "controls": [
+        "forward"
+      ],
+      "seconds": 2.5,
+      "timeout": 10,
+      "label": "fall 514"
+    }
+  ]
+}

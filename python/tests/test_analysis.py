@@ -154,10 +154,12 @@ def test_movement_constants_are_the_gamepack_figures_not_the_design_document_s(c
 
 
 def test_movement_constants_are_the_engine_source_figures(constants, pid):
-    """ET states no measurements; its figures are literal constants in the engine source.
+    """ET's figures are literal constants in the engine source, or measured in the engine.
 
-    The player box is -24..48 (72 tall, 36 wide), and the fall threshold is derived from a
-    damage formula rather than read off, so it must arrive marked unverified.
+    The player box is -24..48 (72 tall, 36 wide). How far a fall can go unhurt and how high a
+    jump reaches depend on how the engine integrates the motion, so they come from the
+    engine measurement (bench/dogfood/movement_limits.py), not from v^2 / 2g at g_gravity:
+    bodies fall at 750 under ET's fixed physics, and a jump steps up 18 at its apex.
     """
     if pid != "etl":
         pytest.skip("asserts the ET: Legacy source figures")
@@ -169,8 +171,11 @@ def test_movement_constants_are_the_engine_source_figures(constants, pid):
     assert constants.floor_separation.verified
     assert constants.player_width.value == pytest.approx(36)
     assert constants.ledge_grab_max is None
-    assert constants.fall_no_damage.value == pytest.approx(242)
-    assert not constants.fall_no_damage.verified
+    assert constants.fall_no_damage.value == pytest.approx(257)
+    assert constants.fall_no_damage.verified
+    assert constants.fall_no_damage.source == "engine_measurement"
+    assert constants.jump_up_max.value == pytest.approx(66)
+    assert constants.jump_up_max.verified and not constants.jump_up_max.approximate
 
 
 def test_eye_height_is_inferred_and_says_so(constants, pid):
