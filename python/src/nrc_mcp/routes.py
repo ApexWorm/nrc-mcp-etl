@@ -418,10 +418,9 @@ def find_routes(
             for c in routesearch.cells_near(grids[s], pairs, pad)
         ]
         routesearch.learn(graph, expand, keys, processes=workers)
-    snaps: dict = {}
     rows = []
     for start, end in links:
-        row = _route(grids, reference, start, end, light=True, snap_cache=snaps, **options)
+        row = _route(grids, reference, start, end, light=True, cache_snaps=True, **options)
         dropped = ("notes", "grids")
         if not with_paths:
             dropped += ("path", "segments", "transitions")
@@ -446,8 +445,10 @@ def _route(
     max_detour: float | None = None,
     engine: str = "auto",
     light: bool = False,
-    snap_cache: dict | None = None,
+    cache_snaps: bool = False,
 ) -> dict:
+    from . import routesearch  # noqa: PLC0415
+
     allowed = tuple(s for s in STANCES if s in grids)
     start_stance = allowed[0] if start_stance is None else start_stance
     end_stance = allowed[0] if end_stance is None else end_stance
@@ -480,12 +481,15 @@ def _route(
     }
 
     def snaps(stance: str, target: dict) -> dict:
-        if snap_cache is None or target.get("bounds") is not None:
+        if not cache_snaps or target.get("bounds") is not None:
             return _snaps(grids[stance], target, radius)
-        key = (stance, radius, tuple(target["points"]))
-        if key not in snap_cache:
-            snap_cache[key] = _snaps(grids[stance], target, radius)
-        return snap_cache[key]
+        # A snap depends only on the grid, the point and the radius: kept on the grid, a
+        # waypoint shared by several links, or checked again, snaps once.
+        cache = routesearch.snap_cache(grids[stance])
+        key = (radius, tuple(target["points"]))
+        if key not in cache:
+            cache[key] = _snaps(grids[stance], target, radius)
+        return cache[key]
 
     sources = {
         (s, cell): snap

@@ -68,9 +68,16 @@ def test_path_distance_is_the_python_search_exactly(built):
     grid = built["stand"]
     sample = pairs(grid, 150, seed=1)
     # Off-grid endpoints too: they snap, and the snap is part of the answer.
-    sample += [((a[0] + 5, a[1] - 3, a[2] + 20), (b[0] - 7, b[1] + 2, b[2])) for a, b in sample[:30]]
+    sample += [
+        ((a[0] + 5, a[1] - 3, a[2] + 20), (b[0] - 7, b[1] + 2, b[2])) for a, b in sample[:30]
+    ]
     high, low = (650.0, 480.0, 64.0), (650.0, 250.0, 0.0)
-    sample += [(high, low), (low, high), ((900, 380, 64), (900, 600, 0)), ((40, 40, 0), (980, 700, 0))]
+    sample += [
+        (high, low),
+        (low, high),
+        ((900, 380, 64), (900, 600, 0)),
+        ((40, 40, 0), (980, 700, 0)),
+    ]
     native = [analysis.path_distance(grid, a, b, engine="native") for a, b in sample]
     python = [analysis.path_distance(grid, a, b, engine="python") for a, b in sample]
     assert native == python
@@ -188,7 +195,9 @@ def test_find_route_is_the_python_search_exactly(built, stances):
         assert native == python
     # Budget accounting is the same too (find_route stops before closing a new node).
     start, end = _ends(game_map, (40, 40, 0), (980, 700, 0))
-    capped = [routes.find_route(grids, start, end, max_nodes=7, engine=e) for e in ("native", "python")]
+    capped = [
+        routes.find_route(grids, start, end, max_nodes=7, engine=e) for e in ("native", "python")
+    ]
     assert capped[0] == capped[1] and capped[0]["nodes_expanded"] == 7
 
 
@@ -203,7 +212,12 @@ def test_find_routes_batch_rows_match_find_route(built):
         single.pop("grids")
         assert row == single
     bounded = routes.find_routes(grids, links, max_detour=1.2)
-    assert {r["status"] for r in bounded} <= {"found", "exceeds_max_detour", "unreachable", "no_endpoint"}
+    assert {r["status"] for r in bounded} <= {
+        "found",
+        "exceeds_max_detour",
+        "unreachable",
+        "no_endpoint",
+    }
     for row, free in zip(bounded, rows, strict=True):
         if row["status"] == "found":
             assert row["cost"] == free["cost"]

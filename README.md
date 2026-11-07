@@ -605,9 +605,10 @@ The overlay uses the same map snapshot and marks stand/crouch/prone, endpoints a
 `[start, end]` pairs (or `{"start", "end", "stance"}` with a per-link stance) and returns one
 row per link, in order, with status, distance, cost and detour ratio. Each link is the same
 search as a single route. The search runs in the Rust kernel and learns each grid cell's
-moves once (large batches learn them in parallel worker processes first), so on a 16-unit grid
-10,000 short links take seconds where the Python search needed over an hour
-(`bench/route_speed.py`). `max_detour` bounds a search to routes at most that many times the
+moves once (large batches learn them in parallel worker processes first). Over goldrush at
+cell 16 (`analysis.path_distances`), 10,000 short links took about an hour in the old Python
+search and take ~36 s cold (16 workers; `NRC_ROUTE_WORKERS=1` turns them off) or ~13 s
+once the grid is learned (`bench/route_speed.py`). `max_detour` bounds a search to routes at most that many times the
 straight line: a failed short link then only explores the ellipse around it, and a route
 inside the bound is the same answer as without one. `analysis.path_distances` and
 `routes.find_routes` are the same batch checks from Python.

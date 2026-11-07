@@ -106,6 +106,19 @@ def stance_graph(grids: dict, stances: tuple[str, ...], allowed: tuple[str, ...]
     return entry[0], entry[1]
 
 
+#: Most endpoint snaps kept per grid; past it the cache starts over.
+MAX_SNAPS = 200_000
+
+
+def snap_cache(grid: Any) -> dict:
+    """Endpoint snaps kept on a grid by the batch link checks (see `routes.find_routes`)."""
+    cache = getattr(grid, "_route_snaps", None)
+    if cache is None or len(cache) > MAX_SNAPS:
+        cache = {}
+        grid._route_snaps = cache
+    return cache
+
+
 def graph_sizes(grid: Any) -> dict[str, Any]:
     """What the cached graphs on a grid hold, for diagnostics and tests."""
     out = {}
