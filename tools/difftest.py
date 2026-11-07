@@ -117,7 +117,12 @@ def collect_maps(corpus: Path, limit: int | None) -> list[Path]:
 
 
 def run_syntactic(nrc: Path, maps: list[Path]) -> dict[str, Result]:
-    """One `nrc roundtrip` call over the whole corpus."""
+    """One `nrc roundtrip` call over the whole corpus, keyed by each map's full path.
+
+    Keyed by path, not file name: two maps named alike in different folders are two maps, and
+    keying by name let the second overwrite the first so a failing one could vanish from the
+    report. A map the kernel reported nothing for is a failure, never a silent omission.
+    """
     proc = subprocess.run(
         [str(nrc), "roundtrip", "--quiet", *[str(m) for m in maps]],
         capture_output=True,
@@ -141,7 +146,7 @@ def run_syntactic(nrc: Path, maps: list[Path]) -> dict[str, Result]:
                     f"line {fd.get('line')}: expected {fd.get('expected')!r}, "
                     f"got {fd.get('actual')!r}"
                 )
-        out[p.name] = Result(
+        out[str(p)] = Result(
             name=p.name,
             path=str(p),
             syntactic_ok=bool(r["ok"]),
@@ -150,6 +155,14 @@ def run_syntactic(nrc: Path, maps: list[Path]) -> dict[str, Result]:
             patches=r.get("patches", 0),
             entities=r.get("entities", 0),
         )
+    for m in maps:
+        if str(m) not in out:
+            out[str(m)] = Result(
+                name=m.name,
+                path=str(m),
+                syntactic_ok=False,
+                detail="nrc roundtrip reported no result for this map",
+            )
     return out
 
 
@@ -247,17 +260,17 @@ def run_semantic(
     # round-trip — losing data is never acceptable — but q3map2 is entitled to reject them,
     # so compiling them would report a failure that is actually the expected outcome.
     def compilable(m: Path) -> bool:
-        return "degenerate" not in m.parts and results[m.name].syntactic_ok
+        return "degenerate" not in m.parts and results[str(m)].syntactic_ok
 
     for m in maps:
         if "degenerate" in m.parts:
-            r = results[m.name]
+            r = results[str(m)]
             r.semantic = "skipped"
             r.semantic_detail = "degenerate by design; not compiled"
 
     chosen = [m for m in maps if compilable(m)][:limit]
     for m in chosen:
-        r = results[m.name]
+        r = results[str(m)]
         with tempfile.TemporaryDirectory(prefix="nrc-difftest-") as td:
             work = Path(td)
             try:
@@ -331,7 +344,7 @@ def main() -> int:
         f"({total_brushes} brushes, {total_patches} patches)"
     )
     for r in syn_fail:
-        print(f"    FAIL {r.name}: {r.detail}")
+        print(f"    FAIL {r.path}: {r.detail}")
 
     if not args.no_semantic and args.semantic_limit > 0:
         run_semantic(root, nrc, results, maps, args.semantic_limit)
@@ -341,7 +354,7 @@ def main() -> int:
             print(f"  semantic: {len(good)}/{len(checked)} compiled BSPs identical")
             for r in checked:
                 if r.semantic != "ok":
-                    print(f"    {r.semantic.upper()} {r.name}: {r.semantic_detail}")
+                    print(f"    {r.semantic.upper()} {r.path}: {r.semantic_detail}")
 
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
@@ -359,7 +372,15 @@ def main() -> int:
         print(f"  report: {args.json}")
 
     sem_bad = [r for r in results.values() if r.semantic in ("differs", "error")]
-    if syn_fail or sem_bad:
+    # Every map collected must have exactly one result. A count that differs means a map was
+    # dropped or a result belongs to no map, and either way the gate did not see the corpus.
+    count_bad = sorted(set(results) ^ {str(m) for m in maps})
+    if count_bad or len(results) != len(maps):
+        print(
+            f"  results: {len(results)} for {len(maps)} map(s); unmatched: "
+            f"{', '.join(count_bad[:5]) or '(none)'}"
+        )
+    if syn_fail or sem_bad or count_bad or len(results) != len(maps):
         print(
             "\nGATE FAILED — nothing downstream of the kernel should be trusted until "
             "this is green (§3.3)."

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -68,10 +69,25 @@ class TapeError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+#: The placeholders a tape may use. Any other `{...}` in a tape is literal text.
+PLACEHOLDERS = ("work", "workspace", "repo", "clip_player")
+_PLACEHOLDER = re.compile(r"\{(" + "|".join(PLACEHOLDERS) + r")\}")
+
+
+def _placeholder(name: str, subs: dict[str, str]) -> str:
+    if name not in subs:
+        raise TapeError(f"tape uses {{{name}}}, which this run does not provide")
+    return subs[name]
+
+
 def _expand(value: Any, subs: dict[str, str]) -> Any:
-    """Substitute `{work}`, `{workspace}`, `{repo}` and `{clip_player}` anywhere in a tape's arguments."""
+    """Substitute `{work}`, `{workspace}`, `{repo}` and `{clip_player}` anywhere in a tape's arguments.
+
+    Only those placeholders are replaced; every other brace is literal. `str.format` treated a
+    script's `{ ... }` as a field (and crashed) and silently turned `{{` into `{`.
+    """
     if isinstance(value, str):
-        return value.format(**subs) if "{" in value else value
+        return _PLACEHOLDER.sub(lambda m: _placeholder(m.group(1), subs), value)
     if isinstance(value, list):
         return [_expand(v, subs) for v in value]
     if isinstance(value, dict):

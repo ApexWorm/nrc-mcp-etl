@@ -50,12 +50,43 @@ def load(profile_id: str) -> dict[str, Any]:
             f"no profile {profile_id!r} in {profiles_dir()}; available: {available() or 'none'}"
         )
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as e:
         raise ProfileError(f"{path} is not valid YAML: {e}") from e
     if not isinstance(data, dict):
         raise ProfileError(f"{path} should contain a mapping at the top level")
+    bad = bad_confidences(data)
+    if bad:
+        raise ProfileError(
+            f"{path}: confidence must be exactly one of {', '.join(CONFIDENCES)}; found "
+            + "; ".join(f"{where} = {value!r}" for where, value in bad[:8])
+            + (f" (and {len(bad) - 8} more)" if len(bad) > 8 else "")
+            + ". Code compares the exact string, and the protected-path pin treats every other "
+            "spelling as verified, so a variant like `Verified` would be read two ways."
+        )
     return data
+
+
+#: The only confidence values a profile may state. Code compares them as exact strings.
+CONFIDENCES = ("verified", "unverified")
+
+
+def bad_confidences(data: Any, where: str = "") -> list[tuple[str, Any]]:
+    """Every `confidence` (or `*_confidence`) value in `data` that is not exactly a CONFIDENCES
+    member, with where it sits."""
+    out: list[tuple[str, Any]] = []
+    if isinstance(data, dict):
+        for k, v in data.items():
+            here = f"{where}.{k}" if where else str(k)
+            if (k == "confidence" or (isinstance(k, str) and k.endswith("_confidence"))) and (
+                v not in CONFIDENCES
+            ):
+                out.append((here, v))
+            out += bad_confidences(v, here)
+    elif isinstance(data, list):
+        for i, v in enumerate(data):
+            out += bad_confidences(v, f"{where}[{i}]")
+    return out
 
 
 def entities(profile_id: str) -> list[dict[str, Any]]:

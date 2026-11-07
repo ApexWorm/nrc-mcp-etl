@@ -15,6 +15,10 @@ stays out regardless.
 Every guardrail §11.4 lists is enforced here:
 
 - **Protected paths** are checked before and after, via `tools/protected.py`.
+- **Change is measured against the attempt's base commit**, not the dirty tree: committing an edit
+  (and a re-pin) does not hide it, a rename is checked under both names, and the git-ignored files
+  that feed the gates (local config, the kernel build, the stored bench baseline) are fingerprinted
+  when the attempt is proposed and must be unchanged when it runs.
 - **F1 is a gate**, never a weight. A red gate reverts, whatever else improved.
 - **Merge requires** F1 green, no signal regressed, and at least one improved.
 - **Git-backed with automatic revert**: every attempt is a branch, and a failed gate discards it.
@@ -30,10 +34,12 @@ and the self-improving-agent literature is consistent on that point.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -57,10 +63,29 @@ ALLOWED_PATHS = (
     "python/src/nrc_mcp/surface/gameplay.py",  # descriptions only; every tool read-only
     "python/src/nrc_mcp/surface/render.py",  # descriptions only; every tool read-only
     "docs/conventions.md",
-    "profiles/",  # unverified rules only; the verified ones are hash-pinned
+    "profiles/",  # unverified entries only; every verified one is hash-pinned
 )
 
 ATTEMPTS_DIR = "bench/selfdev"
+
+#: Git-ignored files that feed the tests or the bench, fingerprinted at `propose` and required to
+#: be unchanged at `run`. Git cannot see them, so without this an attempt could change the local
+#: configuration or swap the built kernel. Entries ending in `/` cover everything under them. The
+#: stored bench baseline the attempt is compared against is fingerprinted too (`ignored_inputs`);
+#: other bench results are outputs, so running the bench by hand meanwhile does not reject.
+IGNORED_INPUTS = (
+    "mise.local.toml",
+    ".env",
+    ".mise/",
+    "python/src/",  # the installed kernel module (`*.so`, `*.pyd`); sources are tracked
+    "target/release/nrc",
+    "target/debug/nrc",
+)
+
+#: Relative change below which a noisy signal counts as unchanged. Wall time (F6) moves by more
+#: than this between identical runs, so without a margin the merge rule accepts noise as an
+#: improvement and rejects it as a regression.
+NOISE_TOLERANCE = {"F6": 0.10}
 #: Minimum gap between runs. §11.4: "Self-dev runs on demand or nightly, not continuously."
 MIN_INTERVAL_SECONDS = 3600
 
@@ -145,6 +170,112 @@ def path_allowed(rel: str) -> tuple[bool, str]:
     )
 
 
+def _parse_name_status(raw: str) -> list[tuple[str, str]]:
+    """`git diff --name-status -z` output as (status, path), both sides of a rename or copy."""
+    parts = raw.split("\0")
+    out: list[tuple[str, str]] = []
+    i = 0
+    while i < len(parts):
+        status = parts[i]
+        if not status:
+            i += 1
+            continue
+        if status[0] in "RC":
+            if i + 2 >= len(parts):
+                break
+            out.append((status[0], parts[i + 1]))
+            out.append((status[0], parts[i + 2]))
+            i += 3
+        else:
+            if i + 1 >= len(parts):
+                break
+            out.append((status[0], parts[i + 1]))
+            i += 2
+    return out
+
+
+def changed_paths(root: Path, base_sha: str) -> list[tuple[str, str]]:
+    """Every path that differs from `base_sha`, as (status, path).
+
+    Measured from the attempt's base commit to the working tree, so a change that was committed
+    is still a change, and both sides of a rename are listed. Untracked files count (status `?`).
+    The attempt records are excluded: writing them is the loop's own bookkeeping. Fails closed:
+    a base git cannot resolve is an error, never an empty list.
+    """
+    if not base_sha:
+        raise SelfDevError("the attempt records no base commit, so its changes cannot be measured")
+    code, _ = git(["cat-file", "-e", f"{base_sha}^{{commit}}"], root)
+    if code != 0:
+        raise SelfDevError(f"base commit {base_sha[:12]} is not in this repository")
+    p = subprocess.run(
+        ["git", "diff", "--name-status", "-z", "-M", base_sha, "--"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if p.returncode != 0:
+        raise SelfDevError(f"git diff {base_sha[:12]} failed: {p.stderr.strip()[:300]}")
+    out = _parse_name_status(p.stdout)
+    u = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if u.returncode != 0:
+        raise SelfDevError(f"git ls-files failed: {u.stderr.strip()[:300]}")
+    out += [("?", rel) for rel in u.stdout.split("\0") if rel]
+    mine = ATTEMPTS_DIR.rstrip("/") + "/"
+    return [(st, rel) for st, rel in out if not rel.replace("\\", "/").startswith(mine)]
+
+
+def baseline_rel(base_sha: str) -> str:
+    """Where the bench result for `base_sha` is stored, relative to the repository."""
+    return f"bench/results/{base_sha[:7]}.json"
+
+
+def ignored_inputs(root: Path, base_sha: str = "") -> dict[str, str]:
+    """SHA-256 of every existing file under IGNORED_INPUTS and of the attempt's stored baseline,
+    by repository-relative path."""
+    out: dict[str, str] = {}
+    for rel in (*IGNORED_INPUTS, *([baseline_rel(base_sha)] if base_sha else [])):
+        base = root / rel
+        if rel.endswith("/"):
+            files = sorted(f for f in base.rglob("*") if f.is_file()) if base.is_dir() else []
+            if rel == "python/src/":
+                files = [f for f in files if f.suffix in {".so", ".pyd", ".dylib"}]
+        else:
+            files = [base] if base.is_file() else []
+        for f in files:
+            out[f.relative_to(root).as_posix()] = hashlib.sha256(f.read_bytes()).hexdigest()
+    return out
+
+
+def ignored_input_changes(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """What changed among the git-ignored inputs between `propose` and `run`."""
+    out = []
+    for rel in sorted(set(before) | set(after)):
+        if rel not in after:
+            out.append(f"{rel}: removed")
+        elif rel not in before:
+            out.append(f"{rel}: appeared")
+        elif before[rel] != after[rel]:
+            out.append(f"{rel}: changed")
+    return out
+
+
+def gate_env(pycache: Path) -> dict[str, str]:
+    """The environment the gates run in: in-tree `__pycache__` is never read.
+
+    Bytecode caches are git-ignored and outlive the sources they were compiled from, so a stale
+    or planted one could stand in for a tracked module. A fresh cache prefix (`pycache`, an empty
+    directory) makes Python compile from the sources it can see.
+    """
+    return {**os.environ, "PYTHONPYCACHEPREFIX": str(pycache)}
+
+
 def protected_problems(root: Path) -> list[str]:
     sys.path.insert(0, str(root / "tools"))
     import protected as prot  # noqa: PLC0415
@@ -152,18 +283,27 @@ def protected_problems(root: Path) -> list[str]:
     return prot.verify(root)
 
 
-def run_bench(root: Path) -> dict[str, Any]:
-    proc = subprocess.run(
-        [sys.executable, str(root / "tools" / "bench.py"), "--quiet"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    results = sorted((root / "bench" / "results").glob("*.json"), key=lambda p: p.stat().st_mtime)
-    if not results:
-        raise SelfDevError(f"bench produced no result file: {proc.stderr.strip()[:300]}")
-    return json.loads(results[-1].read_text())
+def run_bench(root: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
+    """Run the bench into a fresh directory and read the one result it wrote.
+
+    Picking the newest file in `bench/results/` would read whatever had the latest mtime, which
+    a planted file can arrange.
+    """
+    with tempfile.TemporaryDirectory(prefix="nrc-selfdev-bench-") as td:
+        proc = subprocess.run(
+            [sys.executable, str(root / "tools" / "bench.py"), "--quiet", "--out", td],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        results = sorted(Path(td).glob("*.json"))
+        if len(results) != 1:
+            raise SelfDevError(
+                f"bench wrote {len(results)} result files, expected 1: {proc.stderr.strip()[:300]}"
+            )
+        return json.loads(results[0].read_text(encoding="utf-8"))
 
 
 def score_map(bench: dict) -> dict[str, float]:
@@ -175,15 +315,26 @@ def score_map(bench: dict) -> dict[str, float]:
 
 
 def compare(before: dict, after: dict) -> dict[str, Any]:
-    """Apply §11.4's merge rule: F1 green, nothing regressed, at least one improved."""
+    """Apply §11.4's merge rule: F1 green, nothing regressed, at least one improved.
+
+    A signal the baseline measured and the attempt did not (skipped, or gone) is a regression:
+    losing a measurement must not read as "nothing got worse". A signal only the attempt measured
+    improves nothing, since there is nothing to compare it with. A noisy signal's change within
+    NOISE_TOLERANCE is unchanged, in either direction.
+    """
     b, a = score_map(before), score_map(after)
     lower_better = {"F2", "F6"}
     regressed, improved, unchanged = [], [], []
     for sid in sorted(set(b) | set(a)):
-        if sid not in b or sid not in a:
+        if sid not in a:
+            regressed.append(f"{sid} {b[sid]} -> not measured")
+            continue
+        if sid not in b:
+            unchanged.append(sid)
             continue
         delta = a[sid] - b[sid]
-        if delta == 0:
+        margin = NOISE_TOLERANCE.get(sid, 0.0) * abs(b[sid])
+        if delta == 0 or abs(delta) <= margin:
             unchanged.append(sid)
         elif (delta < 0) == (sid in lower_better):
             improved.append(f"{sid} {b[sid]} -> {a[sid]}")
@@ -226,12 +377,14 @@ def cmd_propose(root: Path, hypothesis: str, target: str) -> dict:
             f"something unmeasured is how a loop starts hill-climbing on its own opinion."
         )
     attempt_id = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    base_sha = git(["rev-parse", "HEAD"], root, check=True)[1].strip()
     record = {
         "id": attempt_id,
         "hypothesis": hypothesis,
         "target_signal": target,
         "state": "proposed",
-        "base_sha": git(["rev-parse", "HEAD"], root)[1].strip(),
+        "base_sha": base_sha,
+        "ignored_inputs": ignored_inputs(root, base_sha),
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "started_epoch": time.time(),
     }
@@ -254,14 +407,27 @@ def cmd_run(root: Path, attempt_id: str, force: bool = False) -> dict:
         raise SelfDevError(f"no attempt {attempt_id}; run selfdev.py history")
     record = json.loads(path.read_text())
 
-    # 1. Only allowed paths may have changed.
-    _, status = git(["status", "--porcelain"], root)
-    changed = [ln[3:].strip() for ln in status.splitlines() if ln.strip()]
-    violations = []
-    for rel in changed:
+    # 1. Only allowed paths may differ from the base commit — committed or not, under either
+    #    name of a rename — and the git-ignored inputs must be as they were at `propose`.
+    try:
+        changed = changed_paths(root, str(record.get("base_sha") or ""))
+    except SelfDevError as e:
+        changed, violations = [], [str(e)]
+    else:
+        violations = []
+    for _, rel in changed:
         ok, why = path_allowed(rel)
         if not ok:
             violations.append(why)
+    if "ignored_inputs" not in record:
+        violations.append("the attempt records no fingerprint of its git-ignored inputs")
+    else:
+        violations += [
+            f"git-ignored input {c} since the attempt was proposed"
+            for c in ignored_input_changes(
+                record["ignored_inputs"], ignored_inputs(root, str(record.get("base_sha") or ""))
+            )
+        ]
     if violations:
         record.update(
             {
@@ -282,32 +448,34 @@ def cmd_run(root: Path, attempt_id: str, force: bool = False) -> dict:
         path.write_text(json.dumps(record, indent=2) + "\n")
         return record
 
-    # 3. The test suite, which contains F1.
-    proc = subprocess.run(
-        ["mise", "run", "test"], cwd=root, capture_output=True, text=True, check=False
-    )
-    if proc.returncode != 0:
-        record.update(
-            {
-                "state": "rejected",
-                "reason": "mise run test failed",
-                "output_tail": (proc.stdout + proc.stderr)[-1500:],
-            }
+    with tempfile.TemporaryDirectory(prefix="nrc-selfdev-pyc-") as pyc:
+        env = gate_env(Path(pyc))
+        # 3. The test suite, which contains F1.
+        proc = subprocess.run(
+            ["mise", "run", "test"], cwd=root, capture_output=True, text=True, check=False, env=env
         )
-        path.write_text(json.dumps(record, indent=2) + "\n")
-        return record
+        if proc.returncode != 0:
+            record.update(
+                {
+                    "state": "rejected",
+                    "reason": "mise run test failed",
+                    "output_tail": (proc.stdout + proc.stderr)[-1500:],
+                }
+            )
+            path.write_text(json.dumps(record, indent=2) + "\n")
+            return record
 
-    # 4. Bench, and compare against the baseline.
-    after = run_bench(root)
-    baseline_path = root / "bench" / "results" / f"{record['base_sha'][:7]}.json"
-    if baseline_path.is_file():
-        before = json.loads(baseline_path.read_text())
-    else:
-        record["note"] = (
-            f"no baseline at {baseline_path.name}; this run becomes the baseline and cannot be "
-            f"accepted, because there is nothing to compare it against"
-        )
-        before = None
+        # 4. Bench, and compare against the baseline.
+        after = run_bench(root, env)
+        baseline_path = root / baseline_rel(record["base_sha"])
+        if baseline_path.is_file():
+            before = json.loads(baseline_path.read_text())
+        else:
+            record["note"] = (
+                f"no baseline at {baseline_path.name}; this run becomes the baseline and cannot be "
+                f"accepted, because there is nothing to compare it against"
+            )
+            before = None
 
     if before is None:
         record.update({"state": "baselined", "bench": after})
@@ -335,16 +503,22 @@ def cmd_revert(root: Path, attempt_id: str) -> dict:
         raise SelfDevError(f"no attempt {attempt_id}")
     record = json.loads(path.read_text())
 
-    _, status = git(["status", "--porcelain"], root)
-    changed = [ln[3:].strip() for ln in status.splitlines() if ln.strip()]
+    base = str(record.get("base_sha") or "")
+    changed = changed_paths(root, base)
     # Only revert what the attempt was allowed to touch, so an unrelated edit made by a human in
-    # the meantime is not thrown away.
+    # the meantime is not thrown away. Reverting means "as at the base commit": a path the base
+    # has is restored from it, and one it lacks (added, or a rename's new name) is removed.
     reverted = []
-    for rel in changed:
+    for _, rel in changed:
         ok, _ = path_allowed(rel)
-        if ok:
-            git(["checkout", "--", rel], root)
-            reverted.append(rel)
+        if not ok:
+            continue
+        if git(["cat-file", "-e", f"{base}:{rel}"], root)[0] == 0:
+            git(["checkout", base, "--", rel], root, check=True)
+        else:
+            git(["rm", "-q", "--cached", "--ignore-unmatch", "--", rel], root)
+            (root / rel).unlink(missing_ok=True)
+        reverted.append(rel)
     record["state"] = "reverted"
     record["reverted_paths"] = reverted
     path.write_text(json.dumps(record, indent=2) + "\n")

@@ -37,7 +37,15 @@ CODE_DIRS = ["crates", "python/src", "tools"]
 # name a profile id, so `NRC_PROFILE`-style identifiers are handled by MIN_LENGTH and the
 # allowlist below rather than by exempting whole test files.
 ALLOWED_PATHS = {"mise.toml", "mise.local.toml"}
+#: Matched against the *top-level* directory only: a folder named `docs` or `target` somewhere
+#: inside the code directories is still code.
 ALLOWED_DIRS = {"docs", "profiles", "corpus", "bench", "vendor", "target", ".venv", ".git"}
+#: Inside a code directory, only these generated folders are skipped.
+SKIPPED_SUBDIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+
+#: Every text format code could read a game string from: JSON or Lua next to the code is data the
+#: code ships, as is any shell or config file there.
+SCANNED_SUFFIXES = {".rs", ".py", ".pyi", ".toml", ".json", ".lua", ".sh", ".cfg", ".yaml", ".yml"}
 
 # Tokens short or generic enough to produce false positives regardless of profile.
 IGNORE_TOKENS = {
@@ -117,15 +125,30 @@ def load_profile_vocabulary(root: Path) -> set[str]:
 
 
 def should_scan(p: Path, root: Path) -> bool:
-    if p.suffix.lower() not in {".rs", ".py", ".toml", ".pyi"}:
+    if p.suffix.lower() not in SCANNED_SUFFIXES:
         return False
     rel = p.relative_to(root)
-    if str(rel) in ALLOWED_PATHS:
+    if rel.as_posix() in ALLOWED_PATHS:
         return False
-    return not any(part in ALLOWED_DIRS for part in rel.parts)
+    if rel.parts and rel.parts[0] in ALLOWED_DIRS:
+        return False
+    return not any(part in SKIPPED_SUBDIRS for part in rel.parts[:-1])
 
 
+#: Line comments. `*` opens a Rust block-comment continuation line; in Python a line starting
+#: with `*` is unpacking (`*["..."]`), which is code, so Python only skips `#`.
 COMMENT_PREFIXES = ("//", "///", "//!", "#", "*")
+PY_COMMENT_PREFIXES = ("#",)
+
+#: Adjacent or `+`-joined string literals, so `"ut4" + "_x"` is read as `"ut4_x"`.
+_JOIN = re.compile(r"""(["'])\s*\+?\s*\1""")
+
+
+def joined(line: str) -> str:
+    """`line` with adjacent and `+`-concatenated string literals fused into one."""
+    return _JOIN.sub("", line)
+
+
 DOCSTRING_DELIMS = ('"""', "'''")
 
 
@@ -155,9 +178,13 @@ def code_lines(path: Path) -> list[tuple[int, str]]:
                         in_doc = d
                     break
             else:
-                if line.startswith(COMMENT_PREFIXES):
+                if line.startswith(PY_COMMENT_PREFIXES):
                     continue
                 out.append((lineno, raw))
+            continue
+        if path.suffix not in {".rs", ".toml"}:
+            # Data files have no comment syntax this lint can trust: every line counts.
+            out.append((lineno, raw))
             continue
 
         if line.startswith(COMMENT_PREFIXES):
@@ -169,8 +196,10 @@ def code_lines(path: Path) -> list[tuple[int, str]]:
 
 
 def scan(root: Path, vocab: set[str], verbose: bool) -> list[tuple[Path, int, str, str]]:
+    # Case-insensitive: the engines compare classnames without regard to case, so a recased
+    # spelling in code is the same leak.
     patterns: list[tuple[str, re.Pattern[str]]] = [
-        (tok, re.compile(rf"\b{re.escape(tok)}\b")) for tok in sorted(vocab)
+        (tok, re.compile(rf"\b{re.escape(tok)}\b", re.I)) for tok in sorted(vocab)
     ]
     always = [(pat, re.compile(pat, re.I)) for pat in ALWAYS_FORBIDDEN]
 
@@ -184,15 +213,18 @@ def scan(root: Path, vocab: set[str], verbose: bool) -> list[tuple[Path, int, st
             if not p.is_file() or not should_scan(p, root):
                 continue
             files += 1
-            for lineno, line in code_lines(p):
-                if "seam-lint: allow" in line:
+            for lineno, raw in code_lines(p):
+                if "seam-lint: allow" in raw:
                     continue
+                # The line as written and with its string literals fused, so splitting a name
+                # across a concatenation does not hide it.
+                line = f"{raw}\n{joined(raw)}"
                 for pat, rx in always:
                     if rx.search(line):
-                        hits.append((p.relative_to(root), lineno, pat, line.strip()[:120]))
+                        hits.append((p.relative_to(root), lineno, pat, raw.strip()[:120]))
                 for tok, rx in patterns:
                     if rx.search(line):
-                        hits.append((p.relative_to(root), lineno, tok, line.strip()[:120]))
+                        hits.append((p.relative_to(root), lineno, tok, raw.strip()[:120]))
     if verbose:
         print(f"  scanned {files} file(s) in {', '.join(CODE_DIRS)}")
         print(
