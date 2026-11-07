@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -208,6 +209,54 @@ def profile_q3map2_game() -> str | None:
     return m.group(1) if m else None
 
 
+#: The member and archive the profile's compile-only shaders are handed to q3map2 in. A name
+#: no game or map uses, since q3map2 loads one shader file per file name (vfs.cpp:194-224).
+COMPILE_SHADER_ARCHIVE = "nrc_compile_shaders.pk3"
+COMPILE_SHADER_MEMBER = "scripts/nrc_compile_{profile}.shader"
+
+#: Stages that read a BSP to pack or list its resources. They get no compile-only shaders, so
+#: what a pack carries never depends on them.
+PACKING_STAGES = ("-pk3", "-repack", "-json")
+
+
+def profile_compile_shaders() -> Path | None:
+    """The active profile's compile-only shader script (`compile_shaders.compile_shader_file`),
+    if it names one: shaders real maps use whose definitions come with the mapper's editor
+    setup rather than the game. Read with a regex like `profile_q3map2_game`.
+    """
+    profile = os.environ.get("NRC_PROFILE", "").strip()
+    if not profile:
+        return None
+    profiles = Path(os.environ.get("NRC_ROOT", ".")) / "profiles"
+    try:
+        text = (profiles / f"{profile}.yaml").read_text(errors="replace")
+    except OSError:
+        return None
+    m = re.search(r"^\s*compile_shader_file:\s*['\"]?([\w./-]+)", text, re.M)
+    if not m:
+        return None
+    path = profiles / m.group(1)
+    return path if path.is_file() else None
+
+
+def write_compile_shader_archive(directory: Path) -> Path | None:
+    """Put the profile's compile-only shaders in a pk3 of their own in `directory`.
+
+    Passed as the last `-fs_pakpath`, it is the lowest-priority source q3map2 has: loose
+    directories are listed before archives and archives in search-path order (vfs.cpp:194-224,
+    path_init.cpp:412-424), and the first definition of a name wins (shaders.cpp:749). So the
+    game's, the map's own scripts and any pk3 beside the map still override it.
+    """
+    script = profile_compile_shaders()
+    if script is None:
+        return None
+    archive = directory / COMPILE_SHADER_ARCHIVE
+    member = COMPILE_SHADER_MEMBER.format(profile=os.environ.get("NRC_PROFILE", "").strip())
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(member, script.read_bytes())
+    return archive
+
+
 def general_flags() -> list[str]:
     """Build the general flags from the environment and the active profile.
 
@@ -323,12 +372,28 @@ def compile_map(
     general = general_flags() + map_root_flags(map_path, staged)
     win_map = to_windows_path(work_map)
 
+    # The profile's compile-only shaders, in a throwaway folder q3map2 can address: the
+    # system temp directory, or on WSL (where a Windows binary cannot read it) the staging
+    # directory or the map's own folder. Removed afterwards.
+    shader_dir: Path | None = None
+    compile_general = general
+    if any(not s or s[0] not in PACKING_STAGES for s in stages):
+        near = (workdir or work_map.parent) if is_wsl() else None
+        shader_dir = Path(tempfile.mkdtemp(prefix="nrc-compile-shaders-", dir=near))
+        if write_compile_shader_archive(shader_dir) is not None:
+            compile_general = [*general, "-fs_pakpath", to_windows_path(shader_dir)]
+
     results: list[StageResult] = []
-    for flags in stages:
-        r = run_stage(exe, general, flags, win_map, verbose)
-        results.append(r)
-        if r.returncode != 0:
-            break
+    try:
+        for flags in stages:
+            packing = bool(flags) and flags[0] in PACKING_STAGES
+            r = run_stage(exe, general if packing else compile_general, flags, win_map, verbose)
+            results.append(r)
+            if r.returncode != 0:
+                break
+    finally:
+        if shader_dir is not None:
+            shutil.rmtree(shader_dir, ignore_errors=True)
 
     # Collect artefacts before any cleanup, and copy them out of staging so a compile is
     # reproducible from the repo without reaching into a Windows temp directory.

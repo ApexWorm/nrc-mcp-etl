@@ -5140,6 +5140,43 @@ packaging:
   size_budget_note: "50 MiB is a download-comfort norm, not a hard limit"
 
 # ---------------------------------------------------------------------------
+# compile_shaders — shaders q3map2 needs that nothing the compiler sees defines
+# ---------------------------------------------------------------------------
+# Editor shaders real maps use (the ET: Legacy Supply Depot overhaul, etl_supply.map, has 9291
+# alpha-volume faces and 157 hintskip faces) but that ship with the mapper's editor setup, not
+# with the game. tools/q3map2.py packs `compile_shader_file` into a throwaway pk3 and puts it on
+# the last -fs_pakpath of every compile stage (not -pk3/-repack), so it is the lowest-priority
+# definition: the base game's, the map's own scripts and any pk3 beside the map all win
+# (vfs.cpp:194-224 lists loose dirs before pk3s; shaders.cpp:749 takes the first definition).
+# shader_audit, repack_analyze and pack_pk3 count these names as supplied and never ship them.
+
+compile_shaders:
+  compile_shader_file: etl-compile.shader     # under profiles/; read by tools/q3map2.py
+  shaders:
+    - name: textures/editor/alpha_000
+      role: alphaMod volume, sets vertex alpha 0 (terrain blend fully to the base layer)
+      confidence: unverified
+      source: >-
+        semantics verified against q3map2 (shaders.cpp:1474-1547 parses q3map_alphaMod set/volume;
+        map.cpp:830-835 links volume brushes to the entity; surface.cpp:2837 VolumeColorMods) and
+        the q3map2 shader manual (vendor/netradiant-custom/docs/shaderManual/
+        q3map-global-directives.html#q3map_alphaModVolume: "usually ... special alphaMod volume
+        common shaders for use within the editor only"). The exact text is the conventional
+        editor definition (volume + set + nodraw/nonsolid/trans/nomarks); no copy of the
+        community pack it comes from was available to compare against.
+    - name: textures/editor/alpha_100
+      role: alphaMod volume, sets vertex alpha 1 (terrain blend fully to the top layer)
+      confidence: unverified
+      source: as textures/editor/alpha_000
+    - name: textures/common/hintskip
+      role: skip faces of hint brushes (no BSP split, no draw, no collision)
+      confidence: verified
+      source: >-
+        copied from ET: Legacy's own definition, legacy/legacy_v2.86.2.pk3 materials/common.shader
+        ("exactly like skip, but it filters with hint"). That file is renderer2 material, not
+        under scripts/, so q3map2 (-game et, shaderPath scripts) never loads it.
+
+# ---------------------------------------------------------------------------
 # assets — the Blender handoff's game-specific numbers (§5)
 # ---------------------------------------------------------------------------
 

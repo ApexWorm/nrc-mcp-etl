@@ -209,6 +209,11 @@ def compile_map(preset: str = "draft", path: str | None = None) -> dict:
 
     With no path (or the open map's path), compile a snapshot of the current unsaved map
     and staged companions. The result identifies that revision and its retained build folder.
+
+    The profile's compile-only shaders (`compile_shaders`: editor shaders such as terrain
+    alpha-blend volumes and hint-skip that real maps use but no game archive defines) are given
+    to q3map2 on every compile, below everything else, so a definition the map or its packs
+    carry wins. They are never packed; shader_audit lists them under `compile_only`.
     """
     if preset not in ("draft", "iterate", "quality", "final"):
         raise ToolError(f"unknown preset {preset!r} — choose draft, iterate, quality or final.")
@@ -484,6 +489,8 @@ def shader_audit(
     is where the base game's `.pk3` archives live, so the shaders and textures they ship count as
     defined; it defaults to the game path joined with the profile's `packaging.basegame`. With a
     base game known, `shader_dirs` may be empty: a map that ships no shaders of its own.
+    Shaders the profile supplies to the compiler (`compile_shaders`) count as defined and are
+    listed under `compile_only`: nothing needs to ship for them.
     """
     _require_path()
     pid = profile_id or active_profile() or None

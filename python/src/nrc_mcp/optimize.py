@@ -1457,7 +1457,19 @@ def shader_audit(
         )
 
     from_basegame = sorted(n for n in referenced if n not in definitions and in_basegame(n))
-    unresolved = [n for n in referenced if n not in definitions and not in_basegame(n)]
+    # Shaders the compiler is given by the profile and that never ship (compile_only_shaders):
+    # only when nothing the map or the base game carries defines them, as in q3map2.
+    compile_only = compile_only_shaders(profile_id)
+    from_profile = sorted(
+        n
+        for n in referenced
+        if n not in definitions and not in_basegame(n) and n.lower() in compile_only
+    )
+    unresolved = [
+        n
+        for n in referenced
+        if n not in definitions and not in_basegame(n) and n.lower() not in compile_only
+    ]
     shipped_images = sorted(n for n in unresolved if shipped_image(n))
     missing = sorted(n for n in unresolved if n not in shipped_images)
     # With the base game's archives read, nothing is left that could supply the name: q3map2
@@ -1500,6 +1512,26 @@ def shader_audit(
                 "verified",
                 source=f"{len(base['archives'])} base-game archive(s)",
                 detail={"shaders": from_basegame[:200], "count": len(from_basegame)},
+            )
+        )
+
+    if from_profile:
+        findings.append(
+            _finding(
+                "SHADER_COMPILE_ONLY",
+                "info",
+                f"{len(from_profile)} referenced shader(s) are compile-only editor shaders the "
+                f"profile supplies to q3map2 ({', '.join(from_profile[:5])}); they draw nothing "
+                "and never ship in the pk3",
+                "verified"
+                if all(compile_only[n.lower()]["confidence"] == "verified" for n in from_profile)
+                else "unverified",
+                source=f"profile {profile_id} compile_shaders",
+                detail={
+                    "shaders": [
+                        {**compile_only[n.lower()], "surfaces": referenced[n]} for n in from_profile
+                    ],
+                },
             )
         )
 
@@ -1645,6 +1677,7 @@ def shader_audit(
         "reference_counts": dict(sorted(referenced.items())),
         "missing": missing,
         "from_basegame": from_basegame,
+        "compile_only": from_profile,
         "shipped_images": shipped_images,
         "unreferenced": unused,
         "shadowing_basegame": shadowing,
@@ -1668,6 +1701,45 @@ def shader_audit(
             "map's own scripts.",
         ],
     }
+
+
+def compile_only_shaders(profile_id: str | None) -> dict[str, dict[str, Any]]:
+    """The profile's compile-only shaders, by lowercase name: editor shaders real maps use
+    whose definitions come with the mapper's editor setup, not the game (`compile_shaders`).
+
+    `tools/q3map2.py` hands the profile's `compile_shader_file` to q3map2 on every compile as
+    its lowest-priority definitions, and nothing packs them, so a map that uses one needs to
+    ship nothing for it. Each entry carries the profile's `role`, `source` and `confidence`.
+    """
+    if not profile_id:
+        return {}
+    try:
+        section = profiles.load(profile_id).get("compile_shaders")
+    except profiles.ProfileError:
+        return {}
+    if not isinstance(section, dict) or not section.get("compile_shader_file"):
+        return {}
+    path = profiles.profiles_dir() / str(section["compile_shader_file"])
+    try:
+        defined = parse_shader_file(path)
+    except (OptimizeError, OSError):
+        return {}
+    notes = {
+        str(s.get("name", "")).lower(): s
+        for s in section.get("shaders") or []
+        if isinstance(s, dict)
+    }
+    out: dict[str, dict[str, Any]] = {}
+    for shader in defined:
+        low = shader["name"].lower()
+        note = notes.get(low, {})
+        out[low] = {
+            "name": shader["name"],
+            "file": f"profiles/{path.name}",
+            "role": note.get("role", ""),
+            "confidence": note.get("confidence", "unverified"),
+        }
+    return out
 
 
 def _reserved_prefixes(profile_id: str | None) -> tuple[set[str], str]:

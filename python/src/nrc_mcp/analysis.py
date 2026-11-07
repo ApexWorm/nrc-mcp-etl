@@ -934,7 +934,8 @@ def shader_contents(profile_id: str, map_path: str | Path | None = None) -> Shad
 
     The project's are the loose `scripts/*.shader` beside its `maps/` folder; the game's are
     the scripts inside the base game's archives (`NRC_FS_BASEPATH` plus the profile's
-    `packaging.basegame`). Either may be missing; `resolved` says whether any was read.
+    `packaging.basegame`). Either may be missing; `resolved` says whether any was read. The
+    profile's compile-only shaders (`compile_shaders`) come last, as the compiler sees them.
     """
     from . import optimize  # noqa: PLC0415
 
@@ -966,9 +967,23 @@ def shader_contents(profile_id: str, map_path: str | Path | None = None) -> Shad
             for name, value in found.items():
                 parms.setdefault(name, value)
             sources.append(str(directory))
+    # Last, as tools/q3map2.py gives them to the compiler: the profile's compile-only shaders
+    # (terrain alphaMod volumes and the like), which the map uses but no archive defines. A
+    # handful of editor shaders, so they do not make the rest of the map's names resolved.
+    resolved = bool(sources)
+    compile_only = profiles.profiles_dir() / str(
+        (data.get("compile_shaders") or {}).get("compile_shader_file") or ""
+    )
+    if compile_only.is_file():
+        try:
+            for shader in optimize.parse_shader_file(compile_only):
+                parms.setdefault(shader["name"].lower(), tuple(shader["surfaceparms"]))
+            sources.append(str(compile_only))
+        except (OSError, optimize.OptimizeError):
+            pass
     return ShaderContents(
         parms=parms,
-        resolved=bool(sources),
+        resolved=resolved,
         sources=tuple(sources),
         clearing=clearing,
         player_clip=frozenset(PLAYER_CLIP_SURFACEPARMS),

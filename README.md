@@ -443,6 +443,16 @@ whether the map seals.
 Presets are `draft`, `iterate`, `quality`, `final`. If it leaks, `leak_trace` reads the pointfile
 and tells you where the hole is.
 
+Some editor shaders real maps use are defined by no game archive: they come with the mapper's
+editor setup. For ET: Legacy these are the terrain alpha-blend volumes `editor/alpha_000` and
+`editor/alpha_100` and the hint brushes' `common/hintskip`. Without a definition q3map2 builds them
+as solid, drawn brushes. Supply Depot's terrain then turns into orange walls. The profile owns
+compile-only definitions for them (`profiles/etl-compile.shader`, with sources and confidence under
+`compile_shaders` in `profiles/etl.yaml`). Every compile hands them to q3map2 as its lowest-priority
+archive, so a definition the map or the game ships still wins. They are never packed.
+`shader_audit` lists them under `compile_only`, `repack_analyze` and `pack_pk3` do not count them
+as missing, and the movement analysis treats the volumes as nonsolid, as the compiled map does.
+
 **7 — Optimize, then ship.**
 
 ```json
