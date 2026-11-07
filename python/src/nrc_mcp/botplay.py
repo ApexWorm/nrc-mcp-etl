@@ -168,11 +168,12 @@ def script_report(
         for line in lines
         if any(re.search(str(p), line) for p in play.get("goal_errors") or [])
     ]
-    script_errors = [
-        line.strip()
-        for line in addon_text.splitlines()
-        if any(re.search(str(p), line) for p in play.get("script_errors") or [])
-    ]
+    expected = (play.get("script_errors_expected") or {}).get("patterns") or []
+    script_errors, script_warnings = [], []
+    for line in addon_text.splitlines():
+        if any(re.search(str(p), line) for p in play.get("script_errors") or []):
+            known = any(re.search(str(p), line) for p in expected)
+            (script_warnings if known else script_errors).append(line.strip())
     marker = str(play.get("script_marker") or "")
     messages = []
     for line in lines:
@@ -236,6 +237,7 @@ def script_report(
         "goals_loaded": goals_loaded,
         "goal_errors": goal_errors,
         "script_errors": script_errors,
+        "script_warnings": script_warnings,
         "triggers_registered": len(triggers),
         "script_messages": switched,
         "spots": rows,

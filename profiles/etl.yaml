@@ -4783,6 +4783,14 @@ bots:
     # goals that fail to load go only to the game console (GoalManager.cpp:1028, :1059).
     # Seen in ET: Legacy 2.86.2 with Omni-bot 0.93 on deliberately broken files.
     script_errors: ["^E ", "^W .*has no results"]
+    # Of those, warnings a correct script still produces, listed apart rather than failing the
+    # run. A DEFUSE_<name> goal exists only while a charge is planted on <name> (the add-on
+    # creates it on the plant event), so a script that enables defusing ahead of time gets
+    # "no results" until then; the stock 0.93 etl_supply.gm does (seen in ET: Legacy 2.86.2,
+    # mirrored Supply Depot, 2026-11-07). Not yet traced in the add-on source.
+    script_errors_expected:
+      confidence: unverified
+      patterns: ["goal query for DEFUSE_\\S* has no results"]
     goal_errors: ["Unknown Goal Type", "Goals could not load", "Map Goals Script"]
     # Script messages: the map script's Util.MapDebugPrint lines start with this.
     script_marker: "nrc: "

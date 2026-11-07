@@ -580,11 +580,16 @@ def test_script_report_reads_the_logs_and_spot_occupancy(tmp_path):
             sample.format(t=8000, x=105),
         ]
     )
-    addon = "I 11/03 13:08:57 Running script: nav/m.gm\nW 11/03 x goal query for X has no results\n"
+    addon = (
+        "I 11/03 13:08:57 Running script: nav/m.gm\nW 11/03 x goal query for X has no results\n"
+        # Defusing enabled before anything is planted: expected, listed apart.
+        "W 11/03 x SetAvailableMapGoals: goal query for DEFUSE_gate.* has no results\n"
+    )
     files = [tmp_path / "m.way", tmp_path / "m_goals.gm", tmp_path / "m.gm"]
     rep = botplay.script_report(bots(), files, "m", game, addon, "tok", 2000)
     assert rep["goals_loaded"] == [{"loaded": 2, "deferred": 0}]
     assert rep["goal_errors"] == [] and len(rep["script_errors"]) == 1
+    assert [w.split("for ")[1] for w in rep["script_warnings"]] == ["DEFUSE_gate.* has no results"]
     assert rep["triggers_registered"] == 1
     (msg,) = rep["script_messages"]
     assert msg == {
