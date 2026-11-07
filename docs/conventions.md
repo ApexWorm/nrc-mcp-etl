@@ -85,8 +85,9 @@ Two things are worth knowing precisely, because the usual phrase "keep it on gri
   the count; judging it needs to know which kind of shape produced it.
 
 Related, and stronger: geometry whose *plane-defining points* are off-grid cannot be evaluated
-exactly at all. It is reported as `BRUSH_NOT_EXACT` and excluded from analysis rather than
-approximated. Authoring on the grid is therefore not only tidiness — it is what keeps the geometry
+exactly at all. It is reported as `BRUSH_NOT_EXACT`; the gameplay analyses read it from the kernel's
+floating-point path instead (`brushes_float_evaluated`), good to a hundredth of a unit but no longer
+exact. Authoring on the grid is therefore not only tidiness — it is what keeps the geometry exactly
 analysable.
 
 ---

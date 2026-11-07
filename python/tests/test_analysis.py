@@ -341,14 +341,75 @@ def test_utility_brushes_are_not_collision_geometry(tmp_path, kern, pid):
     assert len(grid.component_sizes()) == 1
 
 
+def decompiled(brush: str) -> str:
+    """A brush as `q3map2 -convert` writes it: every face's three points moved along its own
+    plane to three-decimal positions far from the brush, and the third nudged a little off
+    it, so no face has an integer point and the planes carry the writer's rounding."""
+    lines = []
+    for line in brush.strip().splitlines():
+        if not line.startswith("("):
+            lines.append(line)
+            continue
+        parts = line.replace("(", " ").replace(")", " ").split()
+        a, b, c = (tuple(float(v) for v in parts[i : i + 3]) for i in (0, 3, 6))
+        u = tuple(b[i] - a[i] for i in range(3))
+        v = tuple(c[i] - a[i] for i in range(3))
+        k = 777.777
+        a2 = tuple(a[i] + 0.5 * u[i] + 0.25 * v[i] for i in range(3))
+        b2 = tuple(a2[i] + k * u[i] for i in range(3))
+        c2 = tuple(a2[i] + k * v[i] + 0.0004 for i in range(3))
+        points = [tuple(round(x, 3) for x in p) for p in (a2, b2, c2)]
+        lines.append(
+            " ".join(f"( {' '.join(f'{x:.3f}' for x in p)} )" for p in points)
+            + " "
+            + " ".join(parts[9:])
+        )
+    return "\n".join(lines) + "\n"
+
+
+def test_a_decompiled_brush_blocks_as_its_source_does(tmp_path, kern, pid):
+    """Off-grid plane points (a map decompiled from a BSP) enter from the float path.
+
+    Before, every such brush was left out of the grid, so a decompiled map's walls read as
+    open space. The pillar written the decompiler's way must cut the same cells out of the
+    room as the same pillar written on the grid.
+    """
+    pillar = box((240, 208, 0), (272, 304, 256))
+    exact = analysis.build_navgrid(
+        write_map(tmp_path, room(0, 0, 512, 512) + [pillar], name="ongrid.map"),
+        cell=16,
+        profile_id=pid,
+    )
+    path = write_map(tmp_path, room(0, 0, 512, 512) + [decompiled(pillar)], name="decomp.map")
+    grid = analysis.build_navgrid(path, cell=16, profile_id=pid)
+    assert grid.geometry["brushes_float_evaluated"] == 1
+    assert grid.geometry["brushes_indeterminate"] == 0
+    assert not any(f["code"] == "NAV_GEOMETRY_INCOMPLETE" for f in grid.findings)
+    assert exact.counts["walkable_columns"] < 784, "the pillar does stand in the room"
+    assert sorted(grid.walkable_cells()) == sorted(exact.walkable_cells())
+    assert exact.geometry["brushes_float_evaluated"] == 0, "on-grid brushes stay exact"
+
+    # The kernel's default stays exact: validators and the brush_geometry tool still see
+    # the brush as off-grid, and only the opt-in says what shape it has.
+    m = analysis.load_map(path)
+    assert m.brush_geometry(0, 6)["usable"] is False
+    g = m.brush_geometry(0, 6, approximate=True)
+    assert g["usable"] is True and g["approximate"] is True
+    assert "off-grid" in g["exact_reason"]
+    lo, hi = g["bounds"]
+    assert (list(lo), list(hi)) == ([240, 208, 0], [272, 304, 256]), "corners snap back"
+    assert g["off_grid_vertices"] == []
+
+
 def test_a_brush_the_kernel_cannot_evaluate_is_reported_not_ignored(tmp_path, kern, pid):
-    """Off-grid plane points make the kernel refuse, and the report has to say so."""
+    """A brush with no geometry even in floating point is left out, and the report says so."""
     brushes = room(0, 0, 512, 512)
     brushes.append(
         "{\n"
         + "\n".join(
             [
-                face((100.5, 100, 64), (100.5, 101, 64), (101.5, 100, 64)),
+                # Collinear points: no plane at all, exactly or otherwise.
+                face((100.5, 100, 64), (101.5, 100, 64), (102.5, 100, 64)),
                 face((100.5, 100, 0), (101.5, 100, 0), (100.5, 101, 0)),
                 face((100.5, 100, 0), (100.5, 100, 1), (101.5, 100, 0)),
                 face((100.5, 200, 0), (101.5, 200, 0), (100.5, 200, 1)),
@@ -365,6 +426,7 @@ def test_a_brush_the_kernel_cannot_evaluate_is_reported_not_ignored(tmp_path, ke
     finding = next(f for f in grid.findings if f["code"] == "NAV_GEOMETRY_INCOMPLETE")
     assert finding["severity"] == "warning", "a fact about the input, so not clamped to info"
     assert finding["confidence"] == "verified"
+    assert "collinear" in finding["message"]
 
 
 def test_the_cell_budget_is_refused_by_name(tmp_path, kern, pid):
@@ -871,7 +933,7 @@ class _FakeMap:
     def entities(self):
         return self._entities
 
-    def brush_geometry(self, index, primitive):
+    def brush_geometry(self, index, primitive, approximate=False):
         try:
             lo, hi = self._bounds[index][primitive]
         except (KeyError, IndexError):
@@ -1231,11 +1293,10 @@ def test_a_real_map_voxelizes_and_reports(kern, pid):
     assert 0.0 < sight["clear_fraction"] < 1.0, "a real map blocks some lines and not others"
 
 
-def test_a_real_map_with_brushes_the_kernel_declines_says_so(kern, pid):
-    """A third of this map's brushes have off-grid plane points, and that has to be visible."""
+def test_a_real_map_with_off_grid_brushes_says_how_it_read_them(kern, pid):
+    """A third of this map's brushes have off-grid plane points: they enter the grid from the
+    kernel's float path, and the count of them has to be visible."""
     path = _corpus("ut4_dofa.map")
     grid = analysis.build_navgrid(path, cell=32, profile_id=pid)
-    assert grid.geometry["brushes_indeterminate"] > 0
-    finding = next(f for f in grid.findings if f["code"] == "NAV_GEOMETRY_INCOMPLETE")
-    assert finding["severity"] == "warning"
-    assert "absent from this grid" in finding["message"]
+    assert grid.geometry["brushes_float_evaluated"] > 0
+    assert grid.geometry["brushes_indeterminate"] < grid.geometry["brushes_float_evaluated"]

@@ -33,6 +33,7 @@
 //! `libs/stream/textstream.h`) and cross-checked against real maps in `corpus/real/`.
 //! Where this crate deviates from upstream it says so at the deviation.
 
+pub mod approx;
 pub mod exact;
 pub mod lex;
 pub mod math;
@@ -45,6 +46,7 @@ pub mod validate;
 pub mod winding;
 pub mod write;
 
+pub use approx::{approx_geometry, ApproxDegeneracy, ApproxGeometry};
 pub use exact::{IPlane, IVec3, Sign};
 pub use math::{vec3, Aabb, Axis, Plane, Vec3};
 pub use model::{
