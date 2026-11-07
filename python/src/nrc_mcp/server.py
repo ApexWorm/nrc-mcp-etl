@@ -258,6 +258,7 @@ TOOL_NAMES = (
     "commandmap_make",
     "levelshot_make",
     "bot_waypoints_write",
+    "bot_files_mirror",
     "solid_help",
     "solid_compile",
     "solid_preview",

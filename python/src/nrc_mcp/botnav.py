@@ -267,6 +267,35 @@ def write(wf: WaypointFile, fmt: dict) -> bytes:
     return bytes(out)
 
 
+def mirror(wf: WaypointFile, axis: int, at: float = 0.0) -> dict[str, Any]:
+    """Mirror a waypoint file in place through the plane where world `axis` (0, 1 for x, y)
+    equals `at`: each position's component becomes `2 * at - v` (a point), each facing's is
+    negated (a direction), and the file's world box is reflected with its corners swapped.
+    Connections, flags, radii, names and properties stay as they are (the file holds no other
+    coordinate: positions and facings are separate fields, so a plane anywhere is exact)."""
+    if axis not in (0, 1):
+        raise BotNavError("axis is 0 or 1 (a mirror in z would turn floors into ceilings)")
+    if not math.isfinite(at):
+        raise BotNavError("at is a coordinate")
+
+    def point(v: float) -> float:
+        return -v if at == 0 else 2 * at - v
+
+    for wp in wf.waypoints:
+        p, f = list(wp.position), list(wp.facing)
+        p[axis] = point(p[axis])
+        if f[axis]:
+            f[axis] = -f[axis]
+        wp.position, wp.facing = (p[0], p[1], p[2]), (f[0], f[1], f[2])
+    lo, hi = list(wf.world_mins), list(wf.world_maxs)
+    lo[axis], hi[axis] = point(hi[axis]), point(lo[axis])
+    wf.world_mins, wf.world_maxs = (lo[0], lo[1], lo[2]), (hi[0], hi[1], hi[2])
+    return {
+        "waypoints": len(wf.waypoints),
+        "with_properties": sum(1 for wp in wf.waypoints if wp.properties),
+    }
+
+
 def flag_names(flags: int, spec_flags: dict[str, int]) -> list[str]:
     return [name for name, bit in spec_flags.items() if flags & int(bit)]
 

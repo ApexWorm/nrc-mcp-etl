@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
-from nrc_mcp import botnav, botplay, kernel, profiles
+from nrc_mcp import botgoals, botnav, botplay, kernel, profiles
 from nrc_mcp import server as srv
 from nrc_mcp.kernel import parse_map
 from test_analysis import box, point_entity, room, write_map
@@ -684,6 +684,69 @@ def test_tool_stages_the_file_where_the_addon_layout_says(nrcroom, tmp_path_fact
         srv.bot_waypoints_write(omnibot_path=str(addon / "missing"))
     with pytest.raises(ToolError, match="spacing"):
         srv.bot_waypoints_write(spacing=4)
+
+
+def test_mirroring_a_waypoint_file_reflects_places_and_turns_facings():
+    wf = botnav.WaypointFile(
+        version=9,
+        waypoints=[
+            botnav.Waypoint((10.0, 5.0, 24.0), uid=1, facing=(1.0, 0.5, 0.0), connections=[1]),
+            botnav.Waypoint((90.0, -5.0, 24.0), uid=2, flags=4, name="n"),
+        ],
+        world_mins=(-100.0, -50.0, 0.0),
+        world_maxs=(300.0, 50.0, 64.0),
+    )
+    report = botnav.mirror(wf, 0, 100.0)
+    assert report["waypoints"] == 2
+    assert [w.position for w in wf.waypoints] == [(190.0, 5.0, 24.0), (110.0, -5.0, 24.0)]
+    assert wf.waypoints[0].facing == (-1.0, 0.5, 0.0)
+    assert (wf.waypoints[0].connections, wf.waypoints[1].name) == ([1], "n")
+    assert (wf.world_mins, wf.world_maxs) == ((-100.0, -50.0, 0.0), (300.0, 50.0, 64.0))
+    botnav.mirror(wf, 1, 0.0)
+    assert wf.waypoints[1].position == (110.0, 5.0, 24.0)
+    assert (wf.world_mins[1], wf.world_maxs[1]) == (-50.0, 50.0)
+    with pytest.raises(botnav.BotNavError, match="axis"):
+        botnav.mirror(wf, 2)
+
+
+def test_tool_mirrors_another_maps_bot_files_under_the_open_maps_name(nrcroom, tmp_path_factory):
+    srv.bot_waypoints_write(spacing=96)
+    nav = nrcroom / "omni-bot" / "et" / "nav"
+    # The open map's own staged files stand in for another map's: copied out flat, renamed.
+    source = tmp_path_factory.mktemp("stock")
+    for suffix in (".way", "_goals.gm", ".gm"):
+        shutil.copy(nav / f"nrcroom{suffix}", source / f"other{suffix}")
+    # A goal table as stock files write one (nrcroom gets no automatic spots).
+    (source / "other_goals.gm").write_text(
+        "MapGoals = {\n\tDEFEND_a = { Position = Vec3(100, 64, 24), Facing = Vec3(0.5, 1, 0) },\n};\n"
+    )
+    fmt = spec()["format"]
+    before = botnav.read((source / "other.way").read_bytes(), fmt)
+    out = tmp_path_factory.mktemp("out")
+    report = srv.bot_files_mirror(str(source), "other", axis="x", at=0, out_dir=str(out))
+    assert report["missing"] == [] and set(report["files"]) == {"waypoints", "goals", "script"}
+    after = botnav.read((out / "et" / "nav" / "nrcroom.way").read_bytes(), fmt)
+    assert [(-x, y, z) for x, y, z in (w.position for w in before.waypoints)] == [
+        w.position for w in after.waypoints
+    ]
+    assert [w.connections for w in after.waypoints] == [w.connections for w in before.waypoints]
+    goals = (out / "et" / "nav" / "nrcroom_goals.gm").read_text(encoding="latin-1")
+    back, _ = botgoals.gm_mirror(goals, spec()["coordinates"], 0)
+    assert back == (source / "other_goals.gm").read_text(encoding="latin-1")
+    assert report["files"]["goals"]["points"] > 0
+    # Without out_dir the files replace the staged ones; a missing file is listed.
+    (source / "other.gm").unlink()
+    staged = srv.bot_files_mirror(str(source), "other")
+    assert staged["missing"] == ["other.gm"]
+    assert (nav / "nrcroom.way").read_bytes() == (out / "et" / "nav" / "nrcroom.way").read_bytes()
+    # Off the origin the goal table's Vec3 positions and facings cannot be told apart.
+    with pytest.raises(ToolError, match="position or a direction"):
+        srv.bot_files_mirror(str(source), "other", at=64, out_dir=str(out / "off"))
+    assert not (out / "off").exists()
+    with pytest.raises(ToolError, match="holds none"):
+        srv.bot_files_mirror(str(source), "missing")
+    with pytest.raises(ToolError, match="axis"):
+        srv.bot_files_mirror(str(source), "other", axis="z")
 
 
 def test_bot_playtest_validates_before_starting_anything(nrcroom, tmp_path):

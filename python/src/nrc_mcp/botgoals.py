@@ -1582,30 +1582,61 @@ def _gm_negated(script: GmScript, node: GmNode) -> str | None:
     return num.value if sign == "-" else "-" + num.value
 
 
+def _gm_reflected(script: GmScript, node: GmNode, at: float) -> str | None:
+    """The source text of `2 * at - v` for a literal decimal number `v`; at the origin, `v`'s
+    own text with the sign flipped (`_gm_negated`). None for anything else."""
+    if at == 0:
+        return _gm_negated(script, node)
+    sign, num = "", node
+    if node.kind == "un" and node.value in ("-", "+") and node.kids[0].kind == "num":
+        sign, num = node.value, node.kids[0]
+    if num.kind != "num" or num.value[:2].lower() in ("0x", "0b"):
+        return None
+    value = float(_gm_number(num.value)) * (-1 if sign == "-" else 1)
+    text = f"{round(2 * at - value, 6):.6f}".rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "") else text
+
+
 def gm_mirror(
-    text: str | GmScript, coordinates: dict, axis: int, *, check: bool = True
+    text: str | GmScript,
+    coordinates: dict,
+    axis: int,
+    *,
+    at: float = 0.0,
+    check: bool = True,
 ) -> tuple[str, dict]:
     """A GameMonkey script mirrored through the plane where world `axis` (0, 1, 2 for x, y, z)
-    is 0: in every call the profile lists as holding a point (`coordinates.points`, callee ->
-    the index of its x argument) that argument's component is negated, and in every box call
-    (`coordinates.boxes`, callee -> the index of its first of six arguments, mins then maxes)
-    the min and max of that component swap and are negated. Only literal numbers are
-    rewritten (the sign flipped in place, the rest of the file byte for byte); calls whose
-    component is computed are listed as not mirrored. The result is parsed again when
-    `check`. `text` may be a script already parsed."""
+    equals `at`: in every call the profile lists as holding a point (`coordinates.points`,
+    callee -> the index of its x argument) that argument's component is reflected, and in
+    every box call (`coordinates.boxes`, callee -> the index of its first of six arguments,
+    mins then maxes) the min and max of that component swap and are reflected. Only literal
+    numbers are rewritten (the rest of the file byte for byte); calls whose component is
+    computed are listed as not mirrored. The result is parsed again when `check`. `text`
+    may be a script already parsed.
+
+    Through the origin a point and a direction both just change sign, so every listed call
+    mirrors alike (the sign flipped in place). Through any other plane a position becomes
+    `2 * at - v` while a direction still only changes sign, so each call must be known to
+    hold one or the other: `coordinates.positions` and `coordinates.directions` name the
+    callees that do (boxes are positions). A vector constructor holds either (a goal's
+    Position and its Facing are both written with one), so a script with such a call is
+    refused for a plane off the origin, naming the lines: nothing is guessed."""
     if axis not in (0, 1, 2):
         raise BotGoalsError("axis is 0, 1 or 2")
+    if not math.isfinite(at):
+        raise BotGoalsError("at is a coordinate")
     script = text if isinstance(text, GmScript) else gm_parse(text)
     text = script.text
     points = {str(k): int(v) for k, v in (coordinates.get("points") or {}).items()}
     boxes = {str(k): int(v) for k, v in (coordinates.get("boxes") or {}).items()}
+    directions = {str(k) for k in coordinates.get("directions") or []}
+    positions = {str(k) for k in coordinates.get("positions") or []}
     edits: list[tuple[int, int, str]] = []
     report: dict[str, Any] = {"points": 0, "boxes": 0, "not_mirrored": []}
+    either: list[str] = []
 
-    def skip(node: GmNode):
-        report["not_mirrored"].append(
-            {"line": script.line(node.lo), "call": script.source(node)[:120]}
-        )
+    def where(node: GmNode) -> dict:
+        return {"line": script.line(node.lo), "call": script.source(node)[:120]}
 
     for node, _fn in script.walk():
         if node.kind != "call":
@@ -1613,29 +1644,42 @@ def gm_mirror(
         callee, args = script.compact(node.kids[0]), node.kids[1:]
         if callee in points:
             i = points[callee] + axis
-            neg = _gm_negated(script, args[i]) if i < len(args) else None
-            if neg is None:
-                skip(node)
+            if at != 0 and callee not in positions | directions:
+                either.append("line {line}: {call}".format(**where(node)))
                 continue
-            edits.append((*script.span(args[i]), neg))
+            plane = 0.0 if callee in directions else at
+            new = _gm_reflected(script, args[i], plane) if i < len(args) else None
+            if new is None:
+                report["not_mirrored"].append(where(node))
+                continue
+            edits.append((*script.span(args[i]), new))
             report["points"] += 1
         elif callee in boxes:
             lo, hi = boxes[callee] + axis, boxes[callee] + 3 + axis
             if hi >= len(args):
-                skip(node)
+                report["not_mirrored"].append(where(node))
                 continue
-            neg_lo, neg_hi = _gm_negated(script, args[lo]), _gm_negated(script, args[hi])
-            if neg_lo is None or neg_hi is None:
-                skip(node)
+            new_lo = _gm_reflected(script, args[lo], at)
+            new_hi = _gm_reflected(script, args[hi], at)
+            if new_lo is None or new_hi is None:
+                report["not_mirrored"].append(where(node))
                 continue
-            edits.append((*script.span(args[lo]), neg_hi))
-            edits.append((*script.span(args[hi]), neg_lo))
+            edits.append((*script.span(args[lo]), new_hi))
+            edits.append((*script.span(args[hi]), new_lo))
             report["boxes"] += 1
-    parts, at = [], 0
+    if either:
+        name = "xyz"[axis]
+        raise BotGoalsError(
+            f"cannot mirror through {name} = {at:g}: {len(either)} call(s) hold a vector that "
+            "may be a position or a direction, which a plane off the origin mirrors "
+            f"differently ({'; '.join(either[:3])}{' ...' if len(either) > 3 else ''}); "
+            f"mirror through {name} = 0, or move the map so its mirror plane is there"
+        )
+    parts, pos = [], 0
     for a, b, new in sorted(edits):
-        parts += [text[at:a], new]
-        at = b
-    out = "".join(parts) + text[at:]
+        parts += [text[pos:a], new]
+        pos = b
+    out = "".join(parts) + text[pos:]
     if check:
         gm_parse(out)
     return out, report

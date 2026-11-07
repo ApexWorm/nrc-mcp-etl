@@ -514,3 +514,96 @@ def bot_waypoints_write(
             "goals.spots.why": 'what each spot sees and where it stands; detail="full"',
         }
     return out
+
+
+@tool("shipping", "Mirror bot files", writes=True, destructive=True, idempotent=True)
+def bot_files_mirror(
+    source_dir: str,
+    source_map: str,
+    axis: str = "x",
+    at: float = 0,
+    out_dir: str | None = None,
+) -> dict:
+    """Mirror another map's bot add-on files for the open map, through the plane `map_mirror`
+    mirrored the map with (`axis` = `at`; pass the same two values).
+
+    Reads `source_map`'s files from `source_dir` (for ET: Legacy the Omni-bot waypoints
+    `<map>.way`, map goals `<map>_goals.gm` and map script `<map>.gm`; `source_dir` is the
+    folder holding them, or an add-on folder laid out as the profile says, such as the
+    install's `omni-bot`), mirrors each, and writes them under the open map's name: staged
+    where `bot_waypoints_write` stages its own (replacing those), or into `out_dir` in the
+    same layout. Files the folder lacks are listed in `missing`; finding none is an error.
+
+    - Waypoints: each position is reflected, each facing turned, the world box reflected;
+      connections, flags, radii and names stay. Exact for a plane anywhere.
+    - Scripts: in every call the profile lists as holding a coordinate (`bots.coordinates`;
+      for ET: Legacy Vec3/Vector3, Util.SetGoalPosition, Util.SetGoalOffset, AABB) the
+      literal number is rewritten in place, the rest of the file kept byte for byte.
+      Through the origin (`at` = 0) a position and a direction both change sign. Off the
+      origin they differ, and a vector constructor may hold either (a goal's Position and
+      its Facing alike), so a script using one is refused for such a plane, naming the
+      lines. Calls whose coordinate is computed are listed in `not_mirrored`: check those.
+
+    Every file is mirrored and read back before any is written, so a refusal writes nothing.
+    The map itself is not touched: mirror it with `map_mirror` and save it first, since the
+    files take the name the map is saved under. Run them with `bot_playtest(waypoints=...,
+    nav_files=[...])`.
+    """
+    pid, _pkg, root, stem = _release()
+    axes = {"x": 0, "y": 1}
+    if axis not in axes:
+        raise ToolError("axis is 'x' or 'y' (a mirror in z would turn floors into ceilings)")
+    if not math.isfinite(at):
+        raise ToolError("at is a coordinate")
+    if not source_map or Path(source_map).name != source_map:
+        raise ToolError("source_map is a map name (no folder, no extension)")
+    folder = Path(source_dir)
+    if not folder.is_dir():
+        raise ToolError(f"source_dir {folder} is not a folder")
+    try:
+        bots = botnav.spec(pid)
+        goals_spec, script_spec, _ = botgoals.spec(bots)
+    except (botnav.BotNavError, botgoals.BotGoalsError) as e:
+        raise ToolError(str(e)) from e
+    coordinates = bots.get("coordinates")
+    if not isinstance(coordinates, dict):
+        raise ToolError(f"profile {pid} names no script coordinates (bots.coordinates)")
+    layout = {
+        "waypoints": lambda name: botnav.install_path(bots, name),
+        "goals": lambda name: Path(str(goals_spec["install_path"]).format(map=name)),
+        "script": lambda name: Path(str(script_spec["install_path"]).format(map=name)),
+    }
+    target = Path(out_dir) if out_dir else root / str(bots["stage_dir"])
+    a = axes[axis]
+    written: dict[Path, bytes] = {}
+    files: dict[str, dict] = {}
+    missing: list[str] = []
+    for kind, path_of in layout.items():
+        rel = path_of(source_map)
+        src = next((p for p in (folder / rel, folder / rel.name) if p.is_file()), None)
+        if src is None:
+            missing.append(rel.name)
+            continue
+        dest = target / path_of(stem)
+        raw = src.read_bytes()
+        try:
+            if kind == "waypoints":
+                fmt = bots["format"]
+                wf = botnav.read(raw, fmt)
+                row = botnav.mirror(wf, a, float(at))
+                body = botnav.write(wf, fmt)
+                if botnav.write(botnav.read(body, fmt), fmt) != body:
+                    raise ToolError(f"{src}: the mirrored file does not read back; nothing written")
+            else:
+                # The add-on's scripts are 8-bit text: latin-1 keeps every byte as it was.
+                text, row = botgoals.gm_mirror(raw.decode("latin-1"), coordinates, a, at=float(at))
+                body = text.encode("latin-1")
+        except (botnav.BotNavError, botgoals.BotGoalsError) as e:
+            raise ToolError(f"{src}: {e}; nothing was written") from e
+        written[dest] = body
+        files[kind] = {"source": str(src), "path": str(dest), "bytes": len(body), **row}
+    if not written:
+        raise ToolError(f"{folder} holds none of {', '.join(missing)}; nothing was written")
+    for dest, body in written.items():
+        _write(dest, body)
+    return {"plane": {"axis": axis, "at": at}, "map": stem, "files": files, "missing": missing}

@@ -4852,12 +4852,19 @@ bots:
   # and Util.SetGoalOffset(x, y, z, GoalName) set and shift a goal's position
   # (global_scripts/utilities.gm:216-234). AABB(p, p) builds a box from a mins and a maxs
   # corner (global_scripts/commands.gm:316); 3659 of the 3668 six-number AABBs in the 0.93
-  # scripts list the mins first. Only literal numbers are rewritten; the plane is through
-  # the world origin, so points and directions mirror alike.
+  # scripts list the mins first. Only literal numbers are rewritten. Through the world origin
+  # points and directions mirror alike (the sign flips); through any other plane a position
+  # is reflected (2 * at - v) and a direction only flips sign, so `positions` and
+  # `directions` say which a callee holds: SetGoalPosition sets the goal at (x, y, z)
+  # (utilities.gm:228-236), SetGoalOffset adds (x, y, z) to its position (utilities.gm:
+  # 216-224), an AABB's corners are places. The vector constructors hold either (Position
+  # and Facing alike), so a script using them mirrors only through the origin.
   coordinates:
     confidence: unverified
     points: {Vec3: 0, Vector3: 0, Util.SetGoalPosition: 0, Util.SetGoalOffset: 0}
     boxes: {AABB: 0}
+    positions: [Util.SetGoalPosition, AABB]
+    directions: [Util.SetGoalOffset]
 
   # The map script: one function per objective event, registered with OnTrigger. The game
   # hands the add-on a trigger with a tag name (Bot_Util_SendTrigger, etbot/

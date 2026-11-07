@@ -174,6 +174,7 @@ WRITERS = {
     "commandmap_make",
     "levelshot_make",
     "bot_waypoints_write",
+    "bot_files_mirror",
     "compile_map",
     "engine_playtest",
     "bot_playtest",
@@ -200,6 +201,7 @@ DESTRUCTIVE = {
     "commandmap_make",
     "levelshot_make",
     "bot_waypoints_write",
+    "bot_files_mirror",
     "task_run",
 }
 

@@ -12,7 +12,8 @@ turned to face forward), Save As `etl_supply_mirror`, the script's one coordinat
 animation (the crane gauge's `faceangles` pitch) mirrored with script_set_event, arena,
 objective texts, command map and levelshot, compile, pack, ship_check, an engine smoke
 playtest, the generated objective playtests, and Omni-bot: seeded waypoints and the add-on's
-own stock `etl_supply.way` mirrored the same way, each run with bot_playtest.
+own stock files (`.way`, `_goals.gm`, `.gm`) mirrored through the same plane with
+bot_files_mirror, each run with bot_playtest.
 """
 
 from __future__ import annotations
@@ -22,18 +23,19 @@ import asyncio
 import json
 import re
 import shutil
-import sys
 import time
 import zipfile
 from pathlib import Path
 
-from dogfood_session import REPO, DogfoodSession, ToolCallError
+from dogfood_session import DogfoodSession, ToolCallError
 
 NAME = "etl_supply_mirror"
 SOURCE = "etl_supply"
 # Brush entities the game turns to face the truck's path (followspline / attachtotag).
 VEHICLES = ["truck", "truck_crate", "truck_trigger", "truck_toi"]
 BOT_PORT = 27964
+#: The mirror plane, for the map and its bot files alike.
+AXIS, AT = "x", 0
 
 #: q3map2's alphaMod volumes (docs/shaderManual/terrain-and-alphamod-blends.html) and the
 #: hint brushes' skip faces, as the stock Quake 3 common shaders define them.
@@ -117,35 +119,6 @@ def objective_texts(objdata: str) -> tuple[dict, dict]:
     return desc, objs
 
 
-def mirror_gm(text: str) -> tuple[str, dict]:
-    """An Omni-bot script mirrored in x with the repo's GameMonkey reader: every literal
-    coordinate the profile names (bots.coordinates: Vec3, AABB, Util.SetGoalPosition, ...) has
-    its x negated in place, the rest of the file byte for byte."""
-    sys.path.insert(0, str(REPO / "python/src"))
-    from nrc_mcp import botgoals, profiles  # noqa: PLC0415
-
-    return botgoals.gm_mirror(text, profiles.load("etl")["bots"]["coordinates"], 0)
-
-
-def mirror_way(src: Path, dest: Path) -> dict:
-    """Mirror an Omni-bot waypoint file in x with the repo's codec (positions, facings, box)."""
-    sys.path.insert(0, str(REPO / "python/src"))
-    from nrc_mcp import botnav  # noqa: PLC0415
-
-    fmt = botnav.spec("etl")["format"]
-    wf = botnav.read(src.read_bytes(), fmt)
-    for wp in wf.waypoints:
-        x, y, z = wp.position
-        wp.position = (-x, y, z)
-        fx, fy, fz = wp.facing
-        wp.facing = (-fx, fy, fz)
-    lo, hi = wf.world_mins, wf.world_maxs
-    wf.world_mins, wf.world_maxs = (-hi[0], lo[1], lo[2]), (-lo[0], hi[1], hi[2])
-    data = botnav.write(wf, fmt)
-    dest.write_bytes(data)
-    return {"waypoints": len(wf.waypoints), "file": str(dest)}
-
-
 def per_objective(generated_run: dict, receipt: dict) -> list[dict]:
     """Each objective's outcome and engine seconds in one run: its steps end at the
     `<name>_done` screenshot objective_playtests puts after each test (the templates take
@@ -206,7 +179,7 @@ async def main(args):
                 params=params,
                 actions=actions,
             )
-        mirrored = await run.call("map_mirror", axis="x", at=0, vehicles=VEHICLES)
+        mirrored = await run.call("map_mirror", axis=AXIS, at=AT, vehicles=VEHICLES)
         # Save As, script along: a mirror moves all playable space, so the before/after
         # comparison would only report that; the geometry is validated instead (below).
         await run.call("map_save", path=str(maps / f"{NAME}.map"), check_playable_space=False)
@@ -352,31 +325,33 @@ async def main(args):
                 run.artifact("result", result)
 
         if args.bots:
-            # The add-on's own files for the original map, mirrored: waypoints, and its map
-            # script and goals (their Vec3 positions and AABB regions).
-            stock_dir = Path(args.stock_way).parent
-            mirrored = run.root / "omni-bot-stock"
-            mirrored.mkdir()
-            gm = []
-            for suffix in (".gm", "_goals.gm"):
-                src = stock_dir / f"{SOURCE}{suffix}"
-                if src.is_file():
-                    dest = mirrored / f"{NAME}{suffix}"
-                    text, report = mirror_gm(src.read_bytes().decode("latin-1"))
-                    dest.write_bytes(text.encode("latin-1"))
-                    result.setdefault("stock_gm_mirrored", {})[dest.name] = {
-                        "points": report["points"],
-                        "boxes": report["boxes"],
-                        "not_mirrored": report["not_mirrored"],
-                    }
-                    gm.append(str(dest))
+            # The add-on's own files for the original map (waypoints, map script and goals),
+            # mirrored through the plane the map was, into a folder of their own: the seeded
+            # files are staged where bot_waypoints_write puts them.
+            mirrored = await run.call(
+                "bot_files_mirror",
+                source_dir=str(Path(args.stock_way).parent),
+                source_map=SOURCE,
+                axis=AXIS,
+                at=AT,
+                out_dir=str(run.root / "omni-bot-stock"),
+            )
+            files = mirrored["files"]
+            result["stock_mirrored"] = {
+                kind: {
+                    k: row[k]
+                    for k in ("path", "waypoints", "points", "boxes", "not_mirrored")
+                    if k in row
+                }
+                for kind, row in files.items()
+            }
+            result["stock_mirrored"]["missing"] = mirrored["missing"]
+            gm = [files[k]["path"] for k in ("script", "goals") if k in files]
             plays = {"seeded": (None, [])}
             if args.bots_with_gm and gm:
                 plays["seeded+stock_gm"] = (None, gm)
-            if Path(args.stock_way).is_file():
-                way = mirrored / f"{NAME}.way"
-                result["stock_way_mirrored"] = mirror_way(Path(args.stock_way), way)
-                plays["stock_way+stock_gm"] = (str(way), gm)
+            if "waypoints" in files:
+                plays["stock_way+stock_gm"] = (files["waypoints"]["path"], gm)
             result["bots"] = {"write": await run.call("bot_waypoints_write", cell=args.cell)}
             for label, (waypoints, nav) in plays.items():
                 try:

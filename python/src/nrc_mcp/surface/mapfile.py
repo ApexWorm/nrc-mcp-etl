@@ -364,7 +364,9 @@ def map_mirror(axis: str = "x", at: float = 0, vehicles: list[str] | None = None
     What it cannot mirror, it reports: raw primitive blocks the kernel keeps as text, and
     models (`misc_model` and the like), which turn to the mirrored facing but are drawn
     unmirrored. A map script is not touched; coordinates or angles written in it (rotation
-    targets, `faceangles`) need mirroring by hand. Nothing reaches disk until `map_save`.
+    targets, `faceangles`) need mirroring by hand; the bot add-on's files for the original
+    map mirror through the same plane with `bot_files_mirror`, once the map is saved.
+    Nothing reaches disk until `map_save`.
     """
     m = SESSION.require()
     axes = {"x": 0, "y": 1}
