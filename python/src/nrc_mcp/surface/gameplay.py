@@ -925,10 +925,18 @@ def objective_playtests(
     Every standing position is floor the player box rests on with headroom, on the walkable
     grid, inside the right volume and clear of the objective's brushes, and joined to one of
     the team's spawns by a walkable route (`standing[].route`). `cell` is that grid's size.
+    The spawns are those active as the round starts: ones the script hides then (the profile's
+    `objectives.playtest.state`) do not count, and neither do its hidden brushes.
+
+    An objective no spawn reaches at the start may sit behind another that opens the way (for
+    ET: Legacy, an explosive the other team destroys). It is looked for again on the map with
+    those destroyed; its test `requires` the ones its route passes through, and its run plays
+    them first (a run replays a requirement another run already played).
 
     `runs` are what to pass to `engine_playtest`: `scenario` and `timeout_seconds` each. A test
     that ends the round closes its run, so a map with two winning objectives needs two runs.
-    `tests` lists each objective's test on its own, with what it `proves`; `skipped` lists the
+    `tests` lists each objective's test on its own, with what it `proves` and `requires`
+    (`round` 0 is the start of the round); `skipped` lists the
     objectives (and objective entities) no test could be made for, and why. `objective` limits
     this to one objective, by name. Nothing is changed or launched; pack the map first.
     """

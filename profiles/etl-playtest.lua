@@ -37,12 +37,18 @@ end
 local function sample(time)
     local entities = {}
     for name in pairs(watched) do entities[name] = {present = false, seen = seen[name] == true, count = 0} end
-    local charges, armed, chargeAt = 0, 0, nil
+    local charges, armed, chargeAt, chargeResting = 0, 0, nil, nil
     for n = 64, 1021 do
         if read(n, "inuse") == 1 then
             if read(n, "s.weapon") == 15 then
                 charges = charges + 1
-                chargeAt = chargeAt or vector(read(n, "r.currentOrigin"))
+                if chargeAt == nil then
+                    chargeAt = vector(read(n, "r.currentOrigin"))
+                    -- A thrown charge flies TR_GRAVITY; once it stops bouncing G_SetOrigin makes
+                    -- it TR_STATIONARY, 0 (g_missile.c:126-140, g_utils.c:1167-1173).
+                    local pos = read(n, "s.pos")
+                    chargeResting = type(pos) == "table" and pos.trType == 0
+                end
                 -- g_weapon.c:2227 sets effect1Time when pliers finish arming.
                 if (read(n, "s.effect1Time") or 0) > 0 then armed = armed + 1 end
             end
@@ -71,6 +77,16 @@ local function sample(time)
     local velocity = vector(read(0, "ps.velocity"))
     -- PW_REDFLAG 5 / PW_BLUEFLAG 6 (bg_public.h:785-786): a carried objective item.
     local carrying = (read(0, "ps.powerups", 5) or 0) > 0 or (read(0, "ps.powerups", 6) or 0) > 0
+    -- The class charge bar, 0..1: full when classWeaponTime is at least the class's charge
+    -- time ago (bg_pmove.c:3732-3743; the times are CS_CHARGETIMES, g_cvars.c:1006-1019,
+    -- "x"/"a" + class for axis/allies). A respawn fills it (g_client.c:3205-3208).
+    local charge = nil
+    local key = (team == 1 and "x" or team == 2 and "a" or nil)
+    if key and role then
+        local full = tonumber(et.Info_ValueForKey(et.trap_GetConfigstring(et.CS_CHARGETIMES), key .. role))
+        local since = time - (read(0, "ps.classWeaponTime") or 0)
+        if full and full > 0 then charge = math.min(1, math.max(0, since / full)) end
+    end
     local winner = et.trap_GetConfigstring(et.CS_MULTI_MAPWINNER):match("\\w\\([%-0-9]+)")
     local packet = {time_ms = time, ack = ack, player = {
         connected = read(0, "pers.connected") == 2,
@@ -80,11 +96,13 @@ local function sample(time)
         stance = height == 40 and "stand" or height == 16 and "crouch" or height == -8 and "prone" or "unknown",
         weapon = weapons[read(0, "ps.weapon")] or "other", weapon_id = read(0, "ps.weapon"),
         speed = velocity and math.sqrt(velocity[1]^2 + velocity[2]^2 + velocity[3]^2) or nil,
-        position = vector(read(0, "ps.origin")), angles = vector(read(0, "ps.viewangles"))
+        position = vector(read(0, "ps.origin")), angles = vector(read(0, "ps.viewangles")),
+        charge = charge
     }, game = {
         phase = phases[tonumber(et.trap_Cvar_Get("gamestate"))] or "unknown",
         winner = winner == "0" and "red" or winner == "1" and "blue" or "none",
-        charge_count = charges, armed_charges = armed, charge_position = chargeAt
+        charge_count = charges, armed_charges = armed, charge_position = chargeAt,
+        charge_resting = chargeResting
     }, entities = entities}
     -- et.G_Print copies into a 1024-byte buffer (src/game/g_lua.c:193) and drops the rest,
     -- newline included; print in pieces under that and end the line once.

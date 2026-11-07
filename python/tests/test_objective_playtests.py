@@ -276,3 +276,139 @@ def test_an_objective_out_of_reach_is_skipped_with_the_reason(nrcroom):
     (skip,) = [s for s in r["skipped"] if s.get("objective") == "perch"]
     assert "reachable" in skip["reason"] or "no floor" in skip["reason"]
     assert not r["tests"]
+
+
+# ---------------------------------------------------------------------------
+# State: what the script hides at the start, what a test needs played first
+# ---------------------------------------------------------------------------
+
+HIDING = """
+game_manager
+{
+    spawn
+    {
+        wait 100
+        setstate cp_spawns invisible
+        setstate shown invisible
+        setstate shown default
+    }
+    trigger later
+    {
+        setstate late invisible
+    }
+}
+"""
+
+
+def test_spawns_the_script_hides_at_the_start_are_not_where_a_team_starts(etl_profile):
+    data = profiles.load("etl")
+    meta = data["objectives"]["playtest"]
+    script = ot.Script(HIDING, data["mapscript"], meta)
+    assert script.start_hidden(meta["state"]["start_hidden"]) == {"cp_spawns"}
+    game_map = FakeMap(
+        [
+            ent(0, "worldspawn"),
+            ent(1, "team_CTF_bluespawn", [0, 0, 24], targetname="start", spawnflags="3"),
+            ent(2, "team_CTF_bluespawn", [512, 0, 24], targetname="CP_Spawns", spawnflags="3"),
+        ]
+    )
+    hidden = ot._hidden(script, meta, game_map)
+    assert hidden == {2}, "found by targetname without case, as the engine does"
+    geo = ot.Geometry.__new__(ot.Geometry)
+    geo.game_map, geo.meta, geo.hidden = game_map, meta, hidden
+    assert geo.homes("blue") == [[0.0, 0.0, 24.0]]
+
+
+def _test(name, requires=(), rnd=0):
+    steps = [{"action": "join", "team": "blue", "role": "engineer", "timeout": 40}]
+    return {
+        "objective": name,
+        "ends_round": False,
+        "watch": [name],
+        "steps": steps,
+        "requires": list(requires),
+        "round": rnd,
+    }
+
+
+def test_a_test_plays_after_what_it_requires_in_the_same_run(etl_profile):
+    tests = [
+        _test("gate"),
+        _test("hut", requires=["gate"], rnd=1),
+        _test("crane", requires=["gate", "door"], rnd=2),
+        _test("door", requires=["gate"], rnd=1),
+    ]
+    runs = ot.pack(tests, playtest.spec("etl"))
+    order = [o for r in runs for o in r["objectives"]]
+    for r in runs:
+        seen = r["objectives"]
+        for t in tests:
+            if t["objective"] in seen:
+                for need in t["requires"]:
+                    assert need in seen[: seen.index(t["objective"])], (need, seen)
+    assert sorted(set(order)) == ["crane", "door", "gate", "hut"]
+    assert order.count("hut") == order.count("door") == order.count("crane") == 1
+
+
+def test_a_required_test_is_replayed_in_a_new_run(etl_profile):
+    # Long tests: a run holds two at most, so the second dependant needs its own run.
+    long = [{"action": "hold", "controls": ["attack"], "seconds": 60, "timeout": 70}] * 3
+    tests = [_test("gate"), _test("a", ["gate"], 1), _test("b", ["gate"], 1)]
+    for t in tests:
+        t["steps"] = t["steps"] + long
+    runs = ot.pack(tests, playtest.spec("etl"))
+    assert [r["objectives"] for r in runs] == [["gate", "a"], ["gate", "b"]]
+
+
+def test_the_dynamite_template_waits_for_a_full_bar_and_a_landed_charge(etl_profile):
+    steps = profiles.load("etl")["objectives"]["kinds"]["dynamite"]["playtest"]["steps"]
+    fields = [c["field"] for s in steps for c in s.get("until") or []]
+    assert fields.index("charge") < fields.index("charge_count") < fields.index("charge_resting")
+    aim = next(i for i, s in enumerate(steps) if s.get("action") == "aim")
+    resting = next(i for i, s in enumerate(steps) if "charge_resting" in str(s.get("until")))
+    assert resting < aim, "aim only at a charge that has stopped"
+    adapter = playtest.spec("etl")
+    assert "charge" in adapter["fields"]["player"]
+    assert "charge_resting" in adapter["fields"]["game"]
+    assert "more_fields" not in adapter
+
+
+def test_a_constructible_that_starts_built_is_skipped(etl_profile):
+    template = profiles.load("etl")["objectives"]["kinds"]["constructible"]["playtest"]
+    found = ot.Found(
+        "constructible",
+        "truck_construct",
+        "allies",
+        {"team": "allies", "name": "truck_construct"},
+        {"anchor": [ent(1, "func_constructible", targetname="truck_construct", spawnflags="9")]},
+    )
+    builder = ot.Builder(found, template, None, None, {"profile": "etl", "adapter": {}})
+    with pytest.raises(ot.Untestable, match="starts built"):
+        builder.build()
+
+
+def test_an_objective_behind_a_blown_gate_is_chained_after_it(nrcroom):
+    # The fixture's halves meet only at the gate, a func_explosive. Give it an Axis objective
+    # trigger on the Allied side, and put an Allied constructible in the Axis half.
+    trig = srv.solid_commit(
+        {"op": "box", "min": [528, 192, 0], "max": [624, 320, 128]},
+        label="gate_trigger",
+        target_classname="trigger_objective_info",
+    )
+    srv.entity_set_keys(trig["entity"], {"target": "gate", "spawnflags": "1", "track": "gate"})
+    srv.objective_place(
+        "constructible",
+        "hut",
+        "the hut",
+        "allies",
+        objective={"min": [200, 300, 0], "max": [248, 348, 64]},
+        trigger={"min": [150, 250, 0], "max": [300, 400, 128]},
+    )
+    srv.map_save()
+    r = srv.objective_playtests()
+    tests = {t["objective"]: t for t in r["tests"]}
+    assert set(tests) == {"gate", "hut"}, r["skipped"]
+    assert tests["gate"]["requires"] == [] and tests["hut"]["requires"] == ["gate"]
+    assert any("same run" in n for n in tests["hut"]["notes"])
+    (run,) = r["runs"]
+    assert run["objectives"] == ["gate", "hut"]

@@ -111,7 +111,21 @@ def spec(profile_id: str) -> dict:
     data = engine.spec(profile_id).get("playtest")
     if not isinstance(data, dict):
         raise PlaytestError(f"profile {profile_id} does not support gameplay scenarios")
-    return data
+    return _with_more_fields(data)
+
+
+def _with_more_fields(data: dict) -> dict:
+    """The adapter with `more_fields` (observed fields added after `fields`, which may carry
+    their own confidence) joined into `fields`, per scope."""
+    more = data.get("more_fields")
+    if not isinstance(more, dict):
+        return data
+    fields = {scope: list(names) for scope, names in (data.get("fields") or {}).items()}
+    for scope, names in more.items():
+        if isinstance(names, list):
+            have = fields.setdefault(scope, [])
+            have += [str(n) for n in names if str(n) not in have]
+    return {k: v for k, v in data.items() if k != "more_fields"} | {"fields": fields}
 
 
 def describe(profile_id: str) -> dict:

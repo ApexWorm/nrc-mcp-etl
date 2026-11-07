@@ -223,7 +223,11 @@ dynamite is planted, aimed at and armed until the explosive is gone; constructib
 command posts are built; a checkpoint is captured and retaken, proved by where the attackers
 respawn; an escort vehicle is followed point by point, checked to stop without its escort,
 and seen to the end of its path; a stolen item is picked up and delivered; and where the
-script ends the round, the test waits for intermission and the winner it sets.
+script ends the round, the test waits for intermission and the winner it sets. Spawns the
+script hides as the round starts are not where a team starts; an objective no spawn reaches
+then is looked for again with the explosives earlier tests destroy opened, and `requires`
+them: its run plays them first. The engineer waits for a full charge bar before dynamite or
+a build, and aims only at a charge that has landed.
 `mise run bench:dogfood -- objectives <example>` generates and runs them for an example map.
 
 **Bots.** ET: Legacy servers fill teams with Omni-bot, and Omni-bot adds no bot at all to a map
