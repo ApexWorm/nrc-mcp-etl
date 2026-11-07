@@ -30,6 +30,9 @@ __pycache__/
 
 # build artefacts
 /bench/results/
+# Self-dev attempt records: the loop's own bookkeeping, written by every attempt. Not ignored, they
+# would show as a change and every attempt would be rejected for touching a disallowed path.
+/bench/selfdev/
 /bench/difftest.json
 /out/
 # The compiled extension module, installed here by `mise run kernel:build`.

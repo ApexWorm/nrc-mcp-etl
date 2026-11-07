@@ -660,12 +660,23 @@ def _effective_severity(rule: dict) -> str:
     An unverified rule can never fail a build. §7 requires it, and the alternative has already
     cost this project once.
     """
-    asked = str(rule.get("severity", "warning")).lower()
-    if asked not in SEVERITIES:
-        asked = "warning"
-    if str(rule.get("confidence", "unverified")).lower() != "verified":
+    return clamp_severity(rule.get("severity", "warning"), rule.get("confidence", "unverified"))
+
+
+def clamp_severity(asked: object, confidence: object) -> str:
+    """The one severity clamp every checker shares.
+
+    Only the exact string `verified` counts as verified — the same comparison the rest of the
+    code and the protected-path pin make; the profile loader refuses any other spelling. A
+    severity outside SEVERITIES becomes `warning`, so a typo such as `fatal` can neither escape
+    the summary counts nor fail a build.
+    """
+    sev = str(asked).lower()
+    if sev not in SEVERITIES:
+        sev = "warning"
+    if confidence != "verified":
         return "info"
-    return asked
+    return sev
 
 
 def _format(template: str, facts: dict) -> str:

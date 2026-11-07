@@ -873,10 +873,17 @@ ET: Legacy scenarios - build a map from nothing, add an objective, ship a map - 
 `bench/scenarios/README.md` covers the cost controls.
 
 **No kernel self-modification.** The exact predicates, the differential harness, the fitness
-definitions, the corpus and every verified rule are hash-pinned in `bench/protected.json`. The
-opt-in self-tuning loop can only touch the prompt and resource layer, where a mistake cannot corrupt
-a map. `mise run selfdev:protected` verifies the pins; if it fails, treat every fitness score as
-meaningless until you know why.
+definitions, the corpus, the self-dev guardrails and every verified profile entry are hash-pinned
+in `bench/protected.json`. "Verified" means effective confidence: an entry's own `confidence`, or
+the one it inherits from its section, so a section marked verified (`bots:`, `objectives:`,
+`mapscript:` ...) is pinned in full except entries that mark themselves `confidence: unverified`.
+The rule for profile work follows: **new or changing entries go in as `confidence: unverified`**
+(free to edit, and they can only produce `info`); a human promotes them to `verified` after review
+and re-pins in the same commit with `mise run --yes selfdev:repin`. Editing an entry that is
+already verified is a re-pin too. The opt-in self-tuning loop can only touch the prompt and
+resource layer, where a mistake cannot corrupt a map, and it measures its changes against the
+attempt's base commit. `mise run selfdev:protected` verifies the pins; if it fails, treat every
+fitness score as meaningless until you know why.
 
 ## Troubleshooting
 

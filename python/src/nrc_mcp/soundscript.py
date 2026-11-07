@@ -525,7 +525,8 @@ def check(
             v = next((v for k, v in e.get("keys") or [] if str(k).lower() == key), "")
             resolve(v.strip(), f"{cls} {key}", int(e.get("index", -1)), None)
     blocks = _script_blocks(profile_id, path, script_text)
-    script_name = mapscript.script_path(profiles.load(profile_id).get("mapscript") or {}, path).name
+    ms = profiles.load(profile_id).get("mapscript")
+    script_name = mapscript.script_path(ms, path).name if isinstance(ms, dict) else "map script"
     for act, value, line in _actions(blocks, refs.get("script_actions")):
         resolve(value, f"{script_name} {act}", None, line)
 

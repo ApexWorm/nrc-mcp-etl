@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import profiles, script_lifetime
-from .rules import Finding, parse_spawnflags
+from .rules import Finding, clamp_severity, parse_spawnflags
 
 
 class ScriptSyntaxError(ValueError):
@@ -188,13 +188,30 @@ def _keys(entity: dict) -> dict[str, str]:
 
 
 def _severity(asked: str, confidence: str) -> str:
-    return asked if confidence == "verified" else "info"
+    return clamp_severity(asked, confidence)
+
+
+def _stated(spec: dict, key: str) -> str:
+    """A naming convention the profile must state: code has no default for it.
+
+    The script's file name and the key that names a block are the game's conventions, so a
+    default here would be one game's vocabulary living in code (§7.4).
+    """
+    value = spec.get(key)
+    if not isinstance(value, str) or not value:
+        raise profiles.ProfileError(f"the profile's mapscript section must state `{key}`")
+    return value
+
+
+def block_key(spec: dict) -> str:
+    """The entity key whose value names the script block an entity runs, lowercased."""
+    return _stated(spec, "block_key").lower()
 
 
 def script_path(spec: dict, map_path: str | Path) -> Path:
     """Where the script for this `.map` lives: beside it, named from the profile's pattern."""
     p = Path(map_path)
-    return p.with_name(str(spec.get("file", "{map}.script")).format(map=p.stem))
+    return p.with_name(_stated(spec, "file").format(map=p.stem))
 
 
 def brace_actions(spec: dict) -> frozenset[str]:
@@ -203,7 +220,7 @@ def brace_actions(spec: dict) -> frozenset[str]:
 
 def names(spec: dict, entities: list[dict]) -> dict[str, list[int]]:
     """Block names the map's entities run, lowercased, with the entities that run each."""
-    key = str(spec.get("block_key", "scriptname")).lower()
+    key = block_key(spec)
     named: dict[str, list[int]] = {}
     for e in entities:
         v = _keys(e).get(key, "").strip()
@@ -262,7 +279,7 @@ def check(
     # Entities the script spawns itself are as real as the map's own, for names and blocks.
     # Index -1 marks them; they are never listed in a finding.
     entities = entities + _spawned(spec, blocks)
-    key = str(spec.get("block_key", "scriptname")).lower()
+    key = block_key(spec)
     named = names(spec, entities)
     by_name: dict[str, Block] = {}
     out: list[Finding] = []
@@ -390,7 +407,7 @@ def _objective_requirements(spec, entities, by_name, finding) -> list[Finding]:
     at it and counts down, and the objective survives.
     """
     out: list[Finding] = []
-    block_key = str(spec.get("block_key", "scriptname")).lower()
+    bkey = block_key(spec)
     for rule in spec.get("objective_requirements") or []:
         if not isinstance(rule, dict):
             continue
@@ -418,7 +435,7 @@ def _objective_requirements(spec, entities, by_name, finding) -> list[Finding]:
             ):
                 continue
             action = str(rule.get("action", "")).lower()
-            block = by_name.get(k.get(block_key, "").strip().lower())
+            block = by_name.get(k.get(bkey, "").strip().lower())
             if (
                 action
                 and block is not None

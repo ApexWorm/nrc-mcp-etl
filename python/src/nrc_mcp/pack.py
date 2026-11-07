@@ -43,6 +43,7 @@ from typing import Any
 
 from . import profiles
 from .kernel import repo_root
+from .rules import clamp_severity
 
 #: Written by q3map2's packer. Verified in `tools/quake3/q3map2/autopk3.cpp`.
 SUCCESS_SUFFIX = "_autopacked.pk3"
@@ -849,7 +850,7 @@ def ship_check(
         }
 
     def sev(asked: str, confidence: str) -> str:
-        return asked if confidence == "verified" else "info"
+        return clamp_severity(asked, confidence)
 
     # --- name convention -----------------------------------------------------
     pattern = pkg.get("map_name_pattern")
@@ -1070,14 +1071,17 @@ def _check_archive(archive: Path, stem: str, pkg: dict, sev) -> list[dict]:
                 if n.lower().startswith(f"textures/{p}/") or n.lower() == f"scripts/{p}.shader"
             ]
         if clashes:
+            # The prefix list is the profile's claim, so the finding carries the profile's
+            # confidence rather than asserting `verified` on its behalf.
+            conf = str(pkg.get("confidence", "unverified"))
             findings.append(
                 _finding(
                     "SHIP_SHADOWS_BASEGAME",
-                    "warning",
+                    sev("warning", conf),
                     f"{len(clashes)} file(s) in {archive.name} sit under a base-game path "
                     f"({', '.join(sorted(set(clashes))[:4])}) — shipping a copy overrides it "
                     "for every other map on the server",
-                    "verified",
+                    conf,
                     "move assets under a directory named for this map",
                 )
             )
