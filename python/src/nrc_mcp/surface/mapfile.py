@@ -19,6 +19,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from .. import analysis as anamod
 from .. import mapscript, profiles, rules, soundscript
 from .. import playspace as playspacemod
+from .. import solids as solidsmod
 from ..kernel import parse_map, repo_root
 from ..project_state import write_batch
 from ..runtime import (
@@ -32,17 +33,22 @@ from ..runtime import (
 
 
 @tool("map", "Open map")
-def map_open(path: str, grid: int = 8) -> dict:
+def map_open(path: str, grid: int = 8, discard_unsaved: bool = False) -> dict:
     """Open a `.map` file for analysis.
+
+    Refused while the open map has edits or staged files `map_save` has not written, which
+    opening another map would throw away; save them first, or pass `discard_unsaved`.
 
     Args:
         path: path to the `.map`. Relative paths resolve against the repo root.
         grid: authoring grid that off-grid geometry is measured against.
+        discard_unsaved: open anyway, dropping the open map's unsaved work.
 
     Returns a summary plus a round-trip check. If `round_trip.identical` is false, treat
     every later answer about this map with suspicion and report it — that is the §3.2 gate
     failing on a real file, which is a kernel bug worth fixing before anything else.
     """
+    _refuse_unsaved(discard_unsaved)
     p = Path(path)
     if not p.is_absolute():
         p = repo_root() / p
@@ -51,6 +57,7 @@ def map_open(path: str, grid: int = 8) -> dict:
     m = parse_map(loaded.decode("utf-8"))
 
     SESSION.map = m
+    SESSION.saved_source = m.source()
     SESSION.path = p
     SESSION.grid = grid
     SESSION.warnings = []
@@ -88,22 +95,36 @@ def map_open(path: str, grid: int = 8) -> dict:
     }
 
 
+def _refuse_unsaved(discard: bool) -> None:
+    """Refuse to replace the open map while it holds work `map_save` has not written."""
+    unsaved = SESSION.unsaved()
+    if unsaved and not discard:
+        raise ToolError(
+            f"the open map {SESSION.path} has unsaved work ({', '.join(unsaved)}); map_save it "
+            "first, or pass discard_unsaved=true to drop it"
+        )
+
+
 #: An empty map: the worldspawn every map starts with, and nothing else.
 EMPTY_MAP = '{\n"classname" "worldspawn"\n}\n'
 
 
 @tool("map", "Create a new map", writes=True)
-def map_new(path: str, grid: int = 8) -> dict:
+def map_new(path: str, grid: int = 8, discard_unsaved: bool = False) -> dict:
     """Create an empty `.map` holding only a worldspawn, and open it.
 
     The start of a map built from nothing: then `solid_commit` for geometry, `entity_place`
     for point entities, `map_save` to write. An existing file is never overwritten — open it
-    with `map_open` instead. Missing parent folders are created.
+    with `map_open` instead. Missing parent folders are created. A generated-solid sidecar
+    left beside the path by an earlier map describes none of this one's brushes: it is not
+    adopted, and `map_save` replaces it.
 
     Args:
         path: where to create it, ending in `.map`. Relative paths resolve against the repo root.
         grid: authoring grid, as for `map_open`.
+        discard_unsaved: as for `map_open`.
     """
+    _refuse_unsaved(discard_unsaved)
     p = Path(path)
     if not p.is_absolute():
         p = repo_root() / p
@@ -119,7 +140,14 @@ def map_new(path: str, grid: int = 8) -> dict:
             f.write(EMPTY_MAP)
     except FileExistsError as e:
         raise ToolError(f"{p} already exists; map_new never overwrites") from e
-    result = map_open(str(p), grid=grid)
+    result = map_open(str(p), grid=grid, discard_unsaved=True)
+    sidecar = solidsmod.sidecar_path(p)
+    if SESSION.read_file(sidecar) is not None:
+        SESSION.stage_file(sidecar, solidsmod.encode({"solids": {}}))
+        SESSION.warnings.append(
+            f"{sidecar.name} beside the new map belongs to an earlier one; it is not adopted, "
+            "and map_save replaces it"
+        )
     result["created"] = True
     result["next"] = "solid_commit for geometry, entity_place for point entities, then map_save"
     return result
@@ -153,8 +181,9 @@ def map_save(
     `map_open` and it is the one enforced here. A difference introduced since then is your
     edit, not a kernel failure, and does not block the write.
 
-    **The map.** The write is compared against the file it is about to replace, and refused
-    if it destroys playable space — an interior floor sealed off, or a surface you can now
+    **The map.** The write is compared against the open map's file on disk (for a Save As,
+    the file it was opened from: the destination must not exist yet), and refused if it
+    destroys playable space — an interior floor sealed off, or a surface you can now
     stand on top of a clip volume. Both are silent in every other check: the map still
     compiles, still seals, still validates, and is unplayable. See `playable_space_diff` for
     the same report on its own.
@@ -273,6 +302,7 @@ def map_save(
         SESSION.baseline_files.update(changes)
     SESSION.pending_files.clear()
     SESSION.checkpoints.clear()
+    SESSION.saved_source = m.source()
     written = str(target)
     out: dict[str, Any] = {
         "written": True,

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server.mcpserver import MCPServer as _Server
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
@@ -85,10 +86,24 @@ def schema_without_titles(schema: Any) -> Any:
 
 
 class _CompactServer(_Server):
-    """The SDK server, sending tool results as compact JSON. See `compact_json`."""
+    """The SDK server, sending tool results as compact JSON, one tool call at a time.
+
+    The SDK runs each request in its own task and every sync tool on a worker thread
+    (`FuncMetadata.call_fn_with_arg_validation`: `anyio.to_thread.run_sync`), so two calls
+    from one client run at once. Every tool shares one `Session`: `map_open` swapping the map
+    while `map_save` reads its baseline, or two edits each staging a sidecar they read before
+    the other wrote, would lose work. Calls therefore queue on one lock. The cost: a long call
+    - a compile, an engine run - holds the others until it returns; the server itself still
+    answers pings and listings meanwhile.
+    """
+
+    _calls: anyio.Lock | None = None
 
     async def call_tool(self, name, arguments, context=None):
-        result = await super().call_tool(name, arguments, context)
+        if self._calls is None:
+            self._calls = anyio.Lock()
+        async with self._calls:
+            result = await super().call_tool(name, arguments, context)
         if isinstance(result, CallToolResult):
             result.content = [
                 TextContent(type="text", text=compact_json(c.text), annotations=c.annotations)
@@ -183,6 +198,16 @@ class Session:
     checkpoints: dict[str, tuple[str, dict[Path, bytes]]] = field(default_factory=dict)
     grids: dict[tuple, Any] = field(default_factory=dict)
     last_compile: dict | None = None
+    #: The map's source as last opened or saved, to tell an unsaved edit from a file the
+    #: kernel merely re-serializes differently.
+    saved_source: str | None = None
+
+    def unsaved(self) -> list[str]:
+        """What `map_save` has not written yet: the map's own edits and each staged file."""
+        if self.map is None:
+            return []
+        out = ["map edits"] if self.map.source() != self.saved_source else []
+        return out + [p.name for p in sorted(self.pending_files)]
 
     def read_file(self, path: Path) -> bytes | None:
         path = path.resolve()

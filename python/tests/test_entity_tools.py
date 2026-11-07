@@ -252,6 +252,31 @@ def test_setting_a_key_removes_the_later_duplicate_the_engine_would_read(pid, tm
     assert _keys(1) == [("classname", cn), ("angle", "270"), ("origin", "0 0 0")]
 
 
+def test_a_key_in_another_case_is_the_same_key_for_reading_setting_and_removing(pid, tmp_path):
+    """The game matches field names without regard to case and keeps the last pair
+    (g_spawn.c:747-749, 799-801); the rules read it so and the edit tools change it so."""
+    from nrc_mcp import rules
+
+    cn = _point(pid)["classname"]
+    path = tmp_path / "case.map"
+    path.write_text(
+        '{\n"classname" "worldspawn"\n}\n'
+        f'{{\n"classname" "{cn}"\n"target" "a"\n"origin" "0 0 0"\n"Target" "b"\n}}\n'
+    )
+    srv.map_open(str(path))
+    entity = srv.query_entities()["entities"][1]
+    assert rules._keys(entity).get("target") == "b", "the later pair, in any case, is read"
+    out = srv.entity_set_keys(1, {"target": "c"})
+    assert out["changed"][0]["previous"] == "b" and out["duplicates_removed"] == {"target": 1}
+    assert _keys(1) == [("classname", cn), ("target", "c"), ("origin", "0 0 0")]
+    srv.entity_set_keys(1, {"TARGET": "d"})
+    assert _keys(1) == [("classname", cn), ("target", "d"), ("origin", "0 0 0")]
+    srv.entity_remove_keys(1, ["Target"])
+    assert _keys(1) == [("classname", cn), ("origin", "0 0 0")]
+    with pytest.raises(ToolError, match="worldspawn"):
+        srv.entity_set_keys(1, {"ClassName": "worldspawn"})
+
+
 def test_a_refused_set_changes_nothing(pid, room):
     before = _keys(0)
     with pytest.raises(ToolError, match="no escapes"):

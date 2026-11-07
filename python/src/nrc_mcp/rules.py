@@ -129,16 +129,23 @@ class _Keys(dict):
 
 
 def _keys(entity: dict) -> _Keys:
-    """Entity keys as a mapping, first occurrence winning.
+    """Entity keys as a mapping, the last occurrence of a name winning.
 
     The kernel hands over ordered pairs because `.map` key order is meaningful and duplicates
-    occur; rule evaluation does not care about order, and taking the first duplicate matches
-    what the engine's own lookup does. Names compare case-insensitively: a shipped map that
-    writes `Track` for `track` loads fine, so a rule must read it too.
+    occur. The compiler copies every pair into the BSP in order, duplicates included
+    (q3map2 bspfile_abstract.cpp ParseEPair, UnparseEntities), and the game then applies
+    each pair in turn to the entity's fields, matching names without regard to case (ET:
+    Legacy game/g_spawn.c:799-801, G_ParseField :747-749): for every key in its field table -
+    classname, origin, targetname, target, scriptName, spawnflags, angle, model, track... -
+    the last pair is the one that sticks. That is what a rule must read: a shipped map that
+    writes `Track` for `track` loads fine. (A key only a spawn function looks up itself,
+    with G_SpawnString, matches its exact spelling and takes the first instead, g_spawn.c:
+    64-66 - `allowteams` at :815 is one. On a map with such a key written twice, this reads
+    the other copy.)
     """
     out = _Keys()
     for k, v in entity.get("keys") or []:
-        out.setdefault(str(k).lower(), v)
+        out[str(k).lower()] = v
     return out
 
 

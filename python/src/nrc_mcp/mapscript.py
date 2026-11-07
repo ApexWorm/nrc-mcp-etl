@@ -30,6 +30,7 @@ from pathlib import Path
 
 from . import profiles, script_lifetime
 from .rules import Finding, parse_spawnflags
+from .rules import _keys as _rule_keys
 
 
 class ScriptSyntaxError(ValueError):
@@ -346,11 +347,8 @@ def _read_block(
 
 
 def _keys(entity: dict) -> dict[str, str]:
-    """Entity keys by lowercased name: the engine matches key names case-insensitively."""
-    out: dict[str, str] = {}
-    for k, v in entity.get("keys") or []:
-        out.setdefault(str(k).lower(), v)
-    return out
+    """Entity keys by lowercased name, the last of a duplicate winning, as `rules._keys`."""
+    return dict(_rule_keys(entity))
 
 
 def _severity(asked: str, confidence: str) -> str:

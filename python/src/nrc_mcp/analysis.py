@@ -53,6 +53,7 @@ from typing import Any
 from . import profiles
 from .kernel import load_map, repo_root
 from .rules import Finding, parse_spawnflags
+from .rules import _keys as _rule_keys
 
 # ---------------------------------------------------------------------------
 # Caps and tunables
@@ -2375,10 +2376,8 @@ def path_distance(
 
 
 def _entity_keys(entity: dict) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for key, value in entity.get("keys") or []:
-        out.setdefault(str(key), str(value))
-    return out
+    """Keys as the game reads them: any case, the last of a duplicate (`rules._keys`)."""
+    return _rule_keys({"keys": [(k, str(v)) for k, v in entity.get("keys") or []]})
 
 
 @dataclass

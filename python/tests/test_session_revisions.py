@@ -249,3 +249,94 @@ def test_staged_compiler_keeps_artifacts_with_the_build_snapshot(tmp_path, monke
         assert report["artifacts"] == [str(source.with_suffix(".bsp"))]
         assert source.with_suffix(".bsp").read_bytes() == b"IBSP"
     assert seen[0] != seen[1], "each compile needs a fresh Windows staging directory"
+
+
+def test_opening_another_map_refuses_to_drop_unsaved_work(opened, tmp_path):
+    """map_open and map_new used to discard edits without a word (audit M-R5)."""
+    other = tmp_path / "other.map"
+    other.write_text('{\n"classname" "worldspawn"\n}\n')
+    srv.map_open(str(other))  # nothing unsaved yet: opens
+    srv.entity_set_keys(0, {"message": "unsaved"})
+    for call in (lambda: srv.map_open(str(opened)), lambda: srv.map_new(str(tmp_path / "n.map"))):
+        with pytest.raises(ToolError, match=r"unsaved work \(map edits\)"):
+            call()
+    assert not (tmp_path / "n.map").exists(), "refused before creating anything"
+    srv.map_save(check_playable_space=False)
+    srv.map_open(str(opened))
+    srv.script_set_event("gate", "trigger", ["wait 1"], ["x"])
+    with pytest.raises(ToolError, match="nrcroom.script"):
+        srv.map_open(str(other))
+    assert srv.map_open(str(other), discard_unsaved=True)["path"] == str(other)
+
+
+def test_a_new_map_does_not_adopt_a_sidecar_left_by_an_earlier_one(tmp_path):
+    """A stale <map>.solids.json would block labels and edits it knows nothing true about."""
+    path = tmp_path / "maps/fresh.map"
+    path.parent.mkdir(parents=True)
+    path.with_suffix(".solids.json").write_text(
+        json.dumps({"version": 1, "solids": {"room": {"ir": {"op": "box"}, "brushes": 6}}})
+    )
+    r = srv.map_new(str(path))
+    assert any("earlier one" in w for w in r["warnings"])
+    box = {"op": "box", "min": [0, 0, 0], "max": [64, 64, 64]}
+    srv.solid_commit(box, "room")  # the stale label does not block a new solid
+    srv.map_save(check_playable_space=False)
+    saved = json.loads(path.with_suffix(".solids.json").read_text())
+    assert set(saved["solids"]) == {"room"} and saved["solids"]["room"]["ir"] == box
+
+
+def test_an_edit_to_a_map_that_did_not_round_trip_still_gets_the_playable_space_check(
+    opened, monkeypatch
+):
+    """allow_non_identical used to switch the playable-space gate off as well (audit M-R3)."""
+    from nrc_mcp import playspace
+
+    srv.SESSION.opened_round_trip = {"identical": False, "first_difference": "line 1"}
+    srv.entity_set_keys(0, {"message": "edit"})
+    seen = []
+
+    def diff(baseline, after):
+        seen.append(baseline)
+        raise playspace.PlayspaceError("probe")
+
+    monkeypatch.setattr(playspace, "diff", diff)
+    r = srv.map_save(allow_non_identical=True)
+    assert seen == [opened] and "probe" in r["playable_space_note"]
+
+
+def test_tool_calls_queue_instead_of_sharing_the_session_at_once():
+    """The SDK runs sync tools on worker threads, concurrently; ours take turns."""
+    import threading
+    import time
+
+    import anyio
+    from mcp.server.mcpserver import MCPServer
+    from nrc_mcp.runtime import _CompactServer
+
+    def overlaps(server_class) -> bool:
+        server = server_class("probe")
+        state = {"in": 0, "most": 0, "threads": set()}
+        lock = threading.Lock()
+
+        @server.tool()
+        def slow() -> str:
+            with lock:
+                state["in"] += 1
+                state["most"] = max(state["most"], state["in"])
+                state["threads"].add(threading.get_ident())
+            time.sleep(0.2)
+            with lock:
+                state["in"] -= 1
+            return "ok"
+
+        async def main():
+            async with anyio.create_task_group() as tg:
+                for _ in range(3):
+                    tg.start_soon(server.call_tool, "slow", {})
+
+        anyio.run(main)
+        assert threading.get_ident() not in state["threads"], "sync tools run off the loop"
+        return state["most"] > 1
+
+    assert overlaps(MCPServer), "the SDK itself runs these at once; if not, drop the lock"
+    assert not overlaps(_CompactServer)

@@ -126,10 +126,11 @@ def solid_commit(
 ) -> dict:
     """Compile a Solid IR tree and add the brushes to the open map.
 
-    The brushes go to the first entity of `target_classname` (created if there is none), to a
-    fresh one with `new_entity` - needed for a second door, trigger or objective of a class -
-    or to entity `target_entity` by index. The result's `entity` says which; give it keys with
-    `entity_set_keys`.
+    The brushes go to the worldspawn by default. Any other `target_classname` - a door, a
+    trigger, an objective - makes a new entity of that class on every call, so a second door
+    is never merged into the first; to add brushes to an entity that already exists, pass its
+    index as `target_entity`. The result's `entity` says which (`created_entity` when it is
+    new); give it keys with `entity_set_keys`. `new_entity` is accepted and changes nothing.
 
     `textures` picks shaders per face direction and can make the brushes detail; `solid_help`
     lists its keys (`default`, `top`, `bottom`, `north`/`south`/`east`/`west`, `scale`,
@@ -330,8 +331,9 @@ def patch_commit(
     seal the map. Player collision depends on the shader's contents. The engine collides with
     a coarse polygon, not the drawn curve: each quarter-circle is one straight chord until its
     midpoint would sit 16 units or more off the curve (radius 45.3 and up), so a 24-radius pipe
-    collides as a 45-degree diamond. The movement analysis uses the same polygon. Nothing
-    reaches disk until `map_save`.
+    collides as a 45-degree diamond. The movement analysis uses the same polygon. The patch
+    joins the worldspawn, a new entity of any other `target_classname`, or the entity
+    `target_entity` names, as for `solid_commit`. Nothing reaches disk until `map_save`.
     """
     m = SESSION.require()
     k = _kernel()

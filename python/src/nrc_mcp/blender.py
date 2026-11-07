@@ -546,7 +546,9 @@ def model_place_keys(
 
 
 def _fmt(v: float) -> str:
-    return str(int(v)) if float(v).is_integer() else f"{v:g}"
+    # The shortest spelling that reads back as the same float, as entity_place writes keys;
+    # `:g` kept six significant figures, so 1234.5678 became 1234.57 and 1234567.5 1.23457e+06.
+    return str(int(v)) if float(v).is_integer() else repr(float(v))
 
 
 #: Normal families for the discrete convex hull. 6 is a box, 14 adds the corner diagonals,
